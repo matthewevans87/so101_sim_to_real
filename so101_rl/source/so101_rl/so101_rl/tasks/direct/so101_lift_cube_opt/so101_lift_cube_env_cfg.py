@@ -281,10 +281,10 @@ class So101LiftCubeCfg(DirectRLEnvCfg):
 
     # Camera feed augmentation
     enable_preshape_camera_image: bool = False
-    enable_gaussian_blur_rgb: bool = True
-    enable_cheap_webcam_effect: bool = True
-    enable_camera_brightness: bool = True
-    enable_camera_noise: bool = True
+    # enable_gaussian_blur_rgb: bool = True
+    # enable_cheap_webcam_effect: bool = True
+    # enable_camera_brightness: bool = True
+    # enable_camera_noise: bool = True
     enable_camera_contrast: bool = False
     camera_gaussian_noise_std: tuple[float, float] = (0.01, 0.02)  # 1-3% noise
     camera_brightness_range: tuple[float, float] = (0.85, 1.15)  # ±15%

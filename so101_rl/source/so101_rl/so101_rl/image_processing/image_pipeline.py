@@ -164,6 +164,28 @@ class GaussianBlurPipelineStep(ImagePipelineStep):
             groups=3,
         )
 
+class GaussianNoisePipelineStep(ImagePipelineStep):
+    def __init__(self, noise_std_range: tuple[float, float] = (0.01, 0.05), device: str = "cuda"):
+        super().__init__()
+        self.noise_std_range = noise_std_range
+        self.device = device
+
+    def process(self, images: torch.Tensor) -> torch.Tensor:
+        """Add Gaussian noise to simulate sensor noise."""
+        # Random noise std for this step
+        noise_std = (
+            torch.rand(1, device=self.device)
+            * (self.noise_std_range[1] - self.noise_std_range[0])
+            + self.noise_std_range[0]
+        )
+
+        if noise_std < 0.005:  # Skip if very low
+            return images
+
+        noise = torch.randn_like(images) * noise_std
+        return images + noise
+    
+
 class CheapWebcamEffectPipelineStep(ImagePipelineStep):
     def __init__(self, device: str = "cuda"):
         super().__init__()
@@ -190,6 +212,38 @@ class CheapWebcamEffectPipelineStep(ImagePipelineStep):
         )
 
         return upsampled
+    
+class CameraBrightnessPipelineStep(ImagePipelineStep):
+    def __init__(self, brightness_range: tuple[float, float] = (0.85, 1.15), device: str = "cuda"):
+        super().__init__()
+        self.brightness_range = brightness_range
+        self.device = device
+
+    def process(self, images: torch.Tensor) -> torch.Tensor:
+        """Randomly adjust brightness."""
+        brightness_factor = (
+            torch.rand(1, device=self.device)
+            * (self.brightness_range[1] - self.brightness_range[0])
+            + self.brightness_range[0]
+        )
+        return images * brightness_factor
+    
+class CameraContrastPipelineStep(ImagePipelineStep):
+    def __init__(self, contrast_range: tuple[float, float] = (0.8, 1.2), device: str = "cuda"):
+        super().__init__()
+        self.contrast_range = contrast_range
+        self.device = device
+
+    def process(self, images: torch.Tensor) -> torch.Tensor:
+        """Randomly adjust contrast."""
+        contrast_factor = (
+            torch.rand(1, device=self.device)
+            * (self.contrast_range[1] - self.contrast_range[0])
+            + self.contrast_range[0]
+        )
+        mean = images.mean(dim=[2, 3], keepdim=True)
+        return (images - mean) * contrast_factor + mean
+    
 
 class ImagePipeline:
     def __init__(self, steps: list[ImagePipelineStep]):

@@ -11,6 +11,7 @@ import os
 from so101_rl.configurations.cube import (
     CUBE_RESTING_HEIGHT,
 )
+from so101_rl.image_processing.image_pipeline import CameraBrightnessPipelineStep, CameraContrastPipelineStep, CheapWebcamEffectPipelineStep, GaussianBlurPipelineStep, GaussianNoisePipelineStep, ImagePipeline, JpegCompressionPipelineStep, MotionBlurPipelineStep
 from torch import tensor, zeros_like
 
 from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
@@ -25,10 +26,6 @@ from so101_rl.configurations.camera import (
     CAMERA_TRANSLATE_VEC,
 )
 from so101_rl.helpers.variations import (
-    apply_jpeg_compression,
-    apply_motion_blur,
-    cheap_webcam_effect,
-    gaussian_blur_rgb,
     # create_ground_materials,
     randomize_camera_pose,
     randomize_rigid_object_color,
@@ -193,6 +190,16 @@ class So101LiftCube(DirectRLEnv):
 
         self.step_metrics: dict[str, torch.Tensor] = None  # type: ignore
 
+        self.image_pipeline = ImagePipeline([
+            GaussianBlurPipelineStep(),
+            JpegCompressionPipelineStep(),
+            MotionBlurPipelineStep(),
+            CheapWebcamEffectPipelineStep(),
+            GaussianNoisePipelineStep(),
+            CameraBrightnessPipelineStep(),
+            CameraContrastPipelineStep(),
+        ])
+
     # Called by super class to setup the scene
     def _setup_scene(self):
 
@@ -306,67 +313,7 @@ class So101LiftCube(DirectRLEnv):
                 )
 
         # Apply domain randomization to camera feed
-
-        if self.cfg.enable_gaussian_blur_rgb:
-            images = gaussian_blur_rgb(images)
-
-        if self.cfg.enable_cheap_webcam_effect:
-            images = cheap_webcam_effect(images)
-
-        # Gaussian noise
-        if self.cfg.enable_camera_noise:
-            noise_std = (
-                torch.rand((1), device=self.device)
-                * (
-                    self.cfg.camera_gaussian_noise_std[1]
-                    - self.cfg.camera_gaussian_noise_std[0]
-                )
-                + self.cfg.camera_gaussian_noise_std[0]
-            )
-            noise = torch.randn_like(images) * noise_std
-            images = images + noise
-
-        # Brightness variation (per environment)
-        if self.cfg.enable_camera_brightness:
-            brightness = (
-                torch.rand((images.shape[0], 1, 1, 1), device=self.device)
-                * (
-                    self.cfg.camera_brightness_range[1]
-                    - self.cfg.camera_brightness_range[0]
-                )
-                + self.cfg.camera_brightness_range[0]
-            )
-            images = images * brightness
-
-        # Contrast variation (per environment)
-        if self.cfg.enable_camera_contrast:
-            contrast = (
-                torch.rand((images.shape[0], 1, 1, 1), device=self.device)
-                * (
-                    self.cfg.camera_contrast_range[1]
-                    - self.cfg.camera_contrast_range[0]
-                )
-                + self.cfg.camera_contrast_range[0]
-            )
-            mean = images.mean(dim=(2, 3), keepdim=True)
-            images = (images - mean) * contrast + mean
-
-        # Motion blur
-        if self.cfg.enable_motion_blur:
-            images = apply_motion_blur(
-                images=images,
-                motion_blur_strength_range=self.cfg.motion_blur_strength_range,
-                motion_blur_kernel_size=self.cfg.motion_blur_kernel_size,
-                device=self.device,
-            )
-
-        # JPEG compression artifacts
-        if self.cfg.enable_jpeg_compression:
-            images = apply_jpeg_compression(
-                images=images,
-                jpeg_quality_range=self.cfg.jpeg_quality_range,
-                device=self.device,
-            )
+        images = self.image_pipeline.process(images)
 
         # ImageNet normalization
         images = (images - self._img_mean) / self._img_std
