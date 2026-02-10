@@ -22,6 +22,23 @@ This project implements two key RL tasks:
 4. **Hardware**: CUDA-capable GPU with >16GB VRAM (tested on RTX 5090)
 5. **Physical Robot** (for deployment): SO-101 arm with calibrated wrist camera
 
+## Installation
+
+After installing Isaac Sim and Isaac Lab:
+
+1. **Install shared utilities** (required for both simulation and deployment):
+   ```bash
+   cd /path/to/so101_sim_to_real
+   pip install -e .
+   ```
+
+   This installs the `so101_utils` package which contains shared image processing utilities used by both simulation and real-world deployment code.
+
+2. **Verify installation**:
+   ```bash
+   python -c "from so101_utils.image_processing import ImagePipeline; print('Success')"
+   ```
+
 ## Usage
 
 The `scripts/run.sh` script handles the full pipeline:

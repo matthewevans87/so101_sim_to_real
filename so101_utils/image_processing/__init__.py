@@ -1,16 +1,11 @@
 """
-DEPRECATED: This module has been moved to so101_utils.image_processing
+Image Processing Utilities
 
-This file is kept for backward compatibility and re-exports from the new location.
-Please update your imports to use: from so101_utils.image_processing import ...
-
-To install so101_utils:
-    cd /path/to/so101_sim_to_real/so101_utils
-    pip install -e .
+Provides image augmentation and distortion pipeline for domain randomization
+and sim-to-real transfer.
 """
 
-# Re-export everything from the new location
-from so101_utils.image_processing import (
+from .image_pipeline import (
     ImagePipeline,
     ImagePipelineStep,
     JpegCompressionPipelineStep,
@@ -33,4 +28,3 @@ __all__ = [
     "CameraBrightnessPipelineStep",
     "CameraContrastPipelineStep",
 ]
-

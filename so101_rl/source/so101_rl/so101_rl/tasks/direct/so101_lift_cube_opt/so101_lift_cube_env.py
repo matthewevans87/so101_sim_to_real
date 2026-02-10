@@ -11,7 +11,16 @@ import os
 from so101_rl.configurations.cube import (
     CUBE_RESTING_HEIGHT,
 )
-from so101_rl.image_processing.image_pipeline import CameraBrightnessPipelineStep, CameraContrastPipelineStep, CheapWebcamEffectPipelineStep, GaussianBlurPipelineStep, GaussianNoisePipelineStep, ImagePipeline, JpegCompressionPipelineStep, MotionBlurPipelineStep
+from so101_utils.image_processing import (
+    CameraBrightnessPipelineStep,
+    CameraContrastPipelineStep,
+    CheapWebcamEffectPipelineStep,
+    GaussianBlurPipelineStep,
+    GaussianNoisePipelineStep,
+    ImagePipeline,
+    JpegCompressionPipelineStep,
+    MotionBlurPipelineStep,
+)
 from torch import tensor, zeros_like
 
 from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg

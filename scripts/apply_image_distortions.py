@@ -22,9 +22,19 @@ from pathlib import Path
 from datetime import datetime
 
 import torch
-import torch.nn.functional as F
 from PIL import Image
 import numpy as np
+
+from so101_utils.image_processing import (
+    ImagePipeline,
+    GaussianBlurPipelineStep,
+    CheapWebcamEffectPipelineStep,
+    CameraBrightnessPipelineStep,
+    GaussianNoisePipelineStep,
+    CameraContrastPipelineStep,
+    MotionBlurPipelineStep,
+    JpegCompressionPipelineStep,
+)
 
 
 # ============================================================================
@@ -50,202 +60,6 @@ JPEG_QUALITY_RANGE = (60, 70)
 CAMERA_GAUSSIAN_NOISE_STD = (0.01, 0.02)  # 1-3% noise
 CAMERA_BRIGHTNESS_RANGE = (0.85, 1.15)  # ±15%
 CAMERA_CONTRAST_RANGE = (0.8, 1.2)  # ±20%
-
-
-# ============================================================================
-# Image distortion functions
-# ============================================================================
-
-
-def gaussian_blur_rgb(
-    rgb: torch.Tensor,
-    kernel_size: int = 7,
-    sigma: float = 2.0,
-) -> torch.Tensor:
-    """Apply a channel-wise Gaussian blur to an (N, 3, H, W) tensor."""
-    device = rgb.device
-    # 1D Gaussian
-    x = torch.arange(kernel_size, device=device) - (kernel_size - 1) / 2.0
-    gauss_1d = torch.exp(-0.5 * (x / sigma) ** 2)
-    gauss_1d = gauss_1d / gauss_1d.sum()
-
-    # Outer product → 2D kernel
-    kernel_2d = gauss_1d[:, None] * gauss_1d[None, :]  # (K, K)
-    kernel_2d = kernel_2d.expand(3, 1, kernel_size, kernel_size)  # (C, 1, K, K)
-
-    # Depthwise convolution: one kernel per channel
-    return F.conv2d(
-        rgb,
-        kernel_2d,
-        padding=kernel_size // 2,
-        groups=3,
-    )
-
-
-def cheap_webcam_effect(rgb: torch.Tensor) -> torch.Tensor:
-    """
-    rgb: (N, 3, H, W) in [0,1]
-    Mimic a low-res sensor + resize.
-    """
-    N, C, H, W = rgb.shape
-
-    # pick a downscale factor (e.g., 0.4–0.7)
-    scale = 0.4 + 0.3 * torch.rand(1, device=rgb.device).item()
-    H_low = int(H * scale)
-    W_low = int(W * scale)
-
-    # Downsample (area or bilinear)
-    low_res = F.interpolate(rgb, size=(H_low, W_low), mode="area")
-
-    # Upsample back
-    upsampled = F.interpolate(
-        low_res, size=(H, W), mode="bilinear", align_corners=False
-    )
-
-    return upsampled
-
-
-def apply_brightness(
-    rgb: torch.Tensor, brightness_range: tuple[float, float]
-) -> torch.Tensor:
-    """Apply random brightness adjustment."""
-    brightness_factor = (
-        torch.rand(1, device=rgb.device) * (brightness_range[1] - brightness_range[0])
-        + brightness_range[0]
-    )
-    return torch.clamp(rgb * brightness_factor, 0.0, 1.0)
-
-
-def apply_noise(
-    rgb: torch.Tensor, noise_std_range: tuple[float, float]
-) -> torch.Tensor:
-    """Apply Gaussian noise."""
-    noise_std = (
-        torch.rand(1, device=rgb.device) * (noise_std_range[1] - noise_std_range[0])
-        + noise_std_range[0]
-    )
-    noise = torch.randn_like(rgb) * noise_std
-    return torch.clamp(rgb + noise, 0.0, 1.0)
-
-
-def apply_contrast(
-    rgb: torch.Tensor, contrast_range: tuple[float, float]
-) -> torch.Tensor:
-    """Apply random contrast adjustment."""
-    contrast_factor = (
-        torch.rand(1, device=rgb.device) * (contrast_range[1] - contrast_range[0])
-        + contrast_range[0]
-    )
-    # Contrast adjustment: (rgb - 0.5) * factor + 0.5
-    return torch.clamp((rgb - 0.5) * contrast_factor + 0.5, 0.0, 1.0)
-
-
-def apply_motion_blur(
-    images: torch.Tensor,
-    motion_blur_strength_range: tuple[float, float],
-    motion_blur_kernel_size: int,
-    device: str,
-) -> torch.Tensor:
-    """Apply directional motion blur to simulate camera motion."""
-    # Random blur strength for this step
-    blur_strength = (
-        torch.rand(1, device=device)
-        * (motion_blur_strength_range[1] - motion_blur_strength_range[0])
-        + motion_blur_strength_range[0]
-    )
-
-    if blur_strength < 0.01:  # Skip if very weak
-        return images
-
-    kernel_size = motion_blur_kernel_size
-
-    # Random blur direction: horizontal, vertical, or diagonal
-    blur_type = torch.randint(0, 4, (1,), device=device).item()
-
-    # Create blur kernel
-    kernel = torch.zeros((kernel_size, kernel_size), device=device)
-    if blur_type == 0:  # Horizontal
-        kernel[kernel_size // 2, :] = 1.0
-    elif blur_type == 1:  # Vertical
-        kernel[:, kernel_size // 2] = 1.0
-    elif blur_type == 2:  # Diagonal \
-        for i in range(kernel_size):
-            kernel[i, i] = 1.0
-    else:  # Diagonal /
-        for i in range(kernel_size):
-            kernel[i, kernel_size - 1 - i] = 1.0
-
-    kernel = kernel / kernel.sum()  # Normalize
-    kernel = kernel * blur_strength  # Scale by strength
-
-    # Add identity to preserve some sharpness
-    identity = torch.zeros_like(kernel)
-    identity[kernel_size // 2, kernel_size // 2] = 1.0 - blur_strength
-    kernel = kernel + identity
-
-    # Apply convolution to each channel
-    kernel = kernel.view(1, 1, kernel_size, kernel_size).repeat(3, 1, 1, 1)
-
-    # Pad images
-    padding = kernel_size // 2
-    images_padded = torch.nn.functional.pad(
-        images, (padding, padding, padding, padding), mode="replicate"
-    )
-
-    # Apply blur
-    blurred = torch.nn.functional.conv2d(images_padded, kernel, groups=3)
-
-    return blurred
-
-
-def apply_jpeg_compression(
-    images: torch.Tensor, jpeg_quality_range: tuple[int, int], device: str = "cpu"
-) -> torch.Tensor:
-    """Simulate JPEG compression artifacts."""
-    # Random quality for this step
-    quality = torch.randint(
-        jpeg_quality_range[0],
-        jpeg_quality_range[1] + 1,
-        (1,),
-        device=device,
-    ).item()
-
-    if quality >= 95:  # Skip if very high quality
-        return images
-
-    # Simplified JPEG simulation: add block artifacts
-    # Real JPEG is complex (DCT, quantization), so we approximate
-    block_size = 8
-
-    # Quantization strength based on quality (inverse relationship)
-    quant_strength = (100 - quality) / 100.0 * 0.1  # 0-0.1 range
-
-    if quant_strength < 0.01:
-        return images
-
-    # Split into blocks and add noise to simulate quantization
-    N, C, H, W = images.shape
-
-    # Add blockiness by downsampling and upsampling
-    scale_factor = max(1, int(4 * quant_strength))
-    if scale_factor > 1:
-        # Downsample
-        small = torch.nn.functional.interpolate(
-            images,
-            scale_factor=1.0 / scale_factor,
-            mode="bilinear",
-            align_corners=False,
-        )
-        # Upsample back
-        images = torch.nn.functional.interpolate(
-            small, size=(H, W), mode="bilinear", align_corners=False
-        )
-
-    # Add slight quantization noise in blocks
-    block_noise = torch.randn_like(images) * quant_strength * 0.05
-    images = images + block_noise
-
-    return images
 
 
 # ============================================================================
@@ -335,43 +149,72 @@ def main():
     img_tensor = load_image(input_path).to(args.device)
     print(f"Image shape: {img_tensor.shape}")
 
-    # Apply distortions
-    print("\nApplying distortions:")
+    # Build pipeline based on selected distortions
+    print("\nBuilding image processing pipeline:")
+    pipeline_steps = []
 
     if distortions["gaussian_blur"]:
         print("  - Gaussian blur")
-        img_tensor = gaussian_blur_rgb(img_tensor, kernel_size=7, sigma=2.0)
+        pipeline_steps.append(GaussianBlurPipelineStep(kernel_size=7, sigma=2.0))
 
     if distortions["webcam_effect"]:
         print("  - Cheap webcam effect")
-        img_tensor = cheap_webcam_effect(img_tensor)
+        pipeline_steps.append(CheapWebcamEffectPipelineStep(device=args.device))
 
     if distortions["brightness"]:
         print(f"  - Brightness (range: {CAMERA_BRIGHTNESS_RANGE})")
-        img_tensor = apply_brightness(img_tensor, CAMERA_BRIGHTNESS_RANGE)
+        pipeline_steps.append(
+            CameraBrightnessPipelineStep(
+                brightness_range=CAMERA_BRIGHTNESS_RANGE, device=args.device
+            )
+        )
 
     if distortions["noise"]:
         print(f"  - Gaussian noise (std range: {CAMERA_GAUSSIAN_NOISE_STD})")
-        img_tensor = apply_noise(img_tensor, CAMERA_GAUSSIAN_NOISE_STD)
+        pipeline_steps.append(
+            GaussianNoisePipelineStep(
+                noise_std_range=CAMERA_GAUSSIAN_NOISE_STD, device=args.device
+            )
+        )
 
     if distortions["contrast"]:
         print(f"  - Contrast (range: {CAMERA_CONTRAST_RANGE})")
-        img_tensor = apply_contrast(img_tensor, CAMERA_CONTRAST_RANGE)
+        pipeline_steps.append(
+            CameraContrastPipelineStep(
+                contrast_range=CAMERA_CONTRAST_RANGE, device=args.device
+            )
+        )
 
     if distortions["motion_blur"]:
         print(
             f"  - Motion blur (kernel size: {MOTION_BLUR_KERNEL_SIZE}, strength: {MOTION_BLUR_STRENGTH_RANGE})"
         )
-        img_tensor = apply_motion_blur(
-            img_tensor,
-            MOTION_BLUR_STRENGTH_RANGE,
-            MOTION_BLUR_KERNEL_SIZE,
-            args.device,
+        pipeline_steps.append(
+            MotionBlurPipelineStep(
+                motion_blur_strength_range=MOTION_BLUR_STRENGTH_RANGE,
+                motion_blur_kernel_size=MOTION_BLUR_KERNEL_SIZE,
+                device=args.device,
+            )
         )
 
     if distortions["jpeg_compression"]:
         print(f"  - JPEG compression (quality range: {JPEG_QUALITY_RANGE})")
-        img_tensor = apply_jpeg_compression(img_tensor, JPEG_QUALITY_RANGE, args.device)
+        pipeline_steps.append(
+            JpegCompressionPipelineStep(
+                quality_range=JPEG_QUALITY_RANGE, device=args.device
+            )
+        )
+
+    # Create and apply pipeline
+    if pipeline_steps:
+        print("\nApplying distortions...")
+        pipeline = ImagePipeline(pipeline_steps)
+        img_tensor = pipeline.process(img_tensor)
+        # Clamp to valid range
+        img_tensor = torch.clamp(img_tensor, 0.0, 1.0)
+    else:
+        print("\nNo distortions selected!")
+        sys.exit(1)
 
     # Generate output filename
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

@@ -307,7 +307,8 @@
         "/opt/isaac-sim/isaac-sim-5.1.0/exts/isaacsim.robot.manipulators.examples",
         "/opt/isaac-sim/isaac-sim-5.1.0/exts/isaacsim.test.collection",
         "/opt/isaac-sim/isaac-sim-5.1.0/exts/isaacsim.code_editor.vscode",
-        "/opt/isaac-sim/isaac-sim-5.1.0/exts/isaacsim.asset.importer.mjcf"
+        "/opt/isaac-sim/isaac-sim-5.1.0/exts/isaacsim.asset.importer.mjcf",
+        "./so101_rl/source/so101_rl"
     ],
     "github.copilot.chat.codeGeneration.useInstructionFiles": true
 }
