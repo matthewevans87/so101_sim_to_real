@@ -1,0 +1,55 @@
+from isaaclab.sensors import CameraCfg
+import isaaclab.sim as sim_utils
+
+# Camera calibration from actual hardware:
+# - Mount angle: 146.31° (bend on mount)
+# - Mount distance: 46.5mm from bottom of mount to center of camera lens
+# - Translation: (y=64mm up, z=-35mm back) in gripper frame
+# - Rotation: ~146.31° around Y-axis (quaternion verified from Isaac Sim calibration)
+# Reference quaternion from matching project (w,x,y,z): (0.0, 0.0, 0.29237170472273677, 0.9563047559630354)
+CAMERA_TRANSLATE_VEC = (0, 0.06400000303983688, -0.03500000014901161)
+CAMERA_ROTATION_QUAT_WXYZ = (0.0, 0.0, 0.29237170472273677, 0.9563047559630354)
+
+CAMERA_CFG = CameraCfg(
+    prim_path="{ENV_REGEX_NS}/Robot/gripper/gripper_camera",
+    # resnet18 input size is 224x224, but the pytorch implementation can accept lower inputs; here we use 96x96 for efficiency
+    # 30 Hz (rather than the simulations 120 Hz) is a realistic camera frame rate and saves on compute
+    update_period=(1.0 / 30.0),
+    height=128,
+    width=128,
+    # update_period=0,
+    # height=224,
+    # width=224,
+    data_types=["rgb"],
+    spawn=sim_utils.PinholeCameraCfg(
+        focal_length=6.12,  # 6.12mm from calibration
+        focus_distance=400.0,
+        horizontal_aperture=6.3,  # 6.3mm sensor width
+        clipping_range=(0.01, 10.0),
+    ),
+    offset=CameraCfg.OffsetCfg(
+        pos=CAMERA_TRANSLATE_VEC,  # Camera position relative to gripper link
+        rot=CAMERA_ROTATION_QUAT_WXYZ,  # w, x, y, z quaternion
+        convention="opengl",
+    ),
+)
+
+# Overhead camera looking down on the workspace
+OVERHEAD_CAMERA_CFG = CameraCfg(
+    prim_path="{ENV_REGEX_NS}/overhead_camera",
+    update_period=(1.0 / 30.0),
+    height=128,
+    width=128,
+    data_types=["rgb"],
+    spawn=sim_utils.PinholeCameraCfg(
+        focal_length=6.12,
+        focus_distance=600.0,
+        horizontal_aperture=6.3,
+        clipping_range=(0.01, 10.0),
+    ),
+    offset=CameraCfg.OffsetCfg(
+        pos=(0.0, 0.0, 1.0),  # 1m above env origin
+        rot=(0.7071068, 0.7071068, 0.0, 0.0),  # look-down: 90deg about X (w,x,y,z)
+        convention="opengl",
+    ),
+)

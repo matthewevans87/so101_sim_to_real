@@ -1,0 +1,1 @@
+sudo $ISAAC_SIM_PATH/python.sh -m pip install -e ./so101_rl/source/so101_rl/
