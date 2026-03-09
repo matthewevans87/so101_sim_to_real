@@ -104,8 +104,10 @@ simulation_app = app_launcher.app
 """Rest everything follows."""
 
 import gymnasium as gym
+import numpy as np
 import os
 import random
+import torch
 from datetime import datetime
 
 import omni
@@ -204,6 +206,14 @@ def main(
         args_cli.seed if args_cli.seed is not None else agent_cfg["seed"]
     )
     env_cfg.seed = agent_cfg["seed"]
+
+    # Seed all global RNGs for reproducibility
+    _seed = agent_cfg["seed"]
+    random.seed(_seed)
+    np.random.seed(_seed)
+    torch.manual_seed(_seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(_seed)
 
     # specify directory for logging experiments
     log_root_path = os.path.join(
