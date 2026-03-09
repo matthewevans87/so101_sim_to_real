@@ -21,6 +21,7 @@ EXTENSION_TOML_DATA = toml.load(
 INSTALL_REQUIRES = [
     # NOTE: Add dependencies
     "psutil",
+    "PyYAML>=6.0",
 ]
 
 # Installation operation

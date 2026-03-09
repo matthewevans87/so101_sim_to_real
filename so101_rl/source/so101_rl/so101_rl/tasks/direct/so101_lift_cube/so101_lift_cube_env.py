@@ -102,18 +102,18 @@ class So101LiftCube(DirectRLEnv):
         print("Actuated joint indices:", self._actuated_idxs)
 
         # Find indices of DOFs and EE link
-        self._dof_idx, _ = self.robot.find_joints(self.cfg.ACTIVE_JOINTS)
-        self._ee_body_idx, _ = self.robot.find_bodies(self.cfg.ee_link_name)
+        self._dof_idx, _ = self.robot.find_joints(self.cfg.joints.active)
+        self._ee_body_idx, _ = self.robot.find_bodies(self.cfg.gripper.ee_link_name)
         self._wrist_roll_idx = 4  # hardcoded for now
         self._grip_zone_offset = torch.tensor(
-            self.cfg.grip_zone_offset,
+            self.cfg.gripper.grip_zone_offset,
             device=self.device,
             dtype=torch.float32,
         ).view(1, 3)
 
         # tip offset as tensor
         self._tip_offset = torch.tensor(
-            self.cfg.gripper_tip_offset,
+            self.cfg.gripper.tip_offset,
             device=self.device,
             dtype=torch.float32,
         ).view(1, 3)
@@ -223,7 +223,7 @@ class So101LiftCube(DirectRLEnv):
         self.grip_zone_tf = FrameTransformer(self.cfg.grip_zone_transformer_cfg)
 
         self._distractors: list[RigidObject] = []
-        for i in range(self.cfg.NUM_DISTRACTORS):
+        for i in range(self.cfg.distractors.count):
             distractor = RigidObject(self.cfg.distractor_cfgs[i])
             self._distractors.append(distractor)
             self.scene.rigid_objects[f"distractor_{i}"] = distractor
@@ -263,7 +263,7 @@ class So101LiftCube(DirectRLEnv):
         # # Visualization markers for camera frame (x, y, z axes)
         # self.camera_frame_markers = define_camera_frame_markers()
 
-        if self.cfg.enable_gripper_arrow_markers:
+        if self.cfg.debug.enable_gripper_arrow_markers:
             self.gripper_arrow_markers = define_gripper_arrow_markers()
 
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
@@ -275,12 +275,12 @@ class So101LiftCube(DirectRLEnv):
         t = 0.5 * (actions + 1.0)  # (num_envs, num_actions)
         self.actions = actions.clone()
 
-        if self.cfg.enable_binary_gripper_action:
+        if self.cfg.behavior.binary_gripper_action.enabled:
             # make the target_pos of the gripper binary: fully open or set to the "grip" position
             t[:, self._ee_body_idx] = torch.where(
                 t[:, self._ee_body_idx] > 0.5,
-                torch.tensor(self.cfg.gripper_open_target, device=self.device),
-                torch.tensor(self.cfg.gripper_closed_target, device=self.device),
+                torch.tensor(self.cfg.gripper.open_target, device=self.device),
+                torch.tensor(self.cfg.gripper.closed_target, device=self.device),
             )
 
         target_pos = self._joint_lower + t * (self._joint_upper - self._joint_lower)
@@ -295,7 +295,7 @@ class So101LiftCube(DirectRLEnv):
         # self._visualize_camera_frame_markers()
 
         v_ee = self.step_metrics["v_grip_zone_to_cube_ee"]
-        if self.cfg.enable_gripper_arrow_markers:
+        if self.cfg.debug.enable_gripper_arrow_markers:
             if v_ee is not None:
                 self._visualize_gripper_arrow(v_ee)
 
@@ -312,7 +312,7 @@ class So101LiftCube(DirectRLEnv):
         # Transform tensor to (N, 3, H, W) and normalize to [0,1]
         images = camera_data.permute(0, 3, 1, 2).float() / 255.0  # (N, 3, H, W)
 
-        if self.cfg.enable_preshape_camera_image:
+        if self.cfg.domain_randomization.camera.feed.preshape_image.enabled:
             if images.shape[-2:] != (224, 224):
                 images = F.interpolate(
                     images,
@@ -331,8 +331,8 @@ class So101LiftCube(DirectRLEnv):
         images = torch.clamp(images, 0.0, 1.0)
 
         if (
-            self.cfg.save_images
-            and self.common_step_counter % self.cfg.save_image_interval == 0
+            self.cfg.debug.save_images
+            and self.common_step_counter % self.cfg.debug.save_image_interval == 0
         ):
             save_image(
                 images[0],  # (3, H, W)
@@ -390,35 +390,35 @@ class So101LiftCube(DirectRLEnv):
         # ********************
 
         # Minimize Distance between Cube and EE Grip Zone (STAGE 2: Approach)
-        if self.cfg.rew_distance_enabled:
+        if self.cfg.rewards.distance.enabled:
             distance = self.step_metrics["grip_zone_cube_distance"]
 
             rew_distance = (
                 # (~self.step_metrics["is_cube_gripped"]).float() *
                 distance
-                * self.cfg.rew_distance_scale
+                * self.cfg.rewards.distance.scale
             )
             self.extras["log"]["Episode_Reward/rew_distance"] = rew_distance.mean()
             rew_total += rew_distance
 
         # Grip Cube
-        if self.cfg.rew_grip_cube_enabled:
+        if self.cfg.rewards.grip_cube.enabled:
             rew_grip_cube = (
                 self.step_metrics["is_cube_in_grip_position"]
                 * (
                     self.step_metrics["gripper_cube_contact_force_magnitude"] > 0.0
                 )  # has contact
-                * self.cfg.rew_grip_cube_scale
+                * self.cfg.rewards.grip_cube.scale
             )
             self.extras["log"]["Episode_Reward/rew_grip_cube"] = rew_grip_cube.mean()
             rew_total += rew_grip_cube
 
         # Lift Cube
-        if self.cfg.rew_lift_cube_enabled:
+        if self.cfg.rewards.lift_cube.enabled:
             rew_lift_cube = (
                 # (self.step_metrics["gripper_cube_contact_force_magnitude"] > 0.0) *
                 self.step_metrics["cube_lift_fraction"]
-                * self.cfg.rew_lift_cube_scale
+                * self.cfg.rewards.lift_cube.scale
             )
 
             self.extras["log"]["Episode_Reward/rew_lift_cube"] = rew_lift_cube.mean()
@@ -429,20 +429,20 @@ class So101LiftCube(DirectRLEnv):
         # ********************
 
         # Find Cube
-        if self.cfg.rew_gripper_cube_alignment_enabled:
+        if self.cfg.rewards.gripper_cube_alignment.enabled:
             rew_gripper_cube_alignment = (
                 torch.maximum(
                     self.step_metrics["is_cube_gripped"],
                     self.step_metrics["gripper_cube_alignment"],
                 )
-                * self.cfg.rew_gripper_cube_alignment_scale
+                * self.cfg.rewards.gripper_cube_alignment.scale
             )
             self.extras["log"][
                 "Episode_Reward/rew_gripper_cube_alignment"
             ] = rew_gripper_cube_alignment.mean()
             rew_total += rew_gripper_cube_alignment
 
-        if self.cfg.rew_gripper_look_at_cube_enabled:
+        if self.cfg.rewards.gripper_look_at_cube.enabled:
             rew_gripper_look_at_cube = self._get_rew_gripper_look_at_cube(
                 self.gripper_tf.data.source_pos_w,
                 self.gripper_tf.data.target_pos_w[:, 0, :],
@@ -452,13 +452,13 @@ class So101LiftCube(DirectRLEnv):
             ] = rew_gripper_look_at_cube.mean()
             rew_total += rew_gripper_look_at_cube
 
-        if self.cfg.rew_camera_cube_alignment_enabled:
+        if self.cfg.rewards.camera_cube_alignment.enabled:
             rew_camera_cube_alignment = (
                 torch.maximum(
                     self.step_metrics["is_cube_gripped"],
                     self.step_metrics["camera_cube_alignment"],
                 )
-                * self.cfg.rew_camera_cube_alignment_scale
+                * self.cfg.rewards.camera_cube_alignment.scale
             )
             self.extras["log"][
                 "Episode_Reward/rew_camera_cube_alignment"
@@ -466,11 +466,11 @@ class So101LiftCube(DirectRLEnv):
             rew_total += rew_camera_cube_alignment
 
         # Encourage Gripping
-        if self.cfg.rew_close_gripper_enabled:
+        if self.cfg.rewards.close_gripper.enabled:
             gripper_pos = self.joint_pos[:, self._ee_body_idx]
-            gripper_close_error = torch.abs(gripper_pos - self.cfg.gripper_close_target)
+            gripper_close_error = torch.abs(gripper_pos - self.cfg.rewards.close_gripper.close_target)
             fraction_to_target = 1.0 - (
-                gripper_close_error / self.cfg.gripper_max_open
+                gripper_close_error / self.cfg.rewards.close_gripper.max_open
             ).squeeze(
                 -1
             )  # 0.0 to 1.0
@@ -478,15 +478,15 @@ class So101LiftCube(DirectRLEnv):
             rew_close_gripper = (
                 self.step_metrics["is_cube_in_grip_position"]
                 * fraction_to_target
-                * self.cfg.rew_close_gripper_scale
+                * self.cfg.rewards.close_gripper.scale
             )
             self.extras["log"][
                 "Episode_Reward/rew_close_gripper"
             ] = rew_close_gripper.mean()
             rew_total += rew_close_gripper
 
-        if self.cfg.rew_gripper_force_enabled:
-            gripper_force_target = self.cfg.gripper_force_target
+        if self.cfg.rewards.gripper_force.enabled:
+            gripper_force_target = self.cfg.rewards.gripper_force.force_target
             gripper_force = self.step_metrics["gripper_cube_contact_force_magnitude"]
             is_in_grip_position = self.step_metrics["is_cube_in_grip_position"]
 
@@ -495,7 +495,7 @@ class So101LiftCube(DirectRLEnv):
             # Positive reward: max at target, decays as error increases
             rew_gripper_force = (
                 torch.exp(-force_error / (gripper_force_target + 1e-6))
-                * self.cfg.rew_gripper_force_scale
+                * self.cfg.rewards.gripper_force.scale
             )
 
             # Mask reward to only be active when in grip position
@@ -508,7 +508,7 @@ class So101LiftCube(DirectRLEnv):
 
         # Vantage Reward: STAGE 1 only (finding cube from far away)
         # Only active when distance > threshold to avoid conflict with approach stage
-        if self.cfg.rew_vantage_enabled:
+        if self.cfg.rewards.vantage.enabled:
             cube_gripper_dist = torch.linalg.norm(
                 self.gripper_tf.data.source_pos_w
                 - self.gripper_tf.data.target_pos_w[:, 0, :],
@@ -516,7 +516,7 @@ class So101LiftCube(DirectRLEnv):
             )
 
             # Gate: only apply vantage reward when far from cube (Stage 1)
-            is_far = cube_gripper_dist > self.cfg.rew_vantage_far_distance_threshold
+            is_far = cube_gripper_dist > self.cfg.rewards.vantage.far_distance_threshold
 
             rew_vantage_raw = self._get_rew_vantage(
                 cube_gripper_dist,
@@ -534,14 +534,14 @@ class So101LiftCube(DirectRLEnv):
             self.extras["log"]["Episode_Reward/rew_vantage"] = rew_vantage.mean()
             rew_total += rew_vantage
 
-        if self.cfg.rew_keep_camera_upright_enabled:
+        if self.cfg.rewards.keep_camera_upright.enabled:
             gripper_roll_target_pos_rad = math.radians(-90.0)
             gripper_roll_error = torch.abs(
                 self.robot.data.joint_pos[:, self._wrist_roll_idx]
                 - gripper_roll_target_pos_rad
             )
             rew_keep_camera_upright = (
-                gripper_roll_error * self.cfg.rew_keep_camera_upright_scale
+                gripper_roll_error * self.cfg.rewards.keep_camera_upright.scale
             )
             self.extras["log"][
                 "Episode_Reward/rew_keep_camera_upright"
@@ -553,25 +553,25 @@ class So101LiftCube(DirectRLEnv):
         # ********************
 
         # Penalize large actions
-        if self.cfg.rew_action_enabled:
+        if self.cfg.rewards.action.enabled:
             if self.actions is None:
                 rew_action = torch.zeros((self.num_envs,), device=self.device)
             else:
-                rew_action = self.cfg.rew_action_scale * torch.sum(
+                rew_action = self.cfg.rewards.action.scale * torch.sum(
                     self.actions**2, dim=-1
                 )
             self.extras["log"]["Episode_Reward/rew_action"] = rew_action.mean()
             rew_total += rew_action
 
         # Penalize end-effector velocity
-        if self.cfg.rew_ee_linear_speed_enabled:
+        if self.cfg.rewards.ee_linear_speed.enabled:
             ee_lin_vel_w = self.robot.data.body_lin_vel_w[
                 :, self._ee_body_idx[0], :
             ]  # (num_envs, 3)
             ee_linear_speed = torch.linalg.norm(ee_lin_vel_w, dim=-1)  # (num_envs,)
-            v_safe = self.cfg.ee_safe_speed  # e.g. 0.2  (m/s)
+            v_safe = self.cfg.rewards.ee_linear_speed.safe_speed  # e.g. 0.2  (m/s)
             v_excess = torch.clamp(ee_linear_speed - v_safe, min=0.0)
-            rew_ee_linear_speed = self.cfg.rew_rew_ee_linear_speed_scale * (
+            rew_ee_linear_speed = self.cfg.rewards.ee_linear_speed.scale * (
                 v_excess + v_excess**2
             )
             self.extras["log"][
@@ -580,11 +580,11 @@ class So101LiftCube(DirectRLEnv):
             rew_total += rew_ee_linear_speed
 
         # Penalize joint velocity safety violations
-        if self.cfg.rew_joint_speed_enabled:
+        if self.cfg.rewards.joint_speed.enabled:
             joint_speed = torch.abs(
                 self.joint_vel[:, self._dof_idx]
             )  # (num_envs, num_joints)
-            rew_joint_speed = self.cfg.rew_joint_speed_scale * torch.sum(
+            rew_joint_speed = self.cfg.rewards.joint_speed.scale * torch.sum(
                 joint_speed**2, dim=-1
             )
             self.extras["log"][
@@ -593,13 +593,13 @@ class So101LiftCube(DirectRLEnv):
             rew_total += rew_joint_speed
 
         # Penalize gripper height safety violations
-        if self.cfg.rew_ee_height_safety_enabled:
+        if self.cfg.rewards.ee_height_safety.enabled:
             ee_pos_w = self.robot.data.body_pos_w[:, self._ee_body_idx[0], :]
             ee_height = ee_pos_w[:, 2]
-            unsafe = ee_height < self.cfg.safety_min_ee_height
+            unsafe = ee_height < self.cfg.safety.min_ee_height
             rew_ee_height_safety = torch.where(
                 unsafe,
-                torch.full_like(ee_height, self.cfg.rew_ee_height_safety_scale),
+                torch.full_like(ee_height, self.cfg.rewards.ee_height_safety.scale),
                 torch.zeros_like(ee_height),
             )
             self.extras["log"][
@@ -611,12 +611,12 @@ class So101LiftCube(DirectRLEnv):
         # Terminal Rewards
         # ********************
 
-        if self.cfg.rew_success_touch_terminal_enabled:
+        if self.cfg.rewards.success_touch_terminal.enabled:
             rew_success_touch_terminal = torch.where(
                 self.step_metrics["is_success_touch_terminal"] >= 1.0,
                 torch.full_like(
                     self.step_metrics["is_success_touch_terminal"],
-                    self.cfg.rew_success_touch_terminal_scale,
+                    self.cfg.rewards.success_touch_terminal.scale,
                 ),
                 torch.zeros_like(self.step_metrics["is_success_touch_terminal"]),
             )
@@ -625,12 +625,12 @@ class So101LiftCube(DirectRLEnv):
             ] = rew_success_touch_terminal.mean()
             rew_total += rew_success_touch_terminal
 
-        if self.cfg.rew_success_lift_fraction_terminal_enabled:
+        if self.cfg.rewards.success_lift_fraction_terminal.enabled:
             rew_success_lift_fraction_terminal = torch.where(
                 self.step_metrics["is_success_lift_fraction_terminal"] >= 1.0,
                 torch.full_like(
                     self.step_metrics["is_success_lift_fraction_terminal"],
-                    self.cfg.rew_success_lift_fraction_terminal_scale,
+                    self.cfg.rewards.success_lift_fraction_terminal.scale,
                 ),
                 torch.zeros_like(
                     self.step_metrics["is_success_lift_fraction_terminal"]
@@ -641,12 +641,12 @@ class So101LiftCube(DirectRLEnv):
             ] = rew_success_lift_fraction_terminal.float().mean()
             rew_total += rew_success_lift_fraction_terminal
 
-        if self.cfg.rew_success_point_at_cube_terminal_enabled:
+        if self.cfg.rewards.success_point_at_cube_terminal.enabled:
             rew_success_point_at_cube_terminal = torch.where(
                 self.step_metrics["is_success_point_at_cube_terminal"] >= 1.0,
                 torch.full_like(
                     self.step_metrics["is_success_point_at_cube_terminal"],
-                    self.cfg.rew_success_point_at_cube_terminal_scale,
+                    self.cfg.rewards.success_point_at_cube_terminal.scale,
                 ),
                 torch.zeros_like(
                     self.step_metrics["is_success_point_at_cube_terminal"]
@@ -657,11 +657,11 @@ class So101LiftCube(DirectRLEnv):
             ] = rew_success_point_at_cube_terminal.float().mean()
             rew_total += rew_success_point_at_cube_terminal
 
-        if self.cfg.rew_safety_touch_table_terminal_enabled:
+        if self.cfg.rewards.safety_touch_table_terminal.enabled:
             rew_safety_touch_table_terminal = torch.where(
                 self.step_metrics["is_table_touched"],
                 torch.tensor(
-                    self.cfg.rew_safety_touch_table_terminal_scale,
+                    self.cfg.rewards.safety_touch_table_terminal.scale,
                     device=self.device,
                     dtype=torch.float32,
                 ),
@@ -672,11 +672,11 @@ class So101LiftCube(DirectRLEnv):
             ] = rew_safety_touch_table_terminal.float().mean()
             rew_total += rew_safety_touch_table_terminal
 
-        if self.cfg.rew_safety_touch_table_enabled:
+        if self.cfg.rewards.safety_touch_table.enabled:
             rew_safety_touch_table = torch.where(
                 self.step_metrics["is_table_touched"],
                 torch.tensor(
-                    self.cfg.rew_safety_touch_table_scale,
+                    self.cfg.rewards.safety_touch_table.scale,
                     device=self.device,
                     dtype=torch.float32,
                 ),
@@ -711,21 +711,21 @@ class So101LiftCube(DirectRLEnv):
         time_out = self.episode_length_buf >= self.max_episode_length - 1
 
         terminal = zeros_like(self.episode_length_buf, dtype=torch.bool)
-        if self.cfg.rew_success_lift_fraction_terminal_enabled:
+        if self.cfg.rewards.success_lift_fraction_terminal.enabled:
             terminal = torch.logical_or(
                 terminal, self.step_metrics["is_success_lift_fraction_terminal"]
             )
 
-        if self.cfg.rew_success_point_at_cube_terminal_enabled:
+        if self.cfg.rewards.success_point_at_cube_terminal.enabled:
             terminal = torch.logical_or(
                 terminal, self.step_metrics["is_success_point_at_cube_terminal"]
             )
 
-        if self.cfg.rew_success_touch_terminal_enabled:
+        if self.cfg.rewards.success_touch_terminal.enabled:
             is_success_touch_terminal = self.step_metrics["is_success_touch_terminal"]
             terminal = torch.logical_or(terminal, is_success_touch_terminal)
 
-        if self.cfg.rew_safety_touch_table_terminal_enabled:
+        if self.cfg.rewards.safety_touch_table_terminal.enabled:
             is_table_touched_terminal = self.step_metrics["is_table_touched"]
             terminal = torch.logical_or(terminal, is_table_touched_terminal)
 
@@ -766,52 +766,52 @@ class So101LiftCube(DirectRLEnv):
         self.robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
 
         # Domain Randomization
-        if self.cfg.enable_cube_color_randomization:
+        if self.cfg.domain_randomization.cube.color_randomization_enabled:
             randomize_rigid_object_color(env_ids, object_name="Object")
 
-        if self.cfg.enable_cube_size_randomization:
+        if self.cfg.domain_randomization.cube.size_randomization_enabled:
             randomize_rigid_object_size(
                 env_ids,
                 object_name="Object",
-                size_range=self.cfg.cube_size_range,
+                size_range=self.cfg.domain_randomization.cube.size_range,
             )
 
-        if self.cfg.enable_randomize_cube_position:
+        if self.cfg.domain_randomization.cube.position_randomization.enabled:
             randomize_rigid_object_position_polar(
                 env_ids=env_ids,
                 scene=self.scene,
                 rigid_object=self.cube,
                 object_name="Object",
-                radius_range=self.cfg.cube_radius_range,
-                angle_range=self.cfg.cube_angle_range,
-                z_range=self.cfg.cube_z_range,
+                radius_range=self.cfg.domain_randomization.cube.position_randomization.radius_range,
+                angle_range=self.cfg.domain_randomization.cube.position_randomization.angle_range,
+                z_range=self.cfg.domain_randomization.cube.position_randomization.z_range,
                 device=self.device,
             )
 
-        if self.cfg.enable_camera_pose_randomization:
+        if self.cfg.domain_randomization.camera.pose.enabled:
             randomize_camera_pose(
                 env_ids,
-                self.cfg.camera_pos_noise_range,
-                self.cfg.camera_rot_noise_deg_range,
+                self.cfg.domain_randomization.camera.pose.position_noise_range,
+                self.cfg.domain_randomization.camera.pose.rotation_noise_deg_range,
             )
 
-        if 0 in env_ids and self.cfg.enable_lighting_randomization:
+        if 0 in env_ids and self.cfg.domain_randomization.lighting.enabled:
             randomize_lighting(
-                self.cfg.light_intensity_range, self.cfg.light_color_variation
+                self.cfg.domain_randomization.lighting.intensity_range, self.cfg.domain_randomization.lighting.color_variation
             )
 
         randomly_placed_lights(
             env_ids,
-            self.cfg.rand_light_height_range,
-            self.cfg.rand_light_intensity_range,
-            self.cfg.light_color_variation,
-            self.cfg.rand_light_specular_range,
+            self.cfg.domain_randomization.lighting.random_lights.height_range,
+            self.cfg.domain_randomization.lighting.random_lights.intensity_range,
+            self.cfg.domain_randomization.lighting.color_variation,
+            self.cfg.domain_randomization.lighting.random_lights.specular_range,
         )
 
-        if 0 in env_ids and self.cfg.enable_ground_randomization:
+        if 0 in env_ids and self.cfg.domain_randomization.ground.enabled:
             randomize_ground_material()
 
-        if self.cfg.enable_distractor_randomization:
+        if self.cfg.distractors.randomization.enabled:
             # Randomize each distractor object
             for i, distractor in enumerate(self._distractors):
                 distractor_name = f"distractor_{i}"
@@ -832,11 +832,11 @@ class So101LiftCube(DirectRLEnv):
                 randomize_rigid_object_color(env_ids, object_name=distractor_name)
 
                 # Randomize size
-                if self.cfg.enable_distractor_size_randomization:
+                if self.cfg.distractors.randomization.size_randomization_enabled:
                     randomize_rigid_object_size(
                         env_ids,
                         object_name=distractor_name + "/geometry/mesh",
-                        size_range=self.cfg.distractor_size_range,
+                        size_range=self.cfg.distractors.randomization.size_range,
                     )
 
                 # Randomize position
@@ -845,9 +845,9 @@ class So101LiftCube(DirectRLEnv):
                     scene=self.scene,
                     rigid_object=distractor,
                     object_name=distractor_name,
-                    x_range=self.cfg.distractor_x_range,
-                    y_range=self.cfg.distractor_y_range,
-                    z_range=self.cfg.distractor_z_range,
+                    x_range=self.cfg.distractors.position.x_range,
+                    y_range=self.cfg.distractors.position.y_range,
+                    z_range=self.cfg.distractors.position.z_range,
                     device=self.device,
                 )
 
@@ -1042,7 +1042,7 @@ class So101LiftCube(DirectRLEnv):
         # ********************
         cube_lift_fraction = (
             cube_height_w
-        ) / self.cfg.cube_height_success_terminate_threshold
+        ) / self.cfg.rewards.success_lift_fraction_terminal.height_threshold
         assert_tensor(cube_lift_fraction, (self.num_envs,), torch.float32)
         step_metrics["cube_lift_fraction"] = cube_lift_fraction
 
@@ -1062,7 +1062,7 @@ class So101LiftCube(DirectRLEnv):
 
         is_success_touch_terminal = (
             step_metrics["gripper_cube_contact_force_magnitude"]
-            > self.cfg.touch_force_threshold
+            > self.cfg.rewards.success_touch_terminal.touch_force_threshold
         )
         assert_tensor(is_success_touch_terminal, (self.num_envs,), torch.bool)
         step_metrics["is_success_touch_terminal"] = is_success_touch_terminal
@@ -1085,7 +1085,7 @@ class So101LiftCube(DirectRLEnv):
 
         is_cube_in_grip_position = (
             step_metrics["grip_zone_cube_distance"]
-            < self.cfg.rew_grip_cube_distance_threshold
+            < self.cfg.rewards.grip_cube.distance_threshold
         )
 
         assert_tensor(is_cube_in_grip_position, (self.num_envs,), torch.bool)
@@ -1097,7 +1097,7 @@ class So101LiftCube(DirectRLEnv):
 
         is_cube_gripped = is_cube_in_grip_position & (
             step_metrics["gripper_cube_contact_force_magnitude"]  # type: ignore
-            > self.cfg.touch_force_threshold
+            > self.cfg.rewards.success_touch_terminal.touch_force_threshold
         )
         is_cube_gripped = is_cube_gripped.bool()
         assert_tensor(is_cube_gripped, (self.num_envs,), torch.bool)
@@ -1155,7 +1155,7 @@ class So101LiftCube(DirectRLEnv):
 
         # Optional: push arrow out a bit from gripper
         offset = torch.tensor(
-            self.cfg.grip_zone_offset, dtype=torch.float32, device=device
+            self.cfg.gripper.grip_zone_offset, dtype=torch.float32, device=device
         )
         arrow_pos_w = gripper_pos_w + offset * v_world_norm  # (N, 3)
 
@@ -1187,21 +1187,21 @@ class So101LiftCube(DirectRLEnv):
 
         # Only apply vantage reward when far enough from cube
         # This prevents interference with primary rewards (distance, grip, lift)
-        far_enough = d > self.cfg.rew_vantage_min_distance_threshold
+        far_enough = d > self.cfg.rewards.vantage.min_distance_threshold
 
         # 1) Optimal distance reward (Gaussian centered at ideal viewing distance)
         ideal_dist = (
-            self.cfg.rew_vantage_ideal_distance
+            self.cfg.rewards.vantage.ideal_distance
         )  # meters - adjust based on your camera FOV
         dist_sigma = (
-            self.cfg.rew_vantage_ideal_distance_sigma
+            self.cfg.rewards.vantage.ideal_distance_sigma
         )  # how strict the distance requirement is
         dist_reward = torch.exp(-((d - ideal_dist) ** 2) / (2 * dist_sigma**2))
 
         # 2) Height reward: prefer being slightly above cube
         h_above_cube = ee_tip_pos[:, 2] - cube_pos[:, 2]
-        ideal_height = self.cfg.rew_vantage_ideal_height  # meters above cube (20cm)
-        height_sigma = self.cfg.rew_vantage_ideal_height_sigma
+        ideal_height = self.cfg.rewards.vantage.ideal_height  # meters above cube (20cm)
+        height_sigma = self.cfg.rewards.vantage.ideal_height_sigma
         # Penalize being below cube more heavily
         height_reward = torch.where(
             h_above_cube >= 0,
@@ -1224,10 +1224,10 @@ class So101LiftCube(DirectRLEnv):
         is_gripped = self.step_metrics["is_cube_gripped"]
         rew_vantage = torch.where(
             is_gripped,
-            self.cfg.rew_scale_vantage * torch.ones_like(d),
+            self.cfg.rewards.vantage.scale * torch.ones_like(d),
             torch.where(
                 far_enough,
-                self.cfg.rew_scale_vantage
+                self.cfg.rewards.vantage.scale
                 * dist_reward
                 * height_reward
                 * gripper_roll_error,
@@ -1310,7 +1310,7 @@ class So101LiftCube(DirectRLEnv):
         )
 
         # Scale: up to for perfectly looking at cube
-        rew_lookat = self.cfg.rew_gripper_look_at_cube_scale * lookat_factor
+        rew_lookat = self.cfg.rewards.gripper_look_at_cube.scale * lookat_factor
 
         return rew_lookat
 

@@ -22,6 +22,8 @@ VIDEO_LENGTH=1000
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TASK_ROOT="${PROJECT_ROOT}/so101_rl"
+ENV_CONFIG_PATH="${PROJECT_ROOT}/configs/baseline.yaml"
+STAGED_ENV_CONFIG_PATH=""
 # CUSTOM_OUTPUT_DIR=""
 # OUTPUT_DIR="${PROJECT_ROOT}/outputs/output_${TIMESTAMP}"
 # LOGS_DIR="${OUTPUT_DIR}/logs"
@@ -128,7 +130,12 @@ resolve_x11_environment() {
 
 get_gui_env_vars() {
     local workspace_path_value="$1"
+    local env_config_path_value="$2"
     local env_vars="ISAAC_LAB_WORKSPACE_PATH=${workspace_path_value}"
+
+    if [ -n "${env_config_path_value}" ]; then
+        env_vars="${env_vars} SO101_ENV_CONFIG=${env_config_path_value}"
+    fi
 
     resolve_x11_environment
 
@@ -141,6 +148,36 @@ get_gui_env_vars() {
     fi
 
     echo "${env_vars}"
+}
+
+stage_env_config() {
+    local source_config="$ENV_CONFIG_PATH"
+
+    if [ -z "$source_config" ]; then
+        print_error "Environment config path is empty"
+        exit 1
+    fi
+
+    if [[ "$source_config" != /* ]]; then
+        source_config="${PROJECT_ROOT}/${source_config}"
+    fi
+
+    source_config="$(realpath "$source_config")"
+
+    if [ ! -f "$source_config" ]; then
+        print_error "Environment config file not found: $source_config"
+        exit 1
+    fi
+
+    local config_dest_dir="$ISAAC_LAB_PATH/workspace/${TASK}/configs"
+    local config_file_name
+    config_file_name="$(basename "$source_config")"
+    STAGED_ENV_CONFIG_PATH="${config_dest_dir}/${config_file_name}"
+
+    mkdir -p "$config_dest_dir"
+    cp "$source_config" "$STAGED_ENV_CONFIG_PATH"
+
+    print_success "Environment config staged: ${STAGED_ENV_CONFIG_PATH}"
 }
 
 doctor_display() {
@@ -240,7 +277,7 @@ train_model() {
 
     local WORKSPACE_PATH_VALUE="$ISAAC_LAB_PATH/workspace/${TASK}"
     local ENV_VARS
-    ENV_VARS="$(get_gui_env_vars "${WORKSPACE_PATH_VALUE}")"
+    ENV_VARS="$(get_gui_env_vars "${WORKSPACE_PATH_VALUE}" "${STAGED_ENV_CONFIG_PATH}")"
 
     if [ -n "${DISPLAY:-}" ]; then
         print_info "Using DISPLAY=${DISPLAY}"
@@ -296,7 +333,7 @@ play() {
     
     local WORKSPACE_PATH_VALUE="$ISAAC_LAB_PATH/workspace/${TASK}"
     local ENV_VARS
-    ENV_VARS="$(get_gui_env_vars "${WORKSPACE_PATH_VALUE}")"
+    ENV_VARS="$(get_gui_env_vars "${WORKSPACE_PATH_VALUE}" "${STAGED_ENV_CONFIG_PATH}")"
 
     if [ -n "${DISPLAY:-}" ]; then
         print_info "Using DISPLAY=${DISPLAY}"
@@ -346,7 +383,7 @@ export_model() {
     
     local WORKSPACE_PATH_VALUE="$ISAAC_LAB_PATH/workspace/${TASK}"
     local ENV_VARS
-    ENV_VARS="$(get_gui_env_vars "${WORKSPACE_PATH_VALUE}")"
+    ENV_VARS="$(get_gui_env_vars "${WORKSPACE_PATH_VALUE}" "${STAGED_ENV_CONFIG_PATH}")"
 
     if [ -n "${DISPLAY:-}" ]; then
         print_info "Using DISPLAY=${DISPLAY}"
@@ -384,6 +421,7 @@ Commands:
 
 Options:
     --task TASK              Set task name (default: ${TASK})
+    --env-config PATH        YAML file for So101-LiftCube env parameters (default: ${ENV_CONFIG_PATH})
     --num-envs NUM           Set number of environments (default: ${NUM_ENVS})
     --max-iterations NUM     Set max training iterations
     --checkpoint PATH        Path to checkpoint file (required for export; used by play)
@@ -403,6 +441,7 @@ Examples:
     $0 doctor
     $0 all --task ${TASK} --num-envs 8192 --max-iterations 10000
     $0 train --task ${TASK}
+    $0 train --task So101-LiftCube-v0 --env-config configs/baseline.yaml
     $0 export --task ${TASK} --checkpoint logs/skrl/so101_rl/<run>/checkpoints/checkpoint_10000.pt
     $0 play --task ${TASK} --checkpoint logs/skrl/so101_rl/<run>/checkpoints/checkpoint_10000.pt --video --video-length 1200
     $0 train --task ${TASK} --display 0
@@ -418,6 +457,10 @@ while [[ $# -gt 0 ]]; do
     case $1 in
         --task)
             TASK="$2"
+            shift 2
+            ;;
+        --env-config)
+            ENV_CONFIG_PATH="$2"
             shift 2
             ;;
         --num-envs)
@@ -480,6 +523,7 @@ main() {
             exit 0
             ;;
         install)
+            stage_env_config
             install_task
             exit 0
             ;;
@@ -489,24 +533,28 @@ main() {
             ;;
         export)
             stage_assets
+            stage_env_config
             install_task
             check_gpu
             export_model
             ;;
         train)
             stage_assets
+            stage_env_config
             install_task
             check_gpu
             train_model
             ;;
         play)
             stage_assets
+            stage_env_config
             install_task
             check_gpu
             play
             ;;
         all)
             stage_assets
+            stage_env_config
             install_task
             check_gpu
             train_model
