@@ -46,6 +46,10 @@ print_info() {
     echo -e "${YELLOW}ℹ $1${NC}"
 }
 
+print_warn() {
+    echo -e "${YELLOW}! $1${NC}"
+}
+
 check_gpu() {
     if ! command -v nvidia-smi &> /dev/null; then
         print_error "nvidia-smi not found. Please install NVIDIA drivers."
@@ -59,6 +63,131 @@ check_gpu() {
     
     print_success "GPU detected:"
     nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader
+}
+
+discover_x11_from_processes() {
+    local found=1
+    local pid
+    local env_dump
+    local proc_name
+    local discovered_display=""
+    local discovered_xauthority=""
+
+    # Prefer user-session processes first. This covers common X11 and Wayland desktops.
+    while IFS= read -r pid; do
+        if [ ! -r "/proc/${pid}/environ" ]; then
+            continue
+        fi
+
+        env_dump=$(tr '\0' '\n' < "/proc/${pid}/environ")
+        proc_name=$(ps -p "${pid}" -o comm= 2>/dev/null || true)
+
+        discovered_display=$(echo "${env_dump}" | awk -F= '/^DISPLAY=/{print $2; exit}')
+        discovered_xauthority=$(echo "${env_dump}" | awk -F= '/^XAUTHORITY=/{print $2; exit}')
+
+        if [ -n "${discovered_display}" ] || [ -n "${discovered_xauthority}" ]; then
+            print_info "Candidate GUI process: ${proc_name:-unknown} (pid ${pid})"
+            [ -n "${discovered_display}" ] && echo "DISPLAY=${discovered_display}"
+            [ -n "${discovered_xauthority}" ] && echo "XAUTHORITY=${discovered_xauthority}"
+
+            if [ -n "${discovered_display}" ] && [ -z "${DISPLAY:-}" ]; then
+                export DISPLAY="${discovered_display}"
+            fi
+            if [ -n "${discovered_xauthority}" ] && [ -z "${XAUTHORITY:-}" ]; then
+                export XAUTHORITY="${discovered_xauthority}"
+            fi
+
+            found=0
+            break
+        fi
+    done < <(pgrep -u "$USER" -f 'gnome-shell|plasmashell|xfce4-session|Xorg|Xwayland' 2>/dev/null || true)
+
+    return "${found}"
+}
+
+resolve_x11_environment() {
+    # If user provided --display, prefer it.
+    if [ -n "${X_SOCK:-}" ]; then
+        export DISPLAY=":${X_SOCK}"
+    fi
+
+    # If DISPLAY/XAUTHORITY are not explicitly set, try discovering from desktop processes.
+    if [ -z "${DISPLAY:-}" ] || [ -z "${XAUTHORITY:-}" ]; then
+        discover_x11_from_processes || true
+    fi
+
+    # Last-resort fallback for XAUTHORITY if still unset.
+    if [ -z "${XAUTHORITY:-}" ]; then
+        if [ -f "${HOME}/.Xauthority" ]; then
+            export XAUTHORITY="${HOME}/.Xauthority"
+        elif [ -f "/home/${USER}/.Xauthority" ]; then
+            export XAUTHORITY="/home/${USER}/.Xauthority"
+        fi
+    fi
+}
+
+get_gui_env_vars() {
+    local workspace_path_value="$1"
+    local env_vars="ISAAC_LAB_WORKSPACE_PATH=${workspace_path_value}"
+
+    resolve_x11_environment
+
+    if [ -n "${DISPLAY:-}" ]; then
+        env_vars="${env_vars} DISPLAY=${DISPLAY}"
+    fi
+
+    if [ -n "${XAUTHORITY:-}" ]; then
+        env_vars="${env_vars} XAUTHORITY=${XAUTHORITY}"
+    fi
+
+    echo "${env_vars}"
+}
+
+doctor_display() {
+    print_header "X11 / Display Doctor"
+
+    print_info "Current shell values"
+    echo "USER=${USER}"
+    echo "DISPLAY=${DISPLAY:-<unset>}"
+    echo "XAUTHORITY=${XAUTHORITY:-<unset>}"
+    echo "X_SOCK=${X_SOCK:-<unset>}"
+
+    if [ -n "${XAUTHORITY:-}" ]; then
+        if [ -f "${XAUTHORITY}" ]; then
+            print_success "XAUTHORITY file exists: ${XAUTHORITY}"
+        else
+            print_warn "XAUTHORITY is set but file does not exist: ${XAUTHORITY}"
+        fi
+    fi
+
+    print_info "Attempting discovery from active desktop processes"
+    discover_x11_from_processes || print_warn "No GUI process with DISPLAY/XAUTHORITY env vars found"
+
+    resolve_x11_environment
+
+    print_info "Resolved values"
+    echo "DISPLAY=${DISPLAY:-<unset>}"
+    echo "XAUTHORITY=${XAUTHORITY:-<unset>}"
+
+    if [ -n "${DISPLAY:-}" ]; then
+        local sock="${DISPLAY#:}"
+        sock="${sock%%.*}"
+        print_info "Suggested command flags"
+        echo "./scripts/run.sh train --display ${sock}"
+    fi
+
+    if [ -n "${DISPLAY:-}" ]; then
+        print_info "Testing X11 cookie visibility via xauth"
+        if command -v xauth >/dev/null 2>&1; then
+            if xauth -f "${XAUTHORITY:-${HOME}/.Xauthority}" list "${DISPLAY}" >/dev/null 2>&1; then
+                print_success "xauth can read cookie for ${DISPLAY}"
+            else
+                print_warn "xauth could not confirm cookie for ${DISPLAY}"
+            fi
+        else
+            print_warn "xauth command not found; skipping cookie check"
+        fi
+    fi
 }
 
 # setup_directories() {
@@ -110,12 +239,18 @@ train_model() {
     
 
     local WORKSPACE_PATH_VALUE="$ISAAC_LAB_PATH/workspace/${TASK}"
-    local ENV_VARS="ISAAC_LAB_WORKSPACE_PATH=$WORKSPACE_PATH_VALUE"
-    
-    if [ -n "${X_SOCK}" ]; then
-        print_info "Setting DISPLAY to :${X_SOCK} for GUI applications"
-        ENV_VARS="$ENV_VARS DISPLAY=:${X_SOCK}"
-        ENV_VARS="$ENV_VARS XAUTHORITY=${XAUTHORITY:-/home/${USER}/.Xauthority}"
+    local ENV_VARS
+    ENV_VARS="$(get_gui_env_vars "${WORKSPACE_PATH_VALUE}")"
+
+    if [ -n "${DISPLAY:-}" ]; then
+        print_info "Using DISPLAY=${DISPLAY}"
+    else
+        print_warn "DISPLAY is not set. GUI windows may fail to open."
+    fi
+    if [ -n "${XAUTHORITY:-}" ]; then
+        print_info "Using XAUTHORITY=${XAUTHORITY}"
+    else
+        print_warn "XAUTHORITY is not set. X11 auth may fail over SSH."
     fi
     
     /bin/bash -c "$ENV_VARS /bin/bash ${TRAIN_COMMAND}"
@@ -160,12 +295,18 @@ play() {
     print_info "Executing play command: ${PLAY_COMMAND}"
     
     local WORKSPACE_PATH_VALUE="$ISAAC_LAB_PATH/workspace/${TASK}"
-    local ENV_VARS="ISAAC_LAB_WORKSPACE_PATH=$WORKSPACE_PATH_VALUE"
-    
-    if [ -n "${X_SOCK}" ]; then
-        print_info "Setting DISPLAY to :${X_SOCK} for GUI applications"
-        ENV_VARS="$ENV_VARS DISPLAY=:${X_SOCK}"
-        ENV_VARS="$ENV_VARS XAUTHORITY=${XAUTHORITY:-/home/${USER}/.Xauthority}"
+    local ENV_VARS
+    ENV_VARS="$(get_gui_env_vars "${WORKSPACE_PATH_VALUE}")"
+
+    if [ -n "${DISPLAY:-}" ]; then
+        print_info "Using DISPLAY=${DISPLAY}"
+    else
+        print_warn "DISPLAY is not set. GUI windows may fail to open."
+    fi
+    if [ -n "${XAUTHORITY:-}" ]; then
+        print_info "Using XAUTHORITY=${XAUTHORITY}"
+    else
+        print_warn "XAUTHORITY is not set. X11 auth may fail over SSH."
     fi
     
     /bin/bash -c "$ENV_VARS /bin/bash ${PLAY_COMMAND}"
@@ -204,12 +345,18 @@ export_model() {
     print_info "Executing export command: ${EXPORT_COMMAND}"
     
     local WORKSPACE_PATH_VALUE="$ISAAC_LAB_PATH/workspace/${TASK}"
-    local ENV_VARS="ISAAC_LAB_WORKSPACE_PATH=$WORKSPACE_PATH_VALUE"
-    
-    if [ -n "${X_SOCK}" ]; then
-        print_info "Setting DISPLAY to :${X_SOCK} for GUI applications"
-        ENV_VARS="$ENV_VARS DISPLAY=:${X_SOCK}"
-        ENV_VARS="$ENV_VARS XAUTHORITY=${XAUTHORITY:-/home/${USER}/.Xauthority}"
+    local ENV_VARS
+    ENV_VARS="$(get_gui_env_vars "${WORKSPACE_PATH_VALUE}")"
+
+    if [ -n "${DISPLAY:-}" ]; then
+        print_info "Using DISPLAY=${DISPLAY}"
+    else
+        print_warn "DISPLAY is not set. GUI windows may fail to open."
+    fi
+    if [ -n "${XAUTHORITY:-}" ]; then
+        print_info "Using XAUTHORITY=${XAUTHORITY}"
+    else
+        print_warn "XAUTHORITY is not set. X11 auth may fail over SSH."
     fi
     
     /bin/bash -c "$ENV_VARS /bin/bash ${EXPORT_COMMAND}"
@@ -227,38 +374,42 @@ show_usage() {
 Usage: $0 [OPTIONS] COMMAND
 
 Commands:
-    all             Build images, train model, play and record (full pipeline)
-    install         Install the specified task into Isaac Sim
-    train           Train the model only
-    export          Export the trained model
-    play            Play trained model and record video
+    all             Run full pipeline: stage assets, install task, check GPU, train, export, play
+    install         Install the specified task package into Isaac Lab
+    train           Stage assets, install task, check GPU, then train
+    export          Stage assets, install task, check GPU, then export model from checkpoint
+    play            Stage assets, install task, check GPU, then run policy playback
+    doctor          Print detected DISPLAY / XAUTHORITY guidance for remote SSH use
     help            Show this help message
 
 Options:
     --task TASK              Set task name (default: ${TASK})
     --num-envs NUM           Set number of environments (default: ${NUM_ENVS})
     --max-iterations NUM     Set max training iterations
-    --checkpoint PATH        Path to checkpoint file for play command (auto-detects if not specified)
-    --output-dir PATH        Custom output directory path (default: outputs/output_<timestamp>)
+    --checkpoint PATH        Path to checkpoint file (required for export; used by play)
+    --output-dir PATH        Reserved for custom output directory (currently not used)
     --video-length NUM       Length of recorded video in frames (default: ${VIDEO_LENGTH})
+    --video                  Enable video recording during play
     --headless               Run in headless mode (no GUI)
     --enable-cameras         Enable cameras in the simulation
+    --display NUM            Set X display socket number (sets DISPLAY=:NUM for GUI apps)
 
 Environment Variables:
     ISAAC_SIM_PATH           Path to local Isaac Sim installation (required)
     ISAAC_LAB_PATH           Path to local Isaac Lab installation (required)
+    XAUTHORITY               Path to Xauthority file for GUI forwarding
 
 Examples:
+    $0 doctor
     $0 all --task ${TASK} --num-envs 8192 --max-iterations 10000
     $0 train --task ${TASK}
-    $0 play --task ${TASK} --checkpoint outputs/output_20240101_120000/checkpoints/checkpoint_10000.pth
-Output:
-    All outputs (logs, models, videos) are saved to:
-    ${PROJECT_ROOT}/outputs/output_<timestamp>/
-    (or custom directory if --output-dir is specified)
-    
-    The play command will auto-detect the most recent training session
-    or you can specify a checkpoint with --checkpoint
+    $0 export --task ${TASK} --checkpoint logs/skrl/so101_rl/<run>/checkpoints/checkpoint_10000.pt
+    $0 play --task ${TASK} --checkpoint logs/skrl/so101_rl/<run>/checkpoints/checkpoint_10000.pt --video --video-length 1200
+    $0 train --task ${TASK} --display 0
+
+Notes:
+    The script does not currently auto-detect checkpoints.
+    --output-dir is parsed but not used by the current pipeline.
 EOF
 }
 
@@ -305,7 +456,7 @@ while [[ $# -gt 0 ]]; do
             X_SOCK="$2"
             shift 2
             ;;
-        all|train|export|play|install|help)
+        all|train|export|play|install|doctor|help)
             COMMAND="$1"
             shift
             ;;
@@ -330,6 +481,10 @@ main() {
             ;;
         install)
             install_task
+            exit 0
+            ;;
+        doctor)
+            doctor_display
             exit 0
             ;;
         export)
