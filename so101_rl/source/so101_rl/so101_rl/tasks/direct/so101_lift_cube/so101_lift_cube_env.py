@@ -27,8 +27,8 @@ from so101_utils.image_processing import (
 )
 from torch import tensor, zeros_like
 
-from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
-from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
+from so101_rl.helpers.visual_markers import define_gripper_arrow_markers
+from so101_rl.helpers.utils import assert_tensor, set_material
 
 from torchvision.utils import save_image
 from so101_rl.configurations.camera import (
@@ -1314,89 +1314,3 @@ class So101LiftCube(DirectRLEnv):
 
         return tip_pos
 
-
-def define_gripper_arrow_markers() -> VisualizationMarkers:
-    """Define a single arrow marker prototype, used for gripper->cube visualization."""
-    marker_cfg = VisualizationMarkersCfg(
-        prim_path="/Visuals/gripperMarkers",
-        markers={
-            "gripper_to_cube": sim_utils.UsdFileCfg(
-                usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/UIElements/arrow_x.usd",
-                # tweak scale to taste
-                scale=(0.05, 0.05, 0.10),
-                visual_material=sim_utils.PreviewSurfaceCfg(
-                    diffuse_color=(1.0, 0.2, 0.0),  # orange-ish
-                ),
-            ),
-        },
-    )
-    return VisualizationMarkers(cfg=marker_cfg)
-
-
-import omni.usd  # type: ignore
-import omni.kit.commands  # type: ignore
-from pxr import UsdShade, UsdGeom, Gf  # type: ignore
-
-VINYL_MDL_URL = (
-    "https://omniverse-content-production.s3-us-west-2.amazonaws.com/"
-    "Assets/Isaac/5.1/Isaac/Materials/Base/Plastics/Vinyl.mdl"
-)
-
-VINYL_MATERIAL_PATH = "/World/Looks/VinylMaterial"
-
-
-def set_material(prim_path):
-    # Get the current stage
-    stage = omni.usd.get_context().get_stage()
-
-    # Make sure we have a /World/Looks scope to hold materials
-    if not stage.GetPrimAtPath("/World/Looks"):
-        omni.kit.commands.execute(
-            "CreatePrim",
-            prim_path="/World/Looks",
-            prim_type="Scope",
-            select_new_prim=False,
-        )
-
-    # Create the MDL material prim if it doesn't exist yet
-    if not stage.GetPrimAtPath(VINYL_MATERIAL_PATH):
-        omni.kit.commands.execute(
-            "CreateMdlMaterialPrim",
-            mtl_url=VINYL_MDL_URL,
-            mtl_name="Vinyl",  # display name; not super critical
-            mtl_path=VINYL_MATERIAL_PATH,
-            select_new_prim=False,
-        )
-
-    # Get the material as a UsdShade.Material
-    material_prim = stage.GetPrimAtPath(VINYL_MATERIAL_PATH)
-    material = UsdShade.Material(material_prim)
-
-    # Bind the material to your ground plane
-    prim = stage.GetPrimAtPath(prim_path)
-    UsdShade.MaterialBindingAPI(prim).Bind(
-        material, UsdShade.Tokens.strongerThanDescendants
-    )
-
-
-def define_tip_markers() -> VisualizationMarkers:
-    """A single small blue cube marker prototype for the gripper tip."""
-    marker_cfg = VisualizationMarkersCfg(
-        prim_path="/Visuals/TipMarkers",
-        markers={
-            "tip": sim_utils.CuboidCfg(
-                size=(0.01, 0.01, 0.01),  # 1 cm cube
-                visual_material=sim_utils.PreviewSurfaceCfg(
-                    diffuse_color=(0.0, 0.0, 1.0)  # blue
-                ),
-            ),
-        },
-    )
-
-    return VisualizationMarkers(cfg=marker_cfg)
-
-
-def assert_tensor(tensor: torch.Tensor, shape: tuple, dtype):
-    """Utility to assert tensor shape and dtype."""
-    assert tensor.shape == shape, f"Expected shape {shape}, got {tensor.shape}"
-    assert tensor.dtype == dtype, f"Expected dtype {dtype}, got {tensor.dtype}"
