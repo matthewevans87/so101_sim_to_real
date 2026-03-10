@@ -74,11 +74,19 @@ class SceneCfg:
 # ---------------------------------------------------------------------------
 
 @dataclass
+@dataclass
+class StartingPositionNoiseCfg:
+    enabled: bool
+    range: tuple[float, float]
+
+
+@dataclass
 class JointsCfg:
     all: list[str]
     active: list[str]
     wrist_roll_name: str
     starting_position: list
+    starting_position_noise: StartingPositionNoiseCfg
 
 
 @dataclass

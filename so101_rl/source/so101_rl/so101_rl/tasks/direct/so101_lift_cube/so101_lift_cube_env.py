@@ -8,9 +8,6 @@ from __future__ import annotations
 import math
 import os
 
-from so101_rl.configurations.cube import (
-    CUBE_RESTING_HEIGHT,
-)
 from so101_utils.feature_extraction.feature_extraction import ResNet18SpatialSoftmaxFeatureExtractor
 from so101_utils.image_processing import (
     CameraBrightnessPipelineStep,
@@ -25,10 +22,10 @@ from so101_utils.image_processing import (
     MotionBlurPipelineStep,
     ResizePipelineStep,
 )
-from torch import tensor, zeros_like
+from torch import zeros_like
 
 from so101_rl.helpers.visual_markers import define_gripper_arrow_markers
-from so101_rl.helpers.utils import assert_tensor, set_material
+from so101_rl.helpers.utils import set_material
 
 from torchvision.utils import save_image
 from so101_rl.configurations.camera import (
@@ -47,20 +44,17 @@ from so101_rl.helpers.variations import (
     randomize_env_lights,
 )
 from .so101_lift_cube_env_cfg import So101LiftCubeCfg
+from .env_pipeline import StepContext, MetricPipeline, RewardPipeline, build_metric_pipeline, build_reward_pipeline
 import torch
 from collections.abc import Sequence
-import torch.nn.functional as F
 
-from isaaclab.assets import Articulation, RigidObject, RigidObjectCfg
+from isaaclab.assets import Articulation, RigidObject
 from isaaclab.envs import DirectRLEnv
-from isaaclab.sim.spawners.materials.physics_materials_cfg import PhysicsMaterialCfg
-from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from isaaclab.utils.math import sample_uniform, quat_apply
 
 from isaaclab.sensors import Camera, ContactSensor, FrameTransformer
 import isaaclab.utils.math as math_utils
 import isaaclab.sim as sim_utils
-from isaaclab.utils.math import matrix_from_quat, quat_unique
 
 # Sequence of hook calls
 # pre_physics_step
@@ -94,11 +88,6 @@ class So101LiftCube(DirectRLEnv):
         print("Wrist roll joint index:", self._wrist_roll_idx)
         self._all_joint_ids = torch.arange(self.robot.num_joints, device=self.device)
 
-        # Indices the policy controls (all except wrist_roll)
-        self._actuated_idxs = self._all_joint_ids[
-            self._all_joint_ids != self._wrist_roll_idx
-        ]
-        print("Actuated joint indices:", self._actuated_idxs)
 
         # Find indices of DOFs and EE link
         self._dof_idx, _ = self.robot.find_joints(self.cfg.joints.active)
@@ -175,6 +164,10 @@ class So101LiftCube(DirectRLEnv):
         )  # type: ignore
 
         self.step_metrics: dict[str, torch.Tensor] = None  # type: ignore
+
+        self._step_ctx = StepContext(env=self)
+        self.metric_pipeline: MetricPipeline = build_metric_pipeline()
+        self.reward_pipeline: RewardPipeline = build_reward_pipeline(self.cfg)
 
         self.vision_feature_extractor = ResNet18SpatialSoftmaxFeatureExtractor(device=self.device)
 
@@ -344,315 +337,7 @@ class So101LiftCube(DirectRLEnv):
         return observations
 
     def _get_rewards(self) -> torch.Tensor:
-
-        if "log" not in self.extras:
-            self.extras["log"] = {}
-
-        rew_total = torch.zeros((self.num_envs,), device=self.device)
-
-        # ********************
-        # Primary Rewards
-        # ********************
-
-        # Minimize Distance between Cube and EE Grip Zone (STAGE 2: Approach)
-        if self.cfg.rewards.distance.enabled:
-            distance = self.step_metrics["grip_zone_cube_distance"]
-
-            rew_distance = (
-                # (~self.step_metrics["is_cube_gripped"]).float() *
-                distance
-                * self.cfg.rewards.distance.scale
-            )
-            self.extras["log"]["Episode_Reward/rew_distance"] = rew_distance.mean()
-            rew_total += rew_distance
-
-        # Grip Cube
-        if self.cfg.rewards.grip_cube.enabled:
-            rew_grip_cube = (
-                self.step_metrics["is_cube_in_grip_position"]
-                * (
-                    self.step_metrics["gripper_cube_contact_force_magnitude"] > 0.0
-                )  # has contact
-                * self.cfg.rewards.grip_cube.scale
-            )
-            self.extras["log"]["Episode_Reward/rew_grip_cube"] = rew_grip_cube.mean()
-            rew_total += rew_grip_cube
-
-        # Lift Cube
-        if self.cfg.rewards.lift_cube.enabled:
-            rew_lift_cube = (
-                # (self.step_metrics["gripper_cube_contact_force_magnitude"] > 0.0) *
-                self.step_metrics["cube_lift_fraction"]
-                * self.cfg.rewards.lift_cube.scale
-            )
-
-            self.extras["log"]["Episode_Reward/rew_lift_cube"] = rew_lift_cube.mean()
-            rew_total += rew_lift_cube
-
-        # ********************
-        # Shaping Rewards
-        # ********************
-
-        # Find Cube
-        if self.cfg.rewards.gripper_cube_alignment.enabled:
-            rew_gripper_cube_alignment = (
-                torch.maximum(
-                    self.step_metrics["is_cube_gripped"],
-                    self.step_metrics["gripper_cube_alignment"],
-                )
-                * self.cfg.rewards.gripper_cube_alignment.scale
-            )
-            self.extras["log"][
-                "Episode_Reward/rew_gripper_cube_alignment"
-            ] = rew_gripper_cube_alignment.mean()
-            rew_total += rew_gripper_cube_alignment
-
-        if self.cfg.rewards.gripper_look_at_cube.enabled:
-            rew_gripper_look_at_cube = self._get_rew_gripper_look_at_cube(
-                self.gripper_tf.data.source_pos_w,
-                self.gripper_tf.data.target_pos_w[:, 0, :],
-            )
-            self.extras["log"][
-                "Episode_Reward/rew_gripper_look_at_cube"
-            ] = rew_gripper_look_at_cube.mean()
-            rew_total += rew_gripper_look_at_cube
-
-        if self.cfg.rewards.camera_cube_alignment.enabled:
-            rew_camera_cube_alignment = (
-                torch.maximum(
-                    self.step_metrics["is_cube_gripped"],
-                    self.step_metrics["camera_cube_alignment"],
-                )
-                * self.cfg.rewards.camera_cube_alignment.scale
-            )
-            self.extras["log"][
-                "Episode_Reward/rew_camera_cube_alignment"
-            ] = rew_camera_cube_alignment.mean()
-            rew_total += rew_camera_cube_alignment
-
-        # Encourage Gripping
-        if self.cfg.rewards.close_gripper.enabled:
-            gripper_pos = self.joint_pos[:, self._ee_body_idx]
-            gripper_close_error = torch.abs(gripper_pos - self.cfg.rewards.close_gripper.close_target)
-            fraction_to_target = 1.0 - (
-                gripper_close_error / self.cfg.rewards.close_gripper.max_open
-            ).squeeze(
-                -1
-            )  # 0.0 to 1.0
-
-            rew_close_gripper = (
-                self.step_metrics["is_cube_in_grip_position"]
-                * fraction_to_target
-                * self.cfg.rewards.close_gripper.scale
-            )
-            self.extras["log"][
-                "Episode_Reward/rew_close_gripper"
-            ] = rew_close_gripper.mean()
-            rew_total += rew_close_gripper
-
-        if self.cfg.rewards.gripper_force.enabled:
-            gripper_force_target = self.cfg.rewards.gripper_force.force_target
-            gripper_force = self.step_metrics["gripper_cube_contact_force_magnitude"]
-            is_in_grip_position = self.step_metrics["is_cube_in_grip_position"]
-
-            # Only apply reward when cube is in grip position
-            force_error = torch.abs(gripper_force - gripper_force_target)
-            # Positive reward: max at target, decays as error increases
-            rew_gripper_force = (
-                torch.exp(-force_error / (gripper_force_target + 1e-6))
-                * self.cfg.rewards.gripper_force.scale
-            )
-
-            # Mask reward to only be active when in grip position
-            rew_gripper_force = rew_gripper_force * is_in_grip_position.float()
-
-            self.extras["log"][
-                "Episode_Reward/rew_gripper_force"
-            ] = rew_gripper_force.mean()
-            rew_total += rew_gripper_force
-
-        # Vantage Reward: STAGE 1 only (finding cube from far away)
-        # Only active when distance > threshold to avoid conflict with approach stage
-        if self.cfg.rewards.vantage.enabled:
-            cube_gripper_dist = torch.linalg.norm(
-                self.gripper_tf.data.source_pos_w
-                - self.gripper_tf.data.target_pos_w[:, 0, :],
-                dim=-1,
-            )
-
-            # Gate: only apply vantage reward when far from cube (Stage 1)
-            is_far = cube_gripper_dist > self.cfg.rewards.vantage.far_distance_threshold
-
-            rew_vantage_raw = self._get_rew_vantage(
-                cube_gripper_dist,
-                self.gripper_tf.data.source_pos_w,
-                self.gripper_tf.data.target_pos_w[:, 0, :],
-            )
-
-            # Only apply reward when far, fade out as approaching
-            rew_vantage = torch.where(
-                is_far,
-                rew_vantage_raw,
-                torch.zeros_like(rew_vantage_raw),
-            )
-
-            self.extras["log"]["Episode_Reward/rew_vantage"] = rew_vantage.mean()
-            rew_total += rew_vantage
-
-        if self.cfg.rewards.keep_camera_upright.enabled:
-            gripper_roll_target_pos_rad = math.radians(-90.0)
-            gripper_roll_error = torch.abs(
-                self.robot.data.joint_pos[:, self._wrist_roll_idx]
-                - gripper_roll_target_pos_rad
-            )
-            rew_keep_camera_upright = (
-                gripper_roll_error * self.cfg.rewards.keep_camera_upright.scale
-            )
-            self.extras["log"][
-                "Episode_Reward/rew_keep_camera_upright"
-            ] = rew_keep_camera_upright.mean()
-            rew_total += rew_keep_camera_upright
-
-        # ********************
-        # Smoothing Rewards
-        # ********************
-
-        # Penalize large actions
-        if self.cfg.rewards.action.enabled:
-            if self.actions is None:
-                rew_action = torch.zeros((self.num_envs,), device=self.device)
-            else:
-                rew_action = self.cfg.rewards.action.scale * torch.sum(
-                    self.actions**2, dim=-1
-                )
-            self.extras["log"]["Episode_Reward/rew_action"] = rew_action.mean()
-            rew_total += rew_action
-
-        # Penalize end-effector velocity
-        if self.cfg.rewards.ee_linear_speed.enabled:
-            ee_lin_vel_w = self.robot.data.body_lin_vel_w[
-                :, self._ee_body_idx[0], :
-            ]  # (num_envs, 3)
-            ee_linear_speed = torch.linalg.norm(ee_lin_vel_w, dim=-1)  # (num_envs,)
-            v_safe = self.cfg.rewards.ee_linear_speed.safe_speed  # e.g. 0.2  (m/s)
-            v_excess = torch.clamp(ee_linear_speed - v_safe, min=0.0)
-            rew_ee_linear_speed = self.cfg.rewards.ee_linear_speed.scale * (
-                v_excess + v_excess**2
-            )
-            self.extras["log"][
-                "Episode_Reward/rew_ee_linear_speed"
-            ] = rew_ee_linear_speed.mean()
-            rew_total += rew_ee_linear_speed
-
-        # Penalize joint velocity safety violations
-        if self.cfg.rewards.joint_speed.enabled:
-            joint_speed = torch.abs(
-                self.joint_vel[:, self._dof_idx]
-            )  # (num_envs, num_joints)
-            rew_joint_speed = self.cfg.rewards.joint_speed.scale * torch.sum(
-                joint_speed**2, dim=-1
-            )
-            self.extras["log"][
-                "Episode_Reward/rew_joint_speed"
-            ] = rew_joint_speed.mean()
-            rew_total += rew_joint_speed
-
-        # Penalize gripper height safety violations
-        if self.cfg.rewards.ee_height_safety.enabled:
-            ee_pos_w = self.robot.data.body_pos_w[:, self._ee_body_idx[0], :]
-            ee_height = ee_pos_w[:, 2]
-            unsafe = ee_height < self.cfg.safety.min_ee_height
-            rew_ee_height_safety = torch.where(
-                unsafe,
-                torch.full_like(ee_height, self.cfg.rewards.ee_height_safety.scale),
-                torch.zeros_like(ee_height),
-            )
-            self.extras["log"][
-                "Episode_Reward/rew_ee_height_safety"
-            ] = rew_ee_height_safety.mean()
-            rew_total += rew_ee_height_safety
-
-        # ********************
-        # Terminal Rewards
-        # ********************
-
-        if self.cfg.rewards.success_touch_terminal.enabled:
-            rew_success_touch_terminal = torch.where(
-                self.step_metrics["is_success_touch_terminal"] >= 1.0,
-                torch.full_like(
-                    self.step_metrics["is_success_touch_terminal"],
-                    self.cfg.rewards.success_touch_terminal.scale,
-                ),
-                torch.zeros_like(self.step_metrics["is_success_touch_terminal"]),
-            )
-            self.extras["log"][
-                "Episode_Reward/rew_success_touch_terminal"
-            ] = rew_success_touch_terminal.mean()
-            rew_total += rew_success_touch_terminal
-
-        if self.cfg.rewards.success_lift_fraction_terminal.enabled:
-            rew_success_lift_fraction_terminal = torch.where(
-                self.step_metrics["is_success_lift_fraction_terminal"] >= 1.0,
-                torch.full_like(
-                    self.step_metrics["is_success_lift_fraction_terminal"],
-                    self.cfg.rewards.success_lift_fraction_terminal.scale,
-                ),
-                torch.zeros_like(
-                    self.step_metrics["is_success_lift_fraction_terminal"]
-                ),
-            )
-            self.extras["log"][
-                "Episode_Reward/rew_success_lift_fraction_terminal"
-            ] = rew_success_lift_fraction_terminal.float().mean()
-            rew_total += rew_success_lift_fraction_terminal
-
-        if self.cfg.rewards.success_point_at_cube_terminal.enabled:
-            rew_success_point_at_cube_terminal = torch.where(
-                self.step_metrics["is_success_point_at_cube_terminal"] >= 1.0,
-                torch.full_like(
-                    self.step_metrics["is_success_point_at_cube_terminal"],
-                    self.cfg.rewards.success_point_at_cube_terminal.scale,
-                ),
-                torch.zeros_like(
-                    self.step_metrics["is_success_point_at_cube_terminal"]
-                ),
-            )
-            self.extras["log"][
-                "Episode_Reward/rew_success_point_at_cube_terminal"
-            ] = rew_success_point_at_cube_terminal.float().mean()
-            rew_total += rew_success_point_at_cube_terminal
-
-        if self.cfg.rewards.safety_touch_table_terminal.enabled:
-            rew_safety_touch_table_terminal = torch.where(
-                self.step_metrics["is_table_touched"],
-                torch.tensor(
-                    self.cfg.rewards.safety_touch_table_terminal.scale,
-                    device=self.device,
-                    dtype=torch.float32,
-                ),
-                torch.tensor(0.0, device=self.device, dtype=torch.float32),
-            )
-            self.extras["log"][
-                "Episode_Reward/rew_safety_touch_table_terminal"
-            ] = rew_safety_touch_table_terminal.float().mean()
-            rew_total += rew_safety_touch_table_terminal
-
-        if self.cfg.rewards.safety_touch_table.enabled:
-            rew_safety_touch_table = torch.where(
-                self.step_metrics["is_table_touched"],
-                torch.tensor(
-                    self.cfg.rewards.safety_touch_table.scale,
-                    device=self.device,
-                    dtype=torch.float32,
-                ),
-                torch.tensor(0.0, device=self.device, dtype=torch.float32),
-            )
-            self.extras["log"][
-                "Episode_Reward/rew_safety_touch_table"
-            ] = rew_safety_touch_table.float().mean()
-            rew_total += rew_safety_touch_table
-
-        return rew_total
+        return self.reward_pipeline.compute(self._step_ctx)
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
 
@@ -704,18 +389,19 @@ class So101LiftCube(DirectRLEnv):
 
         # Reset robot to default joint state and root from asset
         joint_pos = self.robot.data.default_joint_pos[env_ids].clone()
+        joint_vel = self.robot.data.default_joint_vel[env_ids].clone()
 
         # Apply starting position from config (joints.all order, degrees or null)
         for i, deg in enumerate(self.cfg.joints.starting_position):
             if deg is not None:
                 joint_pos[:, self._all_joint_idx[i]] = math.radians(deg)
 
-        joint_vel = self.robot.data.default_joint_vel[env_ids].clone()
-
-        # Optional: Add some random noise to starting joint positions
-        joint_pos[:, self._dof_idx] += sample_uniform(
-            -0.05, 0.05, joint_pos[:, self._dof_idx].shape, self.device
-        )
+        # Add some random noise to starting joint positions
+        if self.cfg.joints.starting_position_noise.enabled:
+            noise_range = self.cfg.joints.starting_position_noise.range
+            joint_pos[:, self._dof_idx] += sample_uniform(
+                noise_range[0], noise_range[1], joint_pos[:, self._dof_idx].shape, self.device
+            )
 
         default_root_state = self.robot.data.default_root_state[env_ids].clone()
         default_root_state[:, :3] += self.scene.env_origins[env_ids]
@@ -818,259 +504,8 @@ class So101LiftCube(DirectRLEnv):
 
     def _compute_step_metrics(self) -> None:
         """Compute custom metrics at each step for logging purposes."""
-        step_metrics = {}
-
-        # ********************
-        # gripper_cube_contact_force_magnitude
-        # ********************
-
-        gripper_cube_contact_force_magnitude = (
-            torch.linalg.norm(
-                self.gripper_contact_sensor.data.force_matrix_w[:, 0, 0, :], dim=-1, keepdim=True  # type: ignore
-            )
-            .squeeze(-1)
-            .to(self.device)
-        )
-        assert_tensor(
-            gripper_cube_contact_force_magnitude, (self.num_envs,), torch.float32
-        )
-
-        step_metrics["gripper_cube_contact_force_magnitude"] = (
-            gripper_cube_contact_force_magnitude
-        )
-
-        # ********************
-        # is_table_touched
-        # ********************
-
-        force_norms = torch.linalg.norm(
-            self.table_contact_sensor.data.force_matrix_w, dim=-1
-        )
-
-        # Detect any non-zero filtered contact in that env:
-        is_table_touched = (force_norms > 0.0).any(dim=-1).any(dim=-1)  # [num_envs]
-        is_table_touched = is_table_touched.bool()
-        assert_tensor(is_table_touched, (self.num_envs,), torch.bool)
-        step_metrics["is_table_touched"] = is_table_touched
-
-        # ********************
-        # cube_pos_ee
-        # ********************
-
-        eps = 1e-6
-        cube_pos_ee = self.gripper_tf.data.target_pos_source[:, 0, :]
-        assert_tensor(cube_pos_ee, (self.num_envs, 3), torch.float32)
-        step_metrics["cube_pos_ee"] = cube_pos_ee
-
-        # ********************
-        # gripper_cube_alignment
-        # ********************
-
-        # Get positions in world frame
-        gripper_pos_w = self.robot.data.body_pos_w[
-            :, self._ee_body_idx[0], :
-        ]  # (num_envs, 3)
-        cube_pos_w = self.cube.data.root_pos_w  # (num_envs, 3)
-
-        # Direction from gripper to cube in world frame
-        v_gripper_to_cube_w = cube_pos_w - gripper_pos_w  # (num_envs, 3)
-        v_gripper_to_cube_w = v_gripper_to_cube_w / (
-            v_gripper_to_cube_w.norm(dim=-1, keepdim=True) + eps
-        )
-
-        # Transform gripper forward direction to world frame
-        gripper_quat_w = self.robot.data.body_quat_w[
-            :, self._ee_body_idx[0], :
-        ]  # (num_envs, 4)
-        gripper_forward_ee_batch = self.gripper_forward_ee.expand(
-            self.num_envs, -1
-        )  # (num_envs, 3)
-        gripper_forward_w = quat_apply(
-            gripper_quat_w, gripper_forward_ee_batch
-        )  # (num_envs, 3)
-
-        # Alignment: dot product
-        gripper_cube_alignment = (
-            (v_gripper_to_cube_w * gripper_forward_w)
-            .sum(dim=-1, keepdim=True)
-            .squeeze(-1)
-        )
-        assert_tensor(gripper_cube_alignment, (self.num_envs,), torch.float32)
-        step_metrics["gripper_cube_alignment"] = gripper_cube_alignment
-
-        # ********************
-        # camera_cube_alignment
-        # ********************
-
-        # Get gripper pose in world frame
-        gripper_pos_w = self.robot.data.body_pos_w[
-            :, self._ee_body_idx[0], :
-        ]  # (num_envs, 3)
-        gripper_quat_w = self.robot.data.body_quat_w[
-            :, self._ee_body_idx[0], :
-        ]  # (num_envs, 4)
-
-        # Compute camera position: gripper_pos + rotate(camera_offset_pos by gripper_quat)
-        camera_offset_pos_batch = self._camera_offset_pos.expand(self.num_envs, -1)
-        camera_pos_w = gripper_pos_w + quat_apply(
-            gripper_quat_w, camera_offset_pos_batch
-        )  # (num_envs, 3)
-
-        # Compute camera orientation: gripper_quat * camera_offset_quat
-        camera_offset_quat_batch = self._camera_offset_quat.expand(self.num_envs, -1)
-        camera_quat_w = math_utils.quat_mul(
-            gripper_quat_w, camera_offset_quat_batch
-        )  # (num_envs, 4)
-
-        # Get cube position
-        cube_pos_w = self.cube.data.root_pos_w  # (num_envs, 3)
-
-        # Direction from camera to cube in world frame
-        v_camera_to_cube_w = cube_pos_w - camera_pos_w  # (num_envs, 3)
-        v_camera_to_cube_w = v_camera_to_cube_w / (
-            v_camera_to_cube_w.norm(dim=-1, keepdim=True) + eps
-        )
-
-        # Transform camera forward direction (-Z in local frame) to world frame
-        camera_forward_local_batch = self.camera_forward_local.expand(
-            self.num_envs, -1
-        )  # (num_envs, 3)
-        camera_forward_w = quat_apply(
-            camera_quat_w, camera_forward_local_batch
-        )  # (num_envs, 3)
-
-        # Alignment: dot product (1.0 = perfectly aligned, -1.0 = opposite direction)
-        camera_cube_alignment = (
-            (v_camera_to_cube_w * camera_forward_w)
-            .sum(dim=-1, keepdim=True)
-            .squeeze(-1)
-        )
-        assert_tensor(camera_cube_alignment, (self.num_envs,), torch.float32)
-        step_metrics["camera_cube_alignment"] = camera_cube_alignment
-
-        # ********************
-        # v_grip_zone_to_cube_ee
-        # ********************
-
-        # Vector from *gripping point* to cube, in EE frame
-        v_grip_zone_to_cube_ee = cube_pos_ee - self._grip_zone_offset  # (num_envs, 3)
-        assert_tensor(v_grip_zone_to_cube_ee, (self.num_envs, 3), torch.float32)
-        step_metrics["v_grip_zone_to_cube_ee"] = v_grip_zone_to_cube_ee
-
-        # ********************
-        # cube_pos_gz
-        # ********************
-        cube_pos_gz = self.grip_zone_tf.data.target_pos_source[:, 0, :]
-        cube_pos_gz = self.grip_zone_tf.data.target_pos_source[:, 0, :]
-
-        assert_tensor(cube_pos_gz, (self.num_envs, 3), torch.float32)
-        step_metrics["cube_pos_gz"] = cube_pos_gz
-
-        # ********************
-        # cube_rot6d_gz
-        # ********************
-        # q_gz: (N, 4) wxyz  (cube orientation in grip-zone/source frame)
-        q_gz = self.grip_zone_tf.data.target_quat_source[:, 0, :]  # (N,4)
-
-        # Optional but recommended: remove the q vs -q sign flip (w >= 0)
-        q_gz = quat_unique(q_gz)  # :contentReference[oaicite:1]{index=1}
-
-        # Convert to rotation matrix
-        R = matrix_from_quat(q_gz)  # (N, 3, 3) :contentReference[oaicite:2]{index=2}
-
-        # 6D rotation rep = first two columns concatenated (column-major)
-        cube_rot6d_gz = torch.cat([R[..., :, 0], R[..., :, 1]], dim=-1)  # (N, 6)
-        assert_tensor(cube_rot6d_gz, (self.num_envs, 6), torch.float32)
-        step_metrics["cube_rot6d_gz"] = cube_rot6d_gz
-
-        # ********************
-        # grip_zone_cube_distance
-        # ********************
-
-        grip_zone_cube_distance = v_grip_zone_to_cube_ee.norm(
-            dim=-1, keepdim=True
-        ).squeeze(-1)
-        assert_tensor(grip_zone_cube_distance, (self.num_envs,), torch.float32)
-        step_metrics["grip_zone_cube_distance"] = grip_zone_cube_distance
-
-        # ********************
-        # cube_height_w
-        # ********************
-
-        cube_pos_w = self.cube.data.root_pos_w
-        cube_height_w = (cube_pos_w[:, 2] - CUBE_RESTING_HEIGHT).clamp(min=0.0)
-        assert_tensor(cube_height_w, (self.num_envs,), torch.float32)
-        step_metrics["cube_height_w"] = cube_height_w
-
-        # ********************
-        # cube_lift_fraction
-        # ********************
-        cube_lift_fraction = (
-            cube_height_w
-        ) / self.cfg.rewards.success_lift_fraction_terminal.height_threshold
-        assert_tensor(cube_lift_fraction, (self.num_envs,), torch.float32)
-        step_metrics["cube_lift_fraction"] = cube_lift_fraction
-
-        # ********************
-        # is_success_lift_fraction_terminal
-        # ********************
-
-        is_success_lift_fraction_terminal = step_metrics["cube_lift_fraction"] >= 1.0
-        assert_tensor(is_success_lift_fraction_terminal, (self.num_envs,), torch.bool)
-        step_metrics["is_success_lift_fraction_terminal"] = (
-            is_success_lift_fraction_terminal
-        )
-
-        # ********************
-        # is_success_touch_terminal
-        # ********************
-
-        is_success_touch_terminal = (
-            step_metrics["gripper_cube_contact_force_magnitude"]
-            > self.cfg.rewards.success_touch_terminal.touch_force_threshold
-        )
-        assert_tensor(is_success_touch_terminal, (self.num_envs,), torch.bool)
-        step_metrics["is_success_touch_terminal"] = is_success_touch_terminal
-
-        # ********************
-        # is_success_point_at_cube_terminal
-        # ********************
-
-        is_success_point_at_cube_terminal = (
-            step_metrics["gripper_cube_alignment"] >= 1.0
-        )
-        assert_tensor(is_success_point_at_cube_terminal, (self.num_envs,), torch.bool)
-        step_metrics["is_success_point_at_cube_terminal"] = (
-            is_success_point_at_cube_terminal
-        )
-
-        # ********************
-        # is_cube_in_grip_position
-        # ********************
-
-        is_cube_in_grip_position = (
-            step_metrics["grip_zone_cube_distance"]
-            < self.cfg.rewards.grip_cube.distance_threshold
-        )
-
-        assert_tensor(is_cube_in_grip_position, (self.num_envs,), torch.bool)
-        step_metrics["is_cube_in_grip_position"] = is_cube_in_grip_position
-
-        # ********************
-        # is_cube_gripped
-        # ********************
-
-        is_cube_gripped = is_cube_in_grip_position & (
-            step_metrics["gripper_cube_contact_force_magnitude"]  # type: ignore
-            > self.cfg.rewards.success_touch_terminal.touch_force_threshold
-        )
-        is_cube_gripped = is_cube_gripped.bool()
-        assert_tensor(is_cube_gripped, (self.num_envs,), torch.bool)
-        step_metrics["is_cube_gripped"] = is_cube_gripped
-
-        step_metrics["is_cube_gripped"] = is_cube_gripped
-
-        self.step_metrics = step_metrics
+        self.metric_pipeline.compute(self._step_ctx)
+        self.step_metrics = self._step_ctx.metrics
 
     def _visualize_gripper_arrow(self, v_ee: torch.Tensor) -> None:
         """Draw an arrow at the gripper, pointing along v_ee (given in EE frame)."""
@@ -1132,152 +567,6 @@ class So101LiftCube(DirectRLEnv):
             arrow_quat_w,  # (N, 4)
             marker_indices=marker_indices,
         )
-
-    def _get_rew_vantage(
-        self,
-        ee_to_cube_dist: torch.Tensor,
-        ee_tip_pos: torch.Tensor,
-        cube_pos: torch.Tensor,
-    ) -> torch.Tensor:
-        """
-        Reward for maintaining a good vantage point to view the cube.
-        Encourages optimal viewing distance and height above the cube.
-        Uses Gaussian distributions to reward being near ideal values.
-
-        IMPORTANT: Only applies when distance > min_distance_threshold to avoid
-        interfering with primary approach/grip/lift rewards.
-        When cube is gripped, returns full reward value.
-        """
-        d = ee_to_cube_dist  # (num_envs,)
-
-        # Only apply vantage reward when far enough from cube
-        # This prevents interference with primary rewards (distance, grip, lift)
-        far_enough = d > self.cfg.rewards.vantage.min_distance_threshold
-
-        # 1) Optimal distance reward (Gaussian centered at ideal viewing distance)
-        ideal_dist = (
-            self.cfg.rewards.vantage.ideal_distance
-        )  # meters - adjust based on your camera FOV
-        dist_sigma = (
-            self.cfg.rewards.vantage.ideal_distance_sigma
-        )  # how strict the distance requirement is
-        dist_reward = torch.exp(-((d - ideal_dist) ** 2) / (2 * dist_sigma**2))
-
-        # 2) Height reward: prefer being slightly above cube
-        h_above_cube = ee_tip_pos[:, 2] - cube_pos[:, 2]
-        ideal_height = self.cfg.rewards.vantage.ideal_height  # meters above cube (20cm)
-        height_sigma = self.cfg.rewards.vantage.ideal_height_sigma
-        # Penalize being below cube more heavily
-        height_reward = torch.where(
-            h_above_cube >= 0,
-            torch.exp(-((h_above_cube - ideal_height) ** 2) / (2 * height_sigma**2)),
-            torch.exp(-((h_above_cube) ** 2) / (2 * (height_sigma / 2) ** 2))
-            * 0.3,  # stronger penalty below
-        )
-
-        # 3) Gripper roll reward: prefer gripper to be roughly vertical (roll = -90 deg)
-        gripper_roll_target_pos_rad = math.radians(-90.0)
-        gripper_roll_error = (
-            torch.abs(
-                self.robot.data.joint_pos[:, self._wrist_roll_idx]
-                - gripper_roll_target_pos_rad
-            )
-            / gripper_roll_target_pos_rad
-        )
-
-        # 4) When cube is gripped, give full reward; otherwise combine factors and gate by distance threshold
-        is_gripped = self.step_metrics["is_cube_gripped"]
-        rew_vantage = torch.where(
-            is_gripped,
-            self.cfg.rewards.vantage.scale * torch.ones_like(d),
-            torch.where(
-                far_enough,
-                self.cfg.rewards.vantage.scale
-                * dist_reward
-                * height_reward
-                * gripper_roll_error,
-                torch.zeros_like(d),
-            ),
-        )
-
-        return rew_vantage
-
-    def _get_rew_gripper_look_at_cube(
-        self, ee_pos_w: torch.Tensor, cube_pos_w: torch.Tensor
-    ) -> torch.Tensor:
-        # ------------------------------------------------------------------
-        # 2) Look-at reward: camera pointing at cube
-        # ------------------------------------------------------------------
-        # We approximate camera pose from gripper pose + known offset
-        gripper_pos = ee_pos_w  # (num_envs, 3)
-        gripper_quat = self.robot.data.body_quat_w[
-            :, self._ee_body_idx[0], :
-        ]  # (num_envs, 4)
-
-        # Camera position in world frame
-        camera_offset = (
-            torch.tensor(
-                CAMERA_TRANSLATE_VEC,
-                device=self.device,
-                dtype=torch.float32,
-            )
-            .unsqueeze(0)
-            .expand(self.num_envs, 3)
-        )
-        camera_pos_w = gripper_pos + quat_apply(gripper_quat, camera_offset)
-
-        # Camera orientation in world frame (gripper orientation * camera local rotation)
-        camera_rot_offset = (
-            torch.tensor(
-                CAMERA_ROTATION_QUAT_WXYZ,
-                device=self.device,
-                dtype=torch.float32,
-            )
-            .unsqueeze(0)
-            .expand(self.num_envs, 4)
-        )
-        camera_quat_w = math_utils.quat_mul(gripper_quat, camera_rot_offset)
-
-        # Camera forward axis in its local frame.
-        # For OpenGL convention, cameras look along -Z in local coordinates.
-        forward_local = (
-            torch.tensor(
-                [0.0, 0.0, -1.0],
-                device=self.device,
-                dtype=torch.float32,
-            )
-            .view(1, 3)
-            .expand(self.num_envs, 3)
-        )
-
-        # World-space forward vector
-        cam_forward_w = quat_apply(camera_quat_w, forward_local)  # (num_envs, 3)
-
-        # Vector from camera to cube
-        vec_to_cube = cube_pos_w - camera_pos_w  # (num_envs, 3)
-
-        # Normalize
-        cam_forward_norm = cam_forward_w / (
-            torch.linalg.norm(cam_forward_w, dim=-1, keepdim=True) + 1e-6
-        )
-        vec_to_cube_norm = vec_to_cube / (
-            torch.linalg.norm(vec_to_cube, dim=-1, keepdim=True) + 1e-6
-        )
-
-        # Cosine of angle between forward and cube direction: 1 = perfectly aligned
-        cos_angle = torch.sum(cam_forward_norm * vec_to_cube_norm, dim=-1)
-        # Only reward alignment when cos_angle > 0 (front hemisphere)
-        lookat_factor = torch.clamp(cos_angle, min=0.0, max=1.0)
-
-        # If cube is gripped, consider it perfectly looked at
-        lookat_factor = torch.maximum(
-            lookat_factor, self.step_metrics["is_cube_gripped"]
-        )
-
-        # Scale: up to for perfectly looking at cube
-        rew_lookat = self.cfg.rewards.gripper_look_at_cube.scale * lookat_factor
-
-        return rew_lookat
 
     # def _visualize_tip_markers(self):
     #     # Skip if markers weren't created (video recording mode)

@@ -12,6 +12,9 @@ joints:
   active: ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"]
   wrist_roll_name: "wrist_roll"
   starting_position: [null, null, -25.0, 65.0, -90.0, null]
+  starting_position_noise:
+    enabled: true
+    range: [-0.05, 0.05]
 
 control:
   action_scale: 1.0
