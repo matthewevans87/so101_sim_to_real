@@ -11,24 +11,25 @@ import os
 from so101_rl.configurations.cube import (
     CUBE_RESTING_HEIGHT,
 )
+from so101_utils.feature_extraction.feature_extraction import ResNet18SpatialSoftmaxFeatureExtractor
 from so101_utils.image_processing import (
     CameraBrightnessPipelineStep,
     CameraContrastPipelineStep,
     CheapWebcamEffectPipelineStep,
+    ClampPipelineStep,
     GaussianBlurPipelineStep,
     GaussianNoisePipelineStep,
+    ImageNetNormalizationPipelineStep,
     ImagePipeline,
     JpegCompressionPipelineStep,
     MotionBlurPipelineStep,
+    ResizePipelineStep,
 )
 from torch import tensor, zeros_like
 
 from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
-from so101_rl.nnmodules.spatial_softmax import (
-    SpatialSoftmax,
-)
 from torchvision.utils import save_image
 from so101_rl.configurations.camera import (
     CAMERA_ROTATION_QUAT_WXYZ,
@@ -48,9 +49,7 @@ from so101_rl.helpers.variations import (
 from .so101_lift_cube_env_cfg import So101LiftCubeCfg
 import torch
 from collections.abc import Sequence
-import torch.nn as nn
 import torch.nn.functional as F
-from torchvision.models import resnet18, ResNet18_Weights
 
 from isaaclab.assets import Articulation, RigidObject, RigidObjectCfg
 from isaaclab.envs import DirectRLEnv
@@ -167,29 +166,6 @@ class So101LiftCube(DirectRLEnv):
             self.device
         )  # (1, num_actions)
 
-        # # ---------------------------
-        # # Pretrained ResNet18 feature extractor (frozen)
-        # # ---------------------------
-        weights = ResNet18_Weights.DEFAULT
-        backbone = resnet18(weights=weights)
-
-        # keep everything up to layer4; drop avgpool and fc
-        conv_trunk = nn.Sequential(*list(backbone.children())[:-2])  # (N, 512, Hc, Wc)
-
-        self._vision_backbone = conv_trunk.to(self.device)
-        self._vision_backbone.eval()
-        for p in self._vision_backbone.parameters():
-            p.requires_grad = False
-
-        self._spatial_softmax = SpatialSoftmax().to(self.device)
-
-        # ImageNet normalization (create once)
-        self._img_mean = torch.tensor([0.485, 0.456, 0.406], device=self.device).view(
-            1, 3, 1, 1
-        )
-        self._img_std = torch.tensor([0.229, 0.224, 0.225], device=self.device).view(
-            1, 3, 1, 1
-        )
 
         self.actions = torch.zeros(
             (self.num_envs, self.cfg.action_space),  # type: ignore
@@ -199,7 +175,12 @@ class So101LiftCube(DirectRLEnv):
 
         self.step_metrics: dict[str, torch.Tensor] = None  # type: ignore
 
-        self.image_pipeline = ImagePipeline([
+        self.vision_feature_extractor = ResNet18SpatialSoftmaxFeatureExtractor(device=self.device)
+
+        _pipeline_steps = []
+        if self.cfg.domain_randomization.camera.feed.preshape_image.enabled:
+            _pipeline_steps.append(ResizePipelineStep((224, 224)))
+        _pipeline_steps.extend([
             GaussianBlurPipelineStep(),
             JpegCompressionPipelineStep(),
             MotionBlurPipelineStep(),
@@ -207,7 +188,10 @@ class So101LiftCube(DirectRLEnv):
             GaussianNoisePipelineStep(),
             CameraBrightnessPipelineStep(),
             CameraContrastPipelineStep(),
+            ImageNetNormalizationPipelineStep(),
+            ClampPipelineStep(),
         ])
+        self.image_pipeline = ImagePipeline(_pipeline_steps)
 
     # Called by super class to setup the scene
     def _setup_scene(self):
@@ -309,26 +293,11 @@ class So101LiftCube(DirectRLEnv):
         # Raw camera RGB: (num_envs, H, W, 3), uint8
         camera_data = self.camera.data.output["rgb"]
 
-        # Transform tensor to (N, 3, H, W) and normalize to [0,1]
-        images = camera_data.permute(0, 3, 1, 2).float() / 255.0  # (N, 3, H, W)
+        # Transform to (N, 3, H, W) float in [0, 1]
+        images = camera_data.permute(0, 3, 1, 2).float() / 255.0
 
-        if self.cfg.domain_randomization.camera.feed.preshape_image.enabled:
-            if images.shape[-2:] != (224, 224):
-                images = F.interpolate(
-                    images,
-                    size=(224, 224),
-                    mode="bilinear",
-                    align_corners=False,
-                )
-
-        # Apply domain randomization to camera feed
+        # Apply domain randomization
         images = self.image_pipeline.process(images)
-
-        # ImageNet normalization
-        images = (images - self._img_mean) / self._img_std
-
-        # Clamp to valid range
-        images = torch.clamp(images, 0.0, 1.0)
 
         if (
             self.cfg.debug.save_images
@@ -339,20 +308,15 @@ class So101LiftCube(DirectRLEnv):
                 os.path.join(f"aug_{self.common_step_counter:06d}.png"),
             )
 
-        # Extract features with frozen ResNet
-        with torch.inference_mode():
-            conv_feats = self._vision_backbone(images)  # (N, C, Hc, Wc)
-            visual_features = self._spatial_softmax(
-                conv_feats
-            )  # (N, 2C), C=512 → 1024-D
+        # Extract visual features
+        visual_features = self.vision_feature_extractor.extract(images)  # (N, 1024)
 
         # Proprioception
         q = self.joint_pos[:, self._dof_idx]  # (N, num_joints)
         dq = self.joint_vel[:, self._dof_idx]  # (N, num_joints) - Joint velocities
 
         # Observations
-
-        actor_obs = torch.cat([visual_features, q], dim=-1)  # (N, 512 + num_joints)
+        actor_obs = torch.cat([visual_features, q], dim=-1)  # (N, 1024 + num_joints)
 
         # Compute on first observation call (when _get_observations is called from elf._env.reset())
         if self.step_metrics is None:

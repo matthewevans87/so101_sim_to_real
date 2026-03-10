@@ -8,6 +8,8 @@ and sim-to-real transfer.
 from .image_pipeline import (
     ImagePipeline,
     ImagePipelineStep,
+    Uint8ToFloatCHWPipelineStep,
+    ResizePipelineStep,
     JpegCompressionPipelineStep,
     MotionBlurPipelineStep,
     GaussianBlurPipelineStep,
@@ -15,11 +17,15 @@ from .image_pipeline import (
     CheapWebcamEffectPipelineStep,
     CameraBrightnessPipelineStep,
     CameraContrastPipelineStep,
+    ImageNetNormalizationPipelineStep,
+    ClampPipelineStep,
 )
 
 __all__ = [
     "ImagePipeline",
     "ImagePipelineStep",
+    "Uint8ToFloatCHWPipelineStep",
+    "ResizePipelineStep",
     "JpegCompressionPipelineStep",
     "MotionBlurPipelineStep",
     "GaussianBlurPipelineStep",
@@ -27,4 +33,6 @@ __all__ = [
     "CheapWebcamEffectPipelineStep",
     "CameraBrightnessPipelineStep",
     "CameraContrastPipelineStep",
+    "ImageNetNormalizationPipelineStep",
+    "ClampPipelineStep",
 ]

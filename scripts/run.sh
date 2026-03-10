@@ -88,9 +88,9 @@ discover_x11_from_processes() {
         discovered_xauthority=$(echo "${env_dump}" | awk -F= '/^XAUTHORITY=/{print $2; exit}')
 
         if [ -n "${discovered_display}" ] || [ -n "${discovered_xauthority}" ]; then
-            print_info "Candidate GUI process: ${proc_name:-unknown} (pid ${pid})"
-            [ -n "${discovered_display}" ] && echo "DISPLAY=${discovered_display}"
-            [ -n "${discovered_xauthority}" ] && echo "XAUTHORITY=${discovered_xauthority}"
+            print_info "Candidate GUI process: ${proc_name:-unknown} (pid ${pid})" >&2
+            [ -n "${discovered_display}" ] && echo "DISPLAY=${discovered_display}" >&2
+            [ -n "${discovered_xauthority}" ] && echo "XAUTHORITY=${discovered_xauthority}" >&2
 
             if [ -n "${discovered_display}" ] && [ -z "${DISPLAY:-}" ]; then
                 export DISPLAY="${discovered_display}"

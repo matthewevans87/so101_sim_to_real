@@ -21,6 +21,25 @@ class ImagePipelineStep(ABC):
         """
         pass
 
+class Uint8ToFloatCHWPipelineStep(ImagePipelineStep):
+    def process(self, images: torch.Tensor) -> torch.Tensor:
+        """Convert (N, H, W, C) uint8 to (N, C, H, W) float in [0, 1]."""
+        return images.permute(0, 3, 1, 2).float() / 255.0
+
+
+class ResizePipelineStep(ImagePipelineStep):
+    def __init__(self, size: tuple[int, int], mode: str = "bilinear"):
+        super().__init__()
+        self.size = size
+        self.mode = mode
+
+    def process(self, images: torch.Tensor) -> torch.Tensor:
+        """Resize images to target size if not already that size."""
+        if tuple(images.shape[-2:]) == tuple(self.size):
+            return images
+        return F.interpolate(images, size=self.size, mode=self.mode, align_corners=False)
+
+
 class JpegCompressionPipelineStep(ImagePipelineStep):
     def __init__(self, quality_range: tuple[int, int] = (30, 90), device: str = "cuda"):
         super().__init__()
@@ -244,6 +263,30 @@ class CameraContrastPipelineStep(ImagePipelineStep):
         mean = images.mean(dim=[2, 3], keepdim=True)
         return (images - mean) * contrast_factor + mean
     
+
+class ImageNetNormalizationPipelineStep(ImagePipelineStep):
+    def __init__(self):
+        super().__init__()
+        self._mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
+        self._std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
+
+    def process(self, images: torch.Tensor) -> torch.Tensor:
+        """Apply ImageNet mean/std normalization."""
+        mean = self._mean.to(images.device)
+        std = self._std.to(images.device)
+        return (images - mean) / std
+
+
+class ClampPipelineStep(ImagePipelineStep):
+    def __init__(self, min_val: float = 0.0, max_val: float = 1.0):
+        super().__init__()
+        self.min_val = min_val
+        self.max_val = max_val
+
+    def process(self, images: torch.Tensor) -> torch.Tensor:
+        """Clamp image values to [min_val, max_val]."""
+        return torch.clamp(images, self.min_val, self.max_val)
+
 
 class ImagePipeline:
     def __init__(self, steps: list[ImagePipelineStep]):
