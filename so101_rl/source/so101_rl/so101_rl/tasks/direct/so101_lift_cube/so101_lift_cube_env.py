@@ -43,7 +43,7 @@ from so101_rl.helpers.variations import (
     randomize_rigid_object_position_polar,
     randomize_rigid_object_size,
     randomize_ground_material,
-    randomize_lighting,
+    randomize_world_light,
     randomly_placed_lights,
 )
 from .so101_lift_cube_env_cfg import So101LiftCubeCfg
@@ -759,18 +759,20 @@ class So101LiftCube(DirectRLEnv):
                 self.cfg.domain_randomization.camera.pose.rotation_noise_deg_range,
             )
 
-        if 0 in env_ids and self.cfg.domain_randomization.lighting.enabled:
-            randomize_lighting(
-                self.cfg.domain_randomization.lighting.intensity_range, self.cfg.domain_randomization.lighting.color_variation
+        if 0 in env_ids and self.cfg.domain_randomization.world_lighting.enabled:
+            randomize_world_light(
+                self.cfg.domain_randomization.world_lighting.intensity_range,
+                self.cfg.domain_randomization.world_lighting.color_variation,
             )
 
-        randomly_placed_lights(
-            env_ids,
-            self.cfg.domain_randomization.lighting.random_lights.height_range,
-            self.cfg.domain_randomization.lighting.random_lights.intensity_range,
-            self.cfg.domain_randomization.lighting.color_variation,
-            self.cfg.domain_randomization.lighting.random_lights.specular_range,
-        )
+        if self.cfg.domain_randomization.env_lighting.enabled:
+            randomly_placed_lights(
+                env_ids,
+                self.cfg.domain_randomization.env_lighting.height_range,
+                self.cfg.domain_randomization.env_lighting.intensity_range,
+                self.cfg.domain_randomization.env_lighting.color_variation,
+                self.cfg.domain_randomization.env_lighting.specular_range,
+            )
 
         if 0 in env_ids and self.cfg.domain_randomization.ground.enabled:
             randomize_ground_material()

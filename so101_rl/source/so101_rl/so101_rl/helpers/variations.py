@@ -619,7 +619,7 @@ def randomly_placed_lights(
                 light_prim.SetActive(False)
 
 
-def randomize_lighting(
+def randomize_world_light(
     light_intensity_range: tuple[float, float],
     light_color_variation: float,
 ):

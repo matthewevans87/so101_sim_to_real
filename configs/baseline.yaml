@@ -147,14 +147,16 @@ domain_randomization:
       enabled: true
       position_noise_range: [-0.001, 0.001]
       rotation_noise_deg_range: [-0.5, 0.5]
-  lighting:
+  world_lighting:
     enabled: true
     intensity_range: [500.0, 1500.0]
     color_variation: 0.05
-    random_lights:
-      height_range: [0.5, 2.0]
-      intensity_range: [10000.0, 30000.0]
-      specular_range: [1.0, 5.0]
+  env_lighting:
+    enabled: true
+    height_range: [0.5, 2.0]
+    intensity_range: [10000.0, 30000.0]
+    color_variation: 0.05
+    specular_range: [1.0, 5.0]
   cube:
     color_randomization_enabled: false
     size_randomization_enabled: true

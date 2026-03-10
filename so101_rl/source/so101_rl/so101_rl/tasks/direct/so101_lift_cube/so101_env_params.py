@@ -306,18 +306,19 @@ class DRCameraCfg:
 
 
 @dataclass
-class RandomLightsCfg:
-    height_range: list[float]
-    intensity_range: list[float]
-    specular_range: list[float]
-
-
-@dataclass
-class LightingCfg:
+class WorldLightingCfg:
     enabled: bool
     intensity_range: tuple[float, float]
     color_variation: float
-    random_lights: RandomLightsCfg
+
+
+@dataclass
+class EnvLightingCfg:
+    enabled: bool
+    height_range: list[float]
+    intensity_range: list[float]
+    color_variation: float
+    specular_range: list[float]
 
 
 @dataclass
@@ -344,7 +345,8 @@ class GroundDRCfg:
 @dataclass
 class DomainRandomizationCfg:
     camera: DRCameraCfg
-    lighting: LightingCfg
+    world_lighting: WorldLightingCfg
+    env_lighting: EnvLightingCfg
     cube: DRCubeCfg
     ground: GroundDRCfg
 
