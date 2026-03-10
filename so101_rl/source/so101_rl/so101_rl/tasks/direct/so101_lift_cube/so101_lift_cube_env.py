@@ -102,6 +102,7 @@ class So101LiftCube(DirectRLEnv):
 
         # Find indices of DOFs and EE link
         self._dof_idx, _ = self.robot.find_joints(self.cfg.joints.active)
+        self._all_joint_idx, _ = self.robot.find_joints(self.cfg.joints.all)
         self._ee_body_idx, _ = self.robot.find_bodies(self.cfg.gripper.ee_link_name)
         self._wrist_roll_idx = 4  # hardcoded for now
         self._grip_zone_offset = torch.tensor(
@@ -704,12 +705,10 @@ class So101LiftCube(DirectRLEnv):
         # Reset robot to default joint state and root from asset
         joint_pos = self.robot.data.default_joint_pos[env_ids].clone()
 
-        # Start at an easier pose
-        joint_pos[:, 2] = math.radians(-25.0)  # elbow_flex
-        joint_pos[:, 3] = math.radians(65.0)  # wrist_flex
-        joint_pos[:, self._wrist_roll_idx] = math.radians(
-            -90.0
-        )  # keep wrist_roll fixed
+        # Apply starting position from config (joints.all order, degrees or null)
+        for i, deg in enumerate(self.cfg.joints.starting_position):
+            if deg is not None:
+                joint_pos[:, self._all_joint_idx[i]] = math.radians(deg)
 
         joint_vel = self.robot.data.default_joint_vel[env_ids].clone()
 

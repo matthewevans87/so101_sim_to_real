@@ -78,6 +78,7 @@ class JointsCfg:
     all: list[str]
     active: list[str]
     wrist_roll_name: str
+    starting_position: list
 
 
 @dataclass
