@@ -44,7 +44,7 @@ from so101_rl.helpers.variations import (
     randomize_rigid_object_size,
     randomize_ground_material,
     randomize_world_light,
-    randomly_placed_lights,
+    randomize_env_lights,
 )
 from .so101_lift_cube_env_cfg import So101LiftCubeCfg
 import torch
@@ -766,7 +766,7 @@ class So101LiftCube(DirectRLEnv):
             )
 
         if self.cfg.domain_randomization.env_lighting.enabled:
-            randomly_placed_lights(
+            randomize_env_lights(
                 env_ids,
                 self.cfg.domain_randomization.env_lighting.height_range,
                 self.cfg.domain_randomization.env_lighting.intensity_range,
