@@ -158,6 +158,8 @@ class DebugCfg:
     save_images: bool
     save_image_interval: int
     enable_gripper_arrow_markers: bool
+    enable_tip_markers: bool
+    enable_camera_frame_markers: bool
 
 
 @dataclass

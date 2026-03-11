@@ -24,7 +24,14 @@ from so101_utils.image_processing import (
 )
 from torch import zeros_like
 
-from so101_rl.helpers.visual_markers import define_gripper_arrow_markers
+from so101_rl.helpers.visual_markers import (
+    define_gripper_arrow_markers,
+    define_tip_markers,
+    define_camera_frame_markers,
+    visualize_gripper_arrow,
+    visualize_tip_markers,
+    visualize_camera_frame_markers,
+)
 from so101_rl.helpers.utils import set_material
 
 from torchvision.utils import save_image
@@ -83,17 +90,10 @@ class So101LiftCube(DirectRLEnv):
         self.joint_pos = self.robot.data.joint_pos
         self.joint_vel = self.robot.data.joint_vel
 
-        # Isaac Lab style: find joint indices by name/regex
-        self._wrist_roll_idx = self.robot.find_joints("wrist_roll")[0]
-        print("Wrist roll joint index:", self._wrist_roll_idx)
-        self._all_joint_ids = torch.arange(self.robot.num_joints, device=self.device)
-
-
         # Find indices of DOFs and EE link
         self._dof_idx, _ = self.robot.find_joints(self.cfg.joints.active)
         self._all_joint_idx, _ = self.robot.find_joints(self.cfg.joints.all)
         self._ee_body_idx, _ = self.robot.find_bodies(self.cfg.gripper.ee_link_name)
-        self._wrist_roll_idx = 4  # hardcoded for now
         self._grip_zone_offset = torch.tensor(
             self.cfg.gripper.grip_zone_offset,
             device=self.device,
@@ -155,7 +155,6 @@ class So101LiftCube(DirectRLEnv):
         self._joint_upper = joint_upper_1d.unsqueeze(0).to(
             self.device
         )  # (1, num_actions)
-
 
         self.actions = torch.zeros(
             (self.num_envs, self.cfg.action_space),  # type: ignore
@@ -251,11 +250,11 @@ class So101LiftCube(DirectRLEnv):
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
 
-        # Visualization markers for gripper tip
-        # self.tip_markers = define_tip_markers()
+        if self.cfg.debug.enable_tip_markers:
+            self.tip_markers = define_tip_markers()
 
-        # # Visualization markers for camera frame (x, y, z axes)
-        # self.camera_frame_markers = define_camera_frame_markers()
+        if self.cfg.debug.enable_camera_frame_markers:
+            self.camera_frame_markers = define_camera_frame_markers()
 
         if self.cfg.debug.enable_gripper_arrow_markers:
             self.gripper_arrow_markers = define_gripper_arrow_markers()
@@ -278,20 +277,28 @@ class So101LiftCube(DirectRLEnv):
             )
 
         target_pos = self._joint_lower + t * (self._joint_upper - self._joint_lower)
-
-        target_pos[:, self._wrist_roll_idx] = math.radians(
-            -90.0
-        )  # keep wrist_roll fixed
         self._target_pos = target_pos
 
-        # Always update markers
-        # self._visualize_tip_markers()
-        # self._visualize_camera_frame_markers()
+        if self.cfg.debug.enable_tip_markers:
+            visualize_tip_markers(self.tip_markers, self._compute_ee_pos_w(self._grip_zone_offset), self.device)
+
+        if self.cfg.debug.enable_camera_frame_markers:
+            ee_pos = self.robot.data.body_pos_w[:, self._ee_body_idx[0], :]
+            ee_quat = self.robot.data.body_quat_w[:, self._ee_body_idx[0], :]
+            cam_pos_w = ee_pos + math_utils.quat_apply(ee_quat, self._camera_offset_pos.expand(self.num_envs, -1))
+            cam_quat_w = math_utils.quat_mul(ee_quat, self._camera_offset_quat.expand(self.num_envs, -1))
+            visualize_camera_frame_markers(self.camera_frame_markers, cam_pos_w, cam_quat_w, self.device)
 
         v_ee = self.step_metrics["v_grip_zone_to_cube_ee"]
-        if self.cfg.debug.enable_gripper_arrow_markers:
-            if v_ee is not None:
-                self._visualize_gripper_arrow(v_ee)
+        if self.cfg.debug.enable_gripper_arrow_markers and v_ee is not None:
+            src_pos = self.gripper_tf.data.source_pos_w
+            src_quat = self.gripper_tf.data.source_quat_w
+            gripper_pos_w = src_pos[:, 0, :] if src_pos.ndim == 3 else src_pos
+            gripper_quat_w = src_quat[:, 0, :] if src_quat.ndim == 3 else src_quat
+            visualize_gripper_arrow(
+                self.gripper_arrow_markers, gripper_pos_w, gripper_quat_w,
+                v_ee, self.cfg.gripper.grip_zone_offset, self.device
+            )
 
     def _apply_action(self) -> None:
         """Apply scaled actions as joint position targets."""
@@ -522,86 +529,6 @@ class So101LiftCube(DirectRLEnv):
         """Compute custom metrics at each step for logging purposes."""
         self.metric_pipeline.compute(self._step_ctx)
         self.step_metrics = self._step_ctx.metrics
-
-    def _visualize_gripper_arrow(self, v_ee: torch.Tensor) -> None:
-        """Draw an arrow at the gripper, pointing along v_ee (given in EE frame)."""
-        device = self.device
-        eps = 1e-6
-
-        # 1) Gripper pose in world frame
-        src_pos = self.gripper_tf.data.source_pos_w  # (N, 3) or (N, 1, 3)
-        src_quat = self.gripper_tf.data.source_quat_w  # (N, 4) or (N, 1, 4)
-
-        if src_pos.ndim == 3:
-            gripper_pos_w = src_pos[:, 0, :]  # (N, 3)
-            gripper_quat_w = src_quat[:, 0, :]  # (N, 4)
-        else:
-            gripper_pos_w = src_pos  # (N, 3)
-            gripper_quat_w = src_quat  # (N, 4)
-
-        num_envs = gripper_pos_w.shape[0]
-
-        # 2) Use provided v_ee (EE-frame vector)
-        # Ensure shape (N, 3)
-        v_ee = v_ee.reshape(num_envs, 3).to(device=device, dtype=gripper_pos_w.dtype)
-
-        # Unit direction in EE frame
-        v_ee_unit = v_ee / (v_ee.norm(dim=-1, keepdim=True) + eps)  # (N, 3)
-
-        # 3) Rotate direction into world frame using gripper orientation (EE -> world)
-        v_world = math_utils.quat_apply(gripper_quat_w, v_ee_unit)  # (..., 3)
-        v_world = v_world.reshape(num_envs, 3)
-        v_world_norm = v_world / (v_world.norm(dim=-1, keepdim=True) + eps)  # (N, 3)
-
-        # 4) Build quaternion that rotates +X to v_world_norm
-        base_dir = torch.zeros_like(v_world_norm)  # (N, 3)
-        base_dir[:, 0] = 1.0  # +X
-
-        dot = (base_dir * v_world_norm).sum(dim=-1).clamp(-1.0, 1.0)  # (N,)
-        angle = torch.acos(dot)  # (N,)
-
-        axis = torch.cross(base_dir, v_world_norm, dim=-1)  # (N, 3)
-        axis_norm = axis.norm(dim=-1, keepdim=True)  # (N, 1)
-
-        default_axis = torch.zeros_like(axis)
-        default_axis[:, 2] = 1.0  # world Z
-        axis = torch.where(axis_norm > eps, axis / (axis_norm + eps), default_axis)
-
-        arrow_quat_w = math_utils.quat_from_angle_axis(angle, axis)  # (N, 4)
-
-        # Optional: push arrow out a bit from gripper
-        offset = torch.tensor(
-            self.cfg.gripper.grip_zone_offset, dtype=torch.float32, device=device
-        )
-        arrow_pos_w = gripper_pos_w + offset * v_world_norm  # (N, 3)
-
-        # 5) Visualize
-        marker_indices = torch.zeros(num_envs, dtype=torch.long, device=device)  # (N,)
-
-        self.gripper_arrow_markers.visualize(
-            arrow_pos_w,  # (N, 3)
-            arrow_quat_w,  # (N, 4)
-            marker_indices=marker_indices,
-        )
-
-    # def _visualize_tip_markers(self):
-    #     # Skip if markers weren't created (video recording mode)
-    #     tip_pos = self._compute_ee_pos_w(self._grip_zone_offset)  # (num_envs, 3)
-
-    #     # orientations: identity quats (w x y z) = (1, 0, 0, 0) per environment
-    #     orientations = torch.zeros((self.num_envs, 4), device=self.device)
-    #     orientations[:, 0] = 1.0  # w component
-
-    #     # all markers use prototype index 0 ("tip")
-    #     marker_indices = torch.zeros(
-    #         (self.num_envs,), dtype=torch.long, device=self.device
-    #     )
-
-    #     self.tip_markers.visualize(
-    #         translations=tip_pos,
-    #         orientations=orientations,
-    #         marker_indices=marker_indices,
-    #     )
 
     def _compute_ee_pos_w(self, offset: torch.Tensor | None = None) -> torch.Tensor:
         # body_pos_w: (num_envs, num_bodies, 3)

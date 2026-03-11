@@ -52,6 +52,8 @@ debug:
   save_images: false
   save_image_interval: 10
   enable_gripper_arrow_markers: false
+  enable_tip_markers: false
+  enable_camera_frame_markers: false
 
 behavior:
   binary_gripper_action:
