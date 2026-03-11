@@ -26,7 +26,7 @@ CLI_OVERRIDE_WARNINGS=()
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TASK_ROOT="${PROJECT_ROOT}/so101_rl"
-ENV_CONFIG_PATH="${PROJECT_ROOT}/configs/baseline.yaml"
+ENV_CONFIG_PATH=""
 STAGED_ENV_CONFIG_PATH=""
 ARTIFACTS_DIR="${PROJECT_ROOT}/artifacts/${ARTIFACT_TIMESTAMP}"
 # CUSTOM_OUTPUT_DIR=""
@@ -458,11 +458,11 @@ Commands:
 
 Options:
     --task TASK              Set task name (required)
-    --env-config PATH        YAML file for So101-LiftCube env parameters (default: configs/baseline.yaml)
+    --env-config PATH        YAML file for So101-LiftCube env parameters (required)
     --num-envs NUM           Override num_envs from YAML config [Warning emitted]
     --max-iterations NUM     Override max training iterations (multiplied by rollouts) [Warning emitted]
     --checkpoint PATH        Path to checkpoint file (required for export; used by play)
-    --output-dir PATH        Reserved for custom output directory (currently not used)
+    --output-dir PATH        Override the artifacts output directory (default: artifacts/<timestamp>/) [Warning emitted]
     --video-length NUM       Override video length in frames (downstream default used if unset) [Warning emitted]
     --video                  Enable video recording during play
     --headless               Run in headless mode (no GUI)
@@ -477,7 +477,6 @@ Environment Variables:
 Examples:
     $0 doctor
     $0 all --task So101-LiftCube-v0 --num-envs 8192 --max-iterations 10000
-    $0 train --task So101-LiftCube-v0
     $0 train --task So101-LiftCube-v0 --env-config configs/baseline.yaml
     $0 export --task So101-LiftCube-v0 --checkpoint logs/skrl/so101_rl/<run>/checkpoints/checkpoint_10000.pt
     $0 play --task So101-LiftCube-v0 --checkpoint logs/skrl/so101_rl/<run>/checkpoints/checkpoint_10000.pt --video --video-length 1200
@@ -499,7 +498,6 @@ while [[ $# -gt 0 ]]; do
             ;;
         --env-config)
             ENV_CONFIG_PATH="$2"
-            CLI_OVERRIDE_WARNINGS+=("--env-config=${ENV_CONFIG_PATH} (overrides default config path)")
             shift 2
             ;;
         --num-envs)
@@ -518,6 +516,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         --output-dir)
             CUSTOM_OUTPUT_DIR="$2"
+            CLI_OVERRIDE_WARNINGS+=("--output-dir=${CUSTOM_OUTPUT_DIR} (overrides default timestamped artifacts dir)")
             shift 2
             ;;
         --headless)
@@ -557,6 +556,14 @@ done
 main() {
     print_header "Training Pipeline"
 
+    # Apply output dir override
+    if [ -n "${CUSTOM_OUTPUT_DIR}" ]; then
+        if [[ "${CUSTOM_OUTPUT_DIR}" != /* ]]; then
+            CUSTOM_OUTPUT_DIR="${PROJECT_ROOT}/${CUSTOM_OUTPUT_DIR}"
+        fi
+        ARTIFACTS_DIR="${CUSTOM_OUTPUT_DIR}"
+    fi
+
     # Emit warnings for any CLI overrides
     if [ ${#CLI_OVERRIDE_WARNINGS[@]} -gt 0 ]; then
         for warn in "${CLI_OVERRIDE_WARNINGS[@]}"; do
@@ -568,6 +575,11 @@ main() {
     if [[ "${COMMAND}" != "help" && "${COMMAND}" != "doctor" ]]; then
         if [[ -z "${TASK}" ]]; then
             print_error "--task is required for command: ${COMMAND:-<none>}"
+            show_usage
+            exit 1
+        fi
+        if [[ -z "${ENV_CONFIG_PATH}" ]]; then
+            print_error "--env-config is required for command: ${COMMAND:-<none>}"
             show_usage
             exit 1
         fi
