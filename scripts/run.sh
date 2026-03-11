@@ -16,10 +16,13 @@ ARTIFACT_TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
 HEADLESS=false
 ENABLE_CAMERAS=false
 ENABLE_VIDEO=false
-TASK="So101-JointVelGoUp-v0"
-NUM_ENVS=1024
-VIDEO_LENGTH=1000
+TASK=""
+NUM_ENVS=""
+VIDEO_LENGTH=""
 # MAX_ITERATIONS=
+
+# Tracks which parameters were explicitly provided via CLI (to emit override warnings)
+CLI_OVERRIDE_WARNINGS=()
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TASK_ROOT="${PROJECT_ROOT}/so101_rl"
@@ -52,6 +55,10 @@ print_info() {
 
 print_warn() {
     echo -e "${YELLOW}! $1${NC}"
+}
+
+print_cli_override() {
+    echo -e "${YELLOW}[Warning] CLI override: $1${NC}"
 }
 
 check_gpu() {
@@ -271,7 +278,9 @@ train_model() {
         ARGS+=" --checkpoint ${CHECKPOINT_PATH}"
     fi
 
-    ARGS+=" --num_envs ${NUM_ENVS}"
+    if [ -n "${NUM_ENVS}" ]; then
+        ARGS+=" --num_envs ${NUM_ENVS}"
+    fi
     ARGS+=" --artifacts_dir ${ARTIFACTS_DIR}"
     ARGS+=" hydra.run.dir=${ARTIFACTS_DIR}/hydra"
 
@@ -336,11 +345,19 @@ play() {
     fi
 
     if [ "${ENABLE_VIDEO:-false}" = "true" ]; then
-        ARGS="$ARGS --video --video_length ${VIDEO_LENGTH}"
+        ARGS="$ARGS --video"
+        if [ -n "${VIDEO_LENGTH}" ]; then
+            ARGS="$ARGS --video_length ${VIDEO_LENGTH}"
+        fi
     fi
 
     ARGS+=" --checkpoint ${CHECKPOINT_PATH}"
-    ARGS+=" --num_envs ${NUM_ENVS}"
+    if [ -n "${NUM_ENVS}" ]; then
+        ARGS+=" --num_envs ${NUM_ENVS}"
+    fi
+    if [ -n "${VIDEO_LENGTH}" ]; then
+        ARGS+=" --video_length ${VIDEO_LENGTH}"
+    fi
     local CKPT_ROOT
     CKPT_ROOT=$(dirname "$(dirname "$(dirname "$(realpath "${CHECKPOINT_PATH}")")")") 
     ARGS+=" hydra.run.dir=${CKPT_ROOT}/hydra_play"
@@ -440,13 +457,13 @@ Commands:
     help            Show this help message
 
 Options:
-    --task TASK              Set task name (default: ${TASK})
-    --env-config PATH        YAML file for So101-LiftCube env parameters (default: ${ENV_CONFIG_PATH})
-    --num-envs NUM           Set number of environments (default: ${NUM_ENVS})
-    --max-iterations NUM     Set max training iterations
+    --task TASK              Set task name (required)
+    --env-config PATH        YAML file for So101-LiftCube env parameters (default: configs/baseline.yaml)
+    --num-envs NUM           Override num_envs from YAML config [Warning emitted]
+    --max-iterations NUM     Override max training iterations (multiplied by rollouts) [Warning emitted]
     --checkpoint PATH        Path to checkpoint file (required for export; used by play)
     --output-dir PATH        Reserved for custom output directory (currently not used)
-    --video-length NUM       Length of recorded video in frames (default: ${VIDEO_LENGTH})
+    --video-length NUM       Override video length in frames (downstream default used if unset) [Warning emitted]
     --video                  Enable video recording during play
     --headless               Run in headless mode (no GUI)
     --enable-cameras         Enable cameras in the simulation
@@ -459,12 +476,12 @@ Environment Variables:
 
 Examples:
     $0 doctor
-    $0 all --task ${TASK} --num-envs 8192 --max-iterations 10000
-    $0 train --task ${TASK}
+    $0 all --task So101-LiftCube-v0 --num-envs 8192 --max-iterations 10000
+    $0 train --task So101-LiftCube-v0
     $0 train --task So101-LiftCube-v0 --env-config configs/baseline.yaml
-    $0 export --task ${TASK} --checkpoint logs/skrl/so101_rl/<run>/checkpoints/checkpoint_10000.pt
-    $0 play --task ${TASK} --checkpoint logs/skrl/so101_rl/<run>/checkpoints/checkpoint_10000.pt --video --video-length 1200
-    $0 train --task ${TASK} --display 0
+    $0 export --task So101-LiftCube-v0 --checkpoint logs/skrl/so101_rl/<run>/checkpoints/checkpoint_10000.pt
+    $0 play --task So101-LiftCube-v0 --checkpoint logs/skrl/so101_rl/<run>/checkpoints/checkpoint_10000.pt --video --video-length 1200
+    $0 train --task So101-LiftCube-v0 --display 0
 
 Notes:
     The script does not currently auto-detect checkpoints.
@@ -477,18 +494,22 @@ while [[ $# -gt 0 ]]; do
     case $1 in
         --task)
             TASK="$2"
+            CLI_OVERRIDE_WARNINGS+=("--task=${TASK} (overrides default task)")
             shift 2
             ;;
         --env-config)
             ENV_CONFIG_PATH="$2"
+            CLI_OVERRIDE_WARNINGS+=("--env-config=${ENV_CONFIG_PATH} (overrides default config path)")
             shift 2
             ;;
         --num-envs)
             NUM_ENVS="$2"
+            CLI_OVERRIDE_WARNINGS+=("--num-envs=${NUM_ENVS} (overrides YAML config value)")
             shift 2
             ;;
         --max-iterations)
             MAX_ITERATIONS="$2"
+            CLI_OVERRIDE_WARNINGS+=("--max-iterations=${MAX_ITERATIONS} (overrides trainer.timesteps in agent config)")
             shift 2
             ;;
         --checkpoint)
@@ -509,6 +530,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         --video-length)
             VIDEO_LENGTH="$2"
+            CLI_OVERRIDE_WARNINGS+=("--video-length=${VIDEO_LENGTH} (overrides downstream default)")
             shift 2
             ;;
         --video)
@@ -535,8 +557,22 @@ done
 main() {
     print_header "Training Pipeline"
 
-    
-    
+    # Emit warnings for any CLI overrides
+    if [ ${#CLI_OVERRIDE_WARNINGS[@]} -gt 0 ]; then
+        for warn in "${CLI_OVERRIDE_WARNINGS[@]}"; do
+            print_cli_override "${warn}"
+        done
+    fi
+
+    # Validate required arguments
+    if [[ "${COMMAND}" != "help" && "${COMMAND}" != "doctor" ]]; then
+        if [[ -z "${TASK}" ]]; then
+            print_error "--task is required for command: ${COMMAND:-<none>}"
+            show_usage
+            exit 1
+        fi
+    fi
+
     case "${COMMAND}" in
         help)
             show_usage
