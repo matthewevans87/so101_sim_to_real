@@ -188,3 +188,11 @@ sensors:
     debug_vis: false
   grip_zone_transform:
     debug_vis: false
+
+observations:
+  critic_obs_metrics:
+    - cube_pos_gz
+    - cube_rot6d_gz
+    - cube_height_w
+    - gripper_cube_contact_force_magnitude
+    - is_table_touched

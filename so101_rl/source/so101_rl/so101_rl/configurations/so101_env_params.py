@@ -397,6 +397,11 @@ class SensorsCfg:
 # ---------------------------------------------------------------------------
 
 @dataclass
+class ObservationsCfg:
+    critic_obs_metrics: list[str]
+
+
+@dataclass
 class So101EnvParams:
     decimation: int
     episode_length_s: float
@@ -412,6 +417,7 @@ class So101EnvParams:
     rewards: RewardsCfg
     domain_randomization: DomainRandomizationCfg
     sensors: SensorsCfg
+    observations: ObservationsCfg
 
     @classmethod
     def load(cls, path: str | Path) -> "So101EnvParams":

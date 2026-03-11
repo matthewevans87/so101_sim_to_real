@@ -51,7 +51,7 @@ from so101_rl.helpers.variations import (
     randomize_env_lights,
 )
 from .so101_lift_cube_env_cfg import So101LiftCubeCfg
-from so101_rl.env_pipeline import StepContext, MetricPipeline, RewardPipeline, build_metric_pipeline, build_reward_pipeline
+from so101_rl.env_pipeline import StepContext, MetricPipeline, RewardPipeline, build_metric_pipeline, build_reward_pipeline, KEY_OBS_DIMS
 import torch
 from collections.abc import Sequence
 
@@ -175,10 +175,7 @@ class So101LiftCube(DirectRLEnv):
                 "is_success_touch_terminal",
                 "is_table_touched",
                 # consumed by _get_observations (critic features)
-                "cube_pos_gz",
-                "cube_rot6d_gz",
-                "cube_height_w",
-                "gripper_cube_contact_force_magnitude",
+                *self.cfg.observations.critic_obs_metrics,
                 # consumed by _pre_physics_step (arrow markers)
                 "v_grip_zone_to_cube_ee",
             }),
@@ -342,18 +339,15 @@ class So101LiftCube(DirectRLEnv):
 
         critic_obs = torch.cat(
             [
-                q,  # joint positions, 3
-                dq,  # joint velocities, 3
-                self.step_metrics["cube_pos_gz"],  # 3
-                self.step_metrics["cube_rot6d_gz"],  # 6
-                self.step_metrics["cube_height_w"].unsqueeze(1),  # 1
-                self.step_metrics["gripper_cube_contact_force_magnitude"].unsqueeze(
-                    1
-                ),  # 1
-                self.step_metrics["is_table_touched"].unsqueeze(1),  # 1
+                q,   # (N, num_joints)
+                dq,  # (N, num_joints)
+                *[
+                    self.step_metrics[key].reshape(self.num_envs, KEY_OBS_DIMS[key])
+                    for key in self.cfg.observations.critic_obs_metrics
+                ],
             ],
             dim=-1,
-        )  # (N, X)
+        )  # (N, state_space)
 
         observations = {"policy": actor_obs, "critic": critic_obs}
 
@@ -376,9 +370,6 @@ class So101LiftCube(DirectRLEnv):
                 self.extras["log"][f"Step_Metrics/{key}"] = (
                     self.step_metrics[key].float().mean()
                 )
-
-        # if self.common_step_counter % 100 == 0:
-        #     print(self.step_metrics)
 
         # Episode timeout
         time_out = self.episode_length_buf >= self.max_episode_length - 1

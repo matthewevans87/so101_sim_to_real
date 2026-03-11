@@ -25,6 +25,7 @@ from isaaclab.sensors import FrameTransformerCfg
 from isaaclab.sensors.frame_transformer.frame_transformer_cfg import OffsetCfg
 
 from so101_rl.configurations.so101_env_params import So101EnvParams
+from so101_rl.env_pipeline import KEY_OBS_DIMS
 
 _Y: So101EnvParams = So101EnvParams.load(os.environ["SO101_ENV_CONFIG"])
 
@@ -49,7 +50,10 @@ class So101LiftCubeCfg(DirectRLEnvCfg):
 
     SPATIAL_SOFTMAX_FEATURES = 1024
     observation_space = SPATIAL_SOFTMAX_FEATURES + NUM_ACTIVE_JOINTS
-    state_space = 18
+    state_space = (
+        2 * NUM_ACTIVE_JOINTS
+        + sum(KEY_OBS_DIMS[k] for k in _Y.observations.critic_obs_metrics)
+    )
 
     # ── Asset configs ───────────────────────────────────────────────────────
     robot_cfg: ArticulationCfg = SO101_CFG.replace(prim_path="/World/envs/env_.*/Robot")  # type: ignore
@@ -139,4 +143,5 @@ class So101LiftCubeCfg(DirectRLEnvCfg):
     behavior          = _Y.behavior
     rewards           = _Y.rewards
     domain_randomization = _Y.domain_randomization
+    observations      = _Y.observations
 

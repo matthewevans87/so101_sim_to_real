@@ -52,6 +52,11 @@ class MetricStep(ABC):
     depends_on: frozenset[str] = frozenset()
     """Metric keys that must be present in ``ctx.metrics`` before this step runs."""
 
+    obs_dim: int = 0
+    """Number of columns this step contributes when included in an observation vector.
+    0 means the step is not intended for direct use in observations.
+    Scalars-per-env should set 1; vectors of length K should set K."""
+
     @abstractmethod
     def compute(self, ctx: StepContext) -> None:
         ...
@@ -184,6 +189,7 @@ class RewardPipeline:
 class GripperContactForceMagnitudeMetricStep(MetricStep):
     produces = frozenset({"gripper_cube_contact_force_magnitude"})
     depends_on = frozenset()
+    obs_dim = 1
 
     def compute(self, ctx: StepContext) -> None:
         env = ctx.env
@@ -203,6 +209,7 @@ class GripperContactForceMagnitudeMetricStep(MetricStep):
 class TableTouchedMetricStep(MetricStep):
     produces = frozenset({"is_table_touched"})
     depends_on = frozenset()
+    obs_dim = 1
 
     def compute(self, ctx: StepContext) -> None:
         env = ctx.env
@@ -217,6 +224,7 @@ class TableTouchedMetricStep(MetricStep):
 class CubePosEEMetricStep(MetricStep):
     produces = frozenset({"cube_pos_ee"})
     depends_on = frozenset()
+    obs_dim = 3
 
     def compute(self, ctx: StepContext) -> None:
         env = ctx.env
@@ -228,6 +236,7 @@ class CubePosEEMetricStep(MetricStep):
 class GripperCubeAlignmentMetricStep(MetricStep):
     produces = frozenset({"gripper_cube_alignment"})
     depends_on = frozenset()
+    obs_dim = 1
 
     def compute(self, ctx: StepContext) -> None:
         env = ctx.env
@@ -253,6 +262,7 @@ class GripperCubeAlignmentMetricStep(MetricStep):
 class CameraCubeAlignmentMetricStep(MetricStep):
     produces = frozenset({"camera_cube_alignment"})
     depends_on = frozenset()
+    obs_dim = 1
 
     def compute(self, ctx: StepContext) -> None:
         env = ctx.env
@@ -287,6 +297,7 @@ class CameraCubeAlignmentMetricStep(MetricStep):
 class VGripZoneToCubeEEMetricStep(MetricStep):
     produces = frozenset({"v_grip_zone_to_cube_ee"})
     depends_on = frozenset({"cube_pos_ee"})
+    obs_dim = 3
 
     def compute(self, ctx: StepContext) -> None:
         env = ctx.env
@@ -298,6 +309,7 @@ class VGripZoneToCubeEEMetricStep(MetricStep):
 class CubePosGZMetricStep(MetricStep):
     produces = frozenset({"cube_pos_gz"})
     depends_on = frozenset()
+    obs_dim = 3
 
     def compute(self, ctx: StepContext) -> None:
         env = ctx.env
@@ -309,6 +321,7 @@ class CubePosGZMetricStep(MetricStep):
 class CubeRot6DGZMetricStep(MetricStep):
     produces = frozenset({"cube_rot6d_gz"})
     depends_on = frozenset()
+    obs_dim = 6
 
     def compute(self, ctx: StepContext) -> None:
         env = ctx.env
@@ -322,6 +335,7 @@ class CubeRot6DGZMetricStep(MetricStep):
 class GripZoneCubeDistanceMetricStep(MetricStep):
     produces = frozenset({"grip_zone_cube_distance"})
     depends_on = frozenset({"v_grip_zone_to_cube_ee"})
+    obs_dim = 1
 
     def compute(self, ctx: StepContext) -> None:
         env = ctx.env
@@ -333,6 +347,7 @@ class GripZoneCubeDistanceMetricStep(MetricStep):
 class CubeHeightWMetricStep(MetricStep):
     produces = frozenset({"cube_height_w"})
     depends_on = frozenset()
+    obs_dim = 1
 
     def compute(self, ctx: StepContext) -> None:
         env = ctx.env
@@ -344,6 +359,7 @@ class CubeHeightWMetricStep(MetricStep):
 class CubeLiftFractionMetricStep(MetricStep):
     produces = frozenset({"cube_lift_fraction"})
     depends_on = frozenset({"cube_height_w"})
+    obs_dim = 1
 
     def compute(self, ctx: StepContext) -> None:
         env = ctx.env
@@ -391,6 +407,7 @@ class IsSuccessPointAtCubeTerminalMetricStep(MetricStep):
 class IsCubeInGripPositionMetricStep(MetricStep):
     produces = frozenset({"is_cube_in_grip_position"})
     depends_on = frozenset({"grip_zone_cube_distance"})
+    obs_dim = 1
 
     def compute(self, ctx: StepContext) -> None:
         env = ctx.env
@@ -405,6 +422,7 @@ class IsCubeInGripPositionMetricStep(MetricStep):
 class IsCubeGrippedMetricStep(MetricStep):
     produces = frozenset({"is_cube_gripped"})
     depends_on = frozenset({"is_cube_in_grip_position", "gripper_cube_contact_force_magnitude"})
+    obs_dim = 1
 
     def compute(self, ctx: StepContext) -> None:
         env = ctx.env
@@ -772,6 +790,15 @@ ALL_METRIC_STEPS: list[type[MetricStep]] = [
     IsCubeInGripPositionMetricStep,
     IsCubeGrippedMetricStep,
 ]
+
+# Maps each observable metric key to the number of columns it contributes
+# when flattened into an observation vector. Only keys with obs_dim > 0 appear.
+KEY_OBS_DIMS: dict[str, int] = {
+    key: cls.obs_dim
+    for cls in ALL_METRIC_STEPS
+    for key in cls.produces
+    if cls.obs_dim > 0
+}
 
 
 # ---------------------------------------------------------------------------
