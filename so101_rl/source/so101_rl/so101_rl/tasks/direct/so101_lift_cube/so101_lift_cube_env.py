@@ -166,15 +166,31 @@ class So101LiftCube(DirectRLEnv):
         self.step_metrics: dict[str, torch.Tensor] = None  # type: ignore
 
         self._step_ctx = StepContext(env=self)
-        self.metric_pipeline: MetricPipeline = build_metric_pipeline()
         self.reward_pipeline: RewardPipeline = build_reward_pipeline(self.cfg)
+        self.metric_pipeline: MetricPipeline = build_metric_pipeline(
+            self.reward_pipeline,
+            extra_keys=frozenset({
+                # consumed by _get_dones
+                "is_success_lift_fraction_terminal",
+                "is_success_point_at_cube_terminal",
+                "is_success_touch_terminal",
+                "is_table_touched",
+                # consumed by _get_observations (critic features)
+                "cube_pos_gz",
+                "cube_rot6d_gz",
+                "cube_height_w",
+                "gripper_cube_contact_force_magnitude",
+                # consumed by _pre_physics_step (arrow markers)
+                "v_grip_zone_to_cube_ee",
+            }),
+        )
 
         self.vision_feature_extractor = ResNet18SpatialSoftmaxFeatureExtractor(device=self.device)
 
-        _pipeline_steps = []
+        _image_pipeline_steps = []
         if self.cfg.domain_randomization.camera.feed.preshape_image.enabled:
-            _pipeline_steps.append(ResizePipelineStep((224, 224)))
-        _pipeline_steps.extend([
+            _image_pipeline_steps.append(ResizePipelineStep((224, 224)))
+        _image_pipeline_steps.extend([
             GaussianBlurPipelineStep(),
             JpegCompressionPipelineStep(),
             MotionBlurPipelineStep(),
@@ -185,7 +201,7 @@ class So101LiftCube(DirectRLEnv):
             ImageNetNormalizationPipelineStep(),
             ClampPipelineStep(),
         ])
-        self.image_pipeline = ImagePipeline(_pipeline_steps)
+        self.image_pipeline = ImagePipeline(_image_pipeline_steps)
 
     # Called by super class to setup the scene
     def _setup_scene(self):

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 from abc import ABC, abstractmethod
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -38,7 +39,18 @@ class StepContext:
 # ---------------------------------------------------------------------------
 
 class MetricStep(ABC):
-    """Computes one or more step-level metrics, writing results into ``ctx.metrics``."""
+    """Computes one or more step-level metrics, writing results into ``ctx.metrics``.
+
+    Subclasses must declare which keys they write (``produces``) and which
+    keys must already exist when they run (``depends_on``).  ``MetricPipeline``
+    uses these declarations to topologically sort steps at construction time.
+    """
+
+    produces: frozenset[str] = frozenset()
+    """Metric keys this step writes to ``ctx.metrics``."""
+
+    depends_on: frozenset[str] = frozenset()
+    """Metric keys that must be present in ``ctx.metrics`` before this step runs."""
 
     @abstractmethod
     def compute(self, ctx: StepContext) -> None:
@@ -46,10 +58,73 @@ class MetricStep(ABC):
 
 
 class MetricPipeline:
-    """Runs a sequence of :class:`MetricStep` objects in order, sharing a single context."""
+    """Accepts a set of :class:`MetricStep` objects in any order, topologically sorts
+    them by their ``produces`` / ``depends_on`` declarations, and runs them in dependency
+    order each step.
+
+    Raises:
+        ValueError: If a declared dependency is not produced by any step, or if there
+            is a dependency cycle among the steps.
+    """
 
     def __init__(self, steps: list[MetricStep]) -> None:
-        self.steps = steps
+        self.steps = self._toposort(steps)
+
+    @staticmethod
+    def _toposort(steps: list[MetricStep]) -> list[MetricStep]:
+        # Map each produced key to the step that produces it.
+        key_to_step: dict[str, MetricStep] = {}
+        for step in steps:
+            for key in step.produces:
+                if key in key_to_step:
+                    raise ValueError(
+                        f"Metric key '{key}' is produced by more than one step: "
+                        f"{type(key_to_step[key]).__name__} and {type(step).__name__}"
+                    )
+                key_to_step[key] = step
+
+        # Validate: every depends_on key must be produced by some step.
+        for step in steps:
+            for key in step.depends_on:
+                if key not in key_to_step:
+                    raise ValueError(
+                        f"{type(step).__name__} depends on metric key '{key}', "
+                        f"but no step produces it."
+                    )
+
+        # Build adjacency list: predecessor_step -> {dependent_steps}
+        # and in-degree counts for Kahn's algorithm.
+        dependents: dict[int, set[int]] = defaultdict(set)  # id(step) -> set of id(step)
+        in_degree: dict[int, int] = {id(s): 0 for s in steps}
+        step_by_id: dict[int, MetricStep] = {id(s): s for s in steps}
+
+        for step in steps:
+            for key in step.depends_on:
+                predecessor = key_to_step[key]
+                if id(predecessor) != id(step):
+                    dependents[id(predecessor)].add(id(step))
+                    in_degree[id(step)] += 1
+
+        # Kahn's algorithm
+        queue: deque[int] = deque(
+            sid for sid, deg in in_degree.items() if deg == 0
+        )
+        sorted_ids: list[int] = []
+        while queue:
+            sid = queue.popleft()
+            sorted_ids.append(sid)
+            for dep_id in dependents[sid]:
+                in_degree[dep_id] -= 1
+                if in_degree[dep_id] == 0:
+                    queue.append(dep_id)
+
+        if len(sorted_ids) != len(steps):
+            raise ValueError(
+                "Cycle detected among metric steps. Check the 'produces' and "
+                "'depends_on' declarations for a circular dependency."
+            )
+
+        return [step_by_id[sid] for sid in sorted_ids]
 
     def compute(self, ctx: StepContext) -> None:
         ctx.metrics.clear()
@@ -62,6 +137,10 @@ class RewardStep(ABC):
 
     name: str
     """Short identifier used for TensorBoard logging key. Must be set on each subclass."""
+
+    requires_metrics: frozenset[str] = frozenset()
+    """Metric keys from ``ctx.metrics`` that this step reads during ``compute``.
+    Used by ``build_metric_pipeline`` to determine which metric steps to include."""
 
     @abstractmethod
     def compute(self, ctx: StepContext) -> torch.Tensor:
@@ -79,6 +158,11 @@ class RewardPipeline:
 
     def __init__(self, steps: list[RewardStep]) -> None:
         self.steps = steps
+
+    @property
+    def required_metric_keys(self) -> frozenset[str]:
+        """Union of all ``requires_metrics`` declared by the steps in this pipeline."""
+        return frozenset().union(*(s.requires_metrics for s in self.steps))
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
         env = ctx.env
@@ -98,6 +182,9 @@ class RewardPipeline:
 # ---------------------------------------------------------------------------
 
 class GripperContactForceMagnitudeMetricStep(MetricStep):
+    produces = frozenset({"gripper_cube_contact_force_magnitude"})
+    depends_on = frozenset()
+
     def compute(self, ctx: StepContext) -> None:
         env = ctx.env
         val = (
@@ -114,6 +201,9 @@ class GripperContactForceMagnitudeMetricStep(MetricStep):
 
 
 class TableTouchedMetricStep(MetricStep):
+    produces = frozenset({"is_table_touched"})
+    depends_on = frozenset()
+
     def compute(self, ctx: StepContext) -> None:
         env = ctx.env
         force_norms = torch.linalg.norm(
@@ -125,6 +215,9 @@ class TableTouchedMetricStep(MetricStep):
 
 
 class CubePosEEMetricStep(MetricStep):
+    produces = frozenset({"cube_pos_ee"})
+    depends_on = frozenset()
+
     def compute(self, ctx: StepContext) -> None:
         env = ctx.env
         val = env.gripper_tf.data.target_pos_source[:, 0, :]
@@ -133,6 +226,9 @@ class CubePosEEMetricStep(MetricStep):
 
 
 class GripperCubeAlignmentMetricStep(MetricStep):
+    produces = frozenset({"gripper_cube_alignment"})
+    depends_on = frozenset()
+
     def compute(self, ctx: StepContext) -> None:
         env = ctx.env
         eps = 1e-6
@@ -155,6 +251,9 @@ class GripperCubeAlignmentMetricStep(MetricStep):
 
 
 class CameraCubeAlignmentMetricStep(MetricStep):
+    produces = frozenset({"camera_cube_alignment"})
+    depends_on = frozenset()
+
     def compute(self, ctx: StepContext) -> None:
         env = ctx.env
         eps = 1e-6
@@ -186,6 +285,9 @@ class CameraCubeAlignmentMetricStep(MetricStep):
 
 
 class VGripZoneToCubeEEMetricStep(MetricStep):
+    produces = frozenset({"v_grip_zone_to_cube_ee"})
+    depends_on = frozenset({"cube_pos_ee"})
+
     def compute(self, ctx: StepContext) -> None:
         env = ctx.env
         val = ctx.metrics["cube_pos_ee"] - env._grip_zone_offset
@@ -194,6 +296,9 @@ class VGripZoneToCubeEEMetricStep(MetricStep):
 
 
 class CubePosGZMetricStep(MetricStep):
+    produces = frozenset({"cube_pos_gz"})
+    depends_on = frozenset()
+
     def compute(self, ctx: StepContext) -> None:
         env = ctx.env
         val = env.grip_zone_tf.data.target_pos_source[:, 0, :]
@@ -202,6 +307,9 @@ class CubePosGZMetricStep(MetricStep):
 
 
 class CubeRot6DGZMetricStep(MetricStep):
+    produces = frozenset({"cube_rot6d_gz"})
+    depends_on = frozenset()
+
     def compute(self, ctx: StepContext) -> None:
         env = ctx.env
         q_gz = quat_unique(env.grip_zone_tf.data.target_quat_source[:, 0, :])
@@ -212,6 +320,9 @@ class CubeRot6DGZMetricStep(MetricStep):
 
 
 class GripZoneCubeDistanceMetricStep(MetricStep):
+    produces = frozenset({"grip_zone_cube_distance"})
+    depends_on = frozenset({"v_grip_zone_to_cube_ee"})
+
     def compute(self, ctx: StepContext) -> None:
         env = ctx.env
         val = ctx.metrics["v_grip_zone_to_cube_ee"].norm(dim=-1, keepdim=True).squeeze(-1)
@@ -220,6 +331,9 @@ class GripZoneCubeDistanceMetricStep(MetricStep):
 
 
 class CubeHeightWMetricStep(MetricStep):
+    produces = frozenset({"cube_height_w"})
+    depends_on = frozenset()
+
     def compute(self, ctx: StepContext) -> None:
         env = ctx.env
         val = (env.cube.data.root_pos_w[:, 2] - CUBE_RESTING_HEIGHT).clamp(min=0.0)
@@ -228,6 +342,9 @@ class CubeHeightWMetricStep(MetricStep):
 
 
 class CubeLiftFractionMetricStep(MetricStep):
+    produces = frozenset({"cube_lift_fraction"})
+    depends_on = frozenset({"cube_height_w"})
+
     def compute(self, ctx: StepContext) -> None:
         env = ctx.env
         val = ctx.metrics["cube_height_w"] / env.cfg.rewards.success_lift_fraction_terminal.height_threshold
@@ -236,6 +353,9 @@ class CubeLiftFractionMetricStep(MetricStep):
 
 
 class IsSuccessLiftFractionTerminalMetricStep(MetricStep):
+    produces = frozenset({"is_success_lift_fraction_terminal"})
+    depends_on = frozenset({"cube_lift_fraction"})
+
     def compute(self, ctx: StepContext) -> None:
         env = ctx.env
         val = (ctx.metrics["cube_lift_fraction"] >= 1.0).bool()
@@ -244,6 +364,9 @@ class IsSuccessLiftFractionTerminalMetricStep(MetricStep):
 
 
 class IsSuccessTouchTerminalMetricStep(MetricStep):
+    produces = frozenset({"is_success_touch_terminal"})
+    depends_on = frozenset({"gripper_cube_contact_force_magnitude"})
+
     def compute(self, ctx: StepContext) -> None:
         env = ctx.env
         val = (
@@ -255,6 +378,9 @@ class IsSuccessTouchTerminalMetricStep(MetricStep):
 
 
 class IsSuccessPointAtCubeTerminalMetricStep(MetricStep):
+    produces = frozenset({"is_success_point_at_cube_terminal"})
+    depends_on = frozenset({"gripper_cube_alignment"})
+
     def compute(self, ctx: StepContext) -> None:
         env = ctx.env
         val = (ctx.metrics["gripper_cube_alignment"] >= 1.0).bool()
@@ -263,6 +389,9 @@ class IsSuccessPointAtCubeTerminalMetricStep(MetricStep):
 
 
 class IsCubeInGripPositionMetricStep(MetricStep):
+    produces = frozenset({"is_cube_in_grip_position"})
+    depends_on = frozenset({"grip_zone_cube_distance"})
+
     def compute(self, ctx: StepContext) -> None:
         env = ctx.env
         val = (
@@ -274,6 +403,9 @@ class IsCubeInGripPositionMetricStep(MetricStep):
 
 
 class IsCubeGrippedMetricStep(MetricStep):
+    produces = frozenset({"is_cube_gripped"})
+    depends_on = frozenset({"is_cube_in_grip_position", "gripper_cube_contact_force_magnitude"})
+
     def compute(self, ctx: StepContext) -> None:
         env = ctx.env
         val = (
@@ -293,6 +425,7 @@ class IsCubeGrippedMetricStep(MetricStep):
 
 class DistanceRewardStep(RewardStep):
     name = "rew_distance"
+    requires_metrics = frozenset({"grip_zone_cube_distance"})
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
         env = ctx.env
@@ -301,6 +434,7 @@ class DistanceRewardStep(RewardStep):
 
 class GripCubeRewardStep(RewardStep):
     name = "rew_grip_cube"
+    requires_metrics = frozenset({"is_cube_in_grip_position", "gripper_cube_contact_force_magnitude"})
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
         env = ctx.env
@@ -313,6 +447,7 @@ class GripCubeRewardStep(RewardStep):
 
 class LiftCubeRewardStep(RewardStep):
     name = "rew_lift_cube"
+    requires_metrics = frozenset({"cube_lift_fraction"})
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
         env = ctx.env
@@ -325,6 +460,7 @@ class LiftCubeRewardStep(RewardStep):
 
 class GripperCubeAlignmentRewardStep(RewardStep):
     name = "rew_gripper_cube_alignment"
+    requires_metrics = frozenset({"is_cube_gripped", "gripper_cube_alignment"})
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
         env = ctx.env
@@ -339,6 +475,7 @@ class GripperCubeAlignmentRewardStep(RewardStep):
 
 class GripperLookAtCubeRewardStep(RewardStep):
     name = "rew_gripper_look_at_cube"
+    requires_metrics = frozenset({"is_cube_gripped"})
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
         env = ctx.env
@@ -382,6 +519,7 @@ class GripperLookAtCubeRewardStep(RewardStep):
 
 class CameraCubeAlignmentRewardStep(RewardStep):
     name = "rew_camera_cube_alignment"
+    requires_metrics = frozenset({"is_cube_gripped", "camera_cube_alignment"})
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
         env = ctx.env
@@ -396,6 +534,7 @@ class CameraCubeAlignmentRewardStep(RewardStep):
 
 class CloseGripperRewardStep(RewardStep):
     name = "rew_close_gripper"
+    requires_metrics = frozenset({"is_cube_in_grip_position"})
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
         env = ctx.env
@@ -413,6 +552,7 @@ class CloseGripperRewardStep(RewardStep):
 
 class GripperForceRewardStep(RewardStep):
     name = "rew_gripper_force"
+    requires_metrics = frozenset({"gripper_cube_contact_force_magnitude", "is_cube_in_grip_position"})
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
         env = ctx.env
@@ -424,6 +564,7 @@ class GripperForceRewardStep(RewardStep):
 
 class VantageRewardStep(RewardStep):
     name = "rew_vantage"
+    requires_metrics = frozenset({"is_cube_gripped"})
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
         env = ctx.env
@@ -473,6 +614,7 @@ class VantageRewardStep(RewardStep):
 
 class KeepCameraUprightRewardStep(RewardStep):
     name = "rew_keep_camera_upright"
+    requires_metrics = frozenset()
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
         env = ctx.env
@@ -488,6 +630,7 @@ class KeepCameraUprightRewardStep(RewardStep):
 
 class ActionRewardStep(RewardStep):
     name = "rew_action"
+    requires_metrics = frozenset()
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
         env = ctx.env
@@ -498,6 +641,7 @@ class ActionRewardStep(RewardStep):
 
 class EELinearSpeedRewardStep(RewardStep):
     name = "rew_ee_linear_speed"
+    requires_metrics = frozenset()
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
         env = ctx.env
@@ -510,6 +654,7 @@ class EELinearSpeedRewardStep(RewardStep):
 
 class JointSpeedRewardStep(RewardStep):
     name = "rew_joint_speed"
+    requires_metrics = frozenset()
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
         env = ctx.env
@@ -519,6 +664,7 @@ class JointSpeedRewardStep(RewardStep):
 
 class EEHeightSafetyRewardStep(RewardStep):
     name = "rew_ee_height_safety"
+    requires_metrics = frozenset()
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
         env = ctx.env
@@ -537,6 +683,7 @@ class EEHeightSafetyRewardStep(RewardStep):
 
 class SuccessTouchTerminalRewardStep(RewardStep):
     name = "rew_success_touch_terminal"
+    requires_metrics = frozenset({"is_success_touch_terminal"})
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
         env = ctx.env
@@ -550,6 +697,7 @@ class SuccessTouchTerminalRewardStep(RewardStep):
 
 class SuccessLiftFractionTerminalRewardStep(RewardStep):
     name = "rew_success_lift_fraction_terminal"
+    requires_metrics = frozenset({"is_success_lift_fraction_terminal"})
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
         env = ctx.env
@@ -563,6 +711,7 @@ class SuccessLiftFractionTerminalRewardStep(RewardStep):
 
 class SuccessPointAtCubeTerminalRewardStep(RewardStep):
     name = "rew_success_point_at_cube_terminal"
+    requires_metrics = frozenset({"is_success_point_at_cube_terminal"})
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
         env = ctx.env
@@ -576,6 +725,7 @@ class SuccessPointAtCubeTerminalRewardStep(RewardStep):
 
 class SafetyTouchTableTerminalRewardStep(RewardStep):
     name = "rew_safety_touch_table_terminal"
+    requires_metrics = frozenset({"is_table_touched"})
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
         env = ctx.env
@@ -588,6 +738,7 @@ class SafetyTouchTableTerminalRewardStep(RewardStep):
 
 class SafetyTouchTableRewardStep(RewardStep):
     name = "rew_safety_touch_table"
+    requires_metrics = frozenset({"is_table_touched"})
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
         env = ctx.env
@@ -599,29 +750,80 @@ class SafetyTouchTableRewardStep(RewardStep):
 
 
 # ---------------------------------------------------------------------------
+# Complete catalog of all available metric step classes (order irrelevant).
+# MetricPipeline will topologically sort any subset passed to it.
+# ---------------------------------------------------------------------------
+
+ALL_METRIC_STEPS: list[type[MetricStep]] = [
+    GripperContactForceMagnitudeMetricStep,
+    TableTouchedMetricStep,
+    CubePosEEMetricStep,
+    GripperCubeAlignmentMetricStep,
+    CameraCubeAlignmentMetricStep,
+    VGripZoneToCubeEEMetricStep,
+    CubePosGZMetricStep,
+    CubeRot6DGZMetricStep,
+    GripZoneCubeDistanceMetricStep,
+    CubeHeightWMetricStep,
+    CubeLiftFractionMetricStep,
+    IsSuccessLiftFractionTerminalMetricStep,
+    IsSuccessTouchTerminalMetricStep,
+    IsSuccessPointAtCubeTerminalMetricStep,
+    IsCubeInGripPositionMetricStep,
+    IsCubeGrippedMetricStep,
+]
+
+
+# ---------------------------------------------------------------------------
 # Factory helpers
 # ---------------------------------------------------------------------------
 
-def build_metric_pipeline() -> MetricPipeline:
-    """Construct the full ordered metric pipeline."""
-    return MetricPipeline([
-        GripperContactForceMagnitudeMetricStep(),
-        TableTouchedMetricStep(),
-        CubePosEEMetricStep(),
-        GripperCubeAlignmentMetricStep(),
-        CameraCubeAlignmentMetricStep(),
-        VGripZoneToCubeEEMetricStep(),       # depends: cube_pos_ee
-        CubePosGZMetricStep(),
-        CubeRot6DGZMetricStep(),
-        GripZoneCubeDistanceMetricStep(),     # depends: v_grip_zone_to_cube_ee
-        CubeHeightWMetricStep(),
-        CubeLiftFractionMetricStep(),         # depends: cube_height_w
-        IsSuccessLiftFractionTerminalMetricStep(),   # depends: cube_lift_fraction
-        IsSuccessTouchTerminalMetricStep(),          # depends: gripper_cube_contact_force_magnitude
-        IsSuccessPointAtCubeTerminalMetricStep(),    # depends: gripper_cube_alignment
-        IsCubeInGripPositionMetricStep(),            # depends: grip_zone_cube_distance
-        IsCubeGrippedMetricStep(),                  # depends: is_cube_in_grip_position, gripper_cube_contact_force_magnitude
-    ])
+def build_metric_pipeline(
+    reward_pipeline: RewardPipeline,
+    extra_keys: frozenset[str] = frozenset(),
+) -> MetricPipeline:
+    """Build a :class:`MetricPipeline` containing only the steps needed by
+    ``reward_pipeline`` (via ``RewardStep.requires_metrics``) plus any
+    additional keys requested via ``extra_keys``.
+
+    Dependency chains are resolved automatically: if a required key is
+    produced by a step that itself depends on another key, that upstream
+    step is included too.
+
+    The resulting pipeline is topologically sorted by ``MetricPipeline``.
+
+    Args:
+        reward_pipeline: The active :class:`RewardPipeline`; its
+            ``required_metric_keys`` property seeds the selection.
+        extra_keys: Additional metric keys to force-include (e.g. keys
+            consumed by observations or ``_pre_physics_step`` rather than
+            rewards).
+    """
+    # Build a key → step-class map from the full catalog.
+    key_to_cls: dict[str, type[MetricStep]] = {}
+    for cls in ALL_METRIC_STEPS:
+        for key in cls.produces:
+            key_to_cls[key] = cls
+
+    # Compute the transitive closure of needed keys.
+    needed_keys: set[str] = set(reward_pipeline.required_metric_keys) | set(extra_keys)
+    frontier = set(needed_keys)
+    while frontier:
+        key = frontier.pop()
+        if key not in key_to_cls:
+            # Will be caught as an unsatisfied dependency by MetricPipeline._toposort.
+            continue
+        for dep_key in key_to_cls[key].depends_on:
+            if dep_key not in needed_keys:
+                needed_keys.add(dep_key)
+                frontier.add(dep_key)
+
+    # Collect the unique step classes required.
+    needed_cls: set[type[MetricStep]] = {
+        key_to_cls[k] for k in needed_keys if k in key_to_cls
+    }
+
+    return MetricPipeline([cls() for cls in needed_cls])
 
 
 def build_reward_pipeline(cfg) -> RewardPipeline:
