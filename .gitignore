@@ -1,4 +1,5 @@
 outputs
 logs
+artifacts
 __pycache__/
 *.egg-info/

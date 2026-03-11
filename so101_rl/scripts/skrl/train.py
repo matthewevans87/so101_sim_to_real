@@ -85,6 +85,12 @@ parser.add_argument(
     choices=["AMP", "PPO", "IPPO", "MAPPO"],
     help="The RL algorithm used for training the skrl agent.",
 )
+parser.add_argument(
+    "--artifacts_dir",
+    type=str,
+    default=None,
+    help="Root artifacts directory for this run (e.g. /path/to/artifacts/2026-03-11_10-20-38).",
+)
 
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
@@ -108,7 +114,6 @@ import numpy as np
 import os
 import random
 import torch
-from datetime import datetime
 
 import omni
 import skrl
@@ -216,27 +221,14 @@ def main(
         torch.cuda.manual_seed_all(_seed)
 
     # specify directory for logging experiments
-    log_root_path = os.path.join(
-        "logs", "skrl", agent_cfg["agent"]["experiment"]["directory"]
-    )
-    log_root_path = os.path.abspath(log_root_path)
+    log_root_path = os.path.abspath(os.path.join(args_cli.artifacts_dir, "skrl"))
     print(f"[INFO] Logging experiment in directory: {log_root_path}")
-    # specify directory for logging runs: {time-stamp}_{run_name}
-    log_dir = (
-        datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        + f"_{algorithm}_{args_cli.ml_framework}"
-    )
-    # The Ray Tune workflow extracts experiment name using the logging line below, hence, do not change it (see PR #2346, comment-2819298849)
-    print(f"Exact experiment name requested from command line: {log_dir}")
-    if agent_cfg["agent"]["experiment"]["experiment_name"]:
-        log_dir += f'_{agent_cfg["agent"]["experiment"]["experiment_name"]}'
-    # set directory into agent config
+    # set directory into agent config (experiment_name kept from YAML config)
     agent_cfg["agent"]["experiment"]["directory"] = log_root_path
-    agent_cfg["agent"]["experiment"]["experiment_name"] = log_dir
     agent_cfg["agent"]["experiment"]["write_interval"] = 100
 
-    # update log_dir
-    log_dir = os.path.join(log_root_path, log_dir)
+    # log_dir is the full path including the experiment name sub-dir
+    log_dir = os.path.join(log_root_path, agent_cfg["agent"]["experiment"]["experiment_name"])
 
     # dump the configuration into log-directory
     dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)

@@ -44,7 +44,7 @@ from so101_rl.helpers.variations import (
     randomize_env_lights,
 )
 from .so101_lift_cube_env_cfg import So101LiftCubeCfg
-from .env_pipeline import StepContext, MetricPipeline, RewardPipeline, build_metric_pipeline, build_reward_pipeline
+from so101_rl.env_pipeline import StepContext, MetricPipeline, RewardPipeline, build_metric_pipeline, build_reward_pipeline
 import torch
 from collections.abc import Sequence
 

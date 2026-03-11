@@ -88,8 +88,7 @@
     // Python environment path
     // note: the default interpreter is overridden when user selects a workspace interpreter
     //     in the status bar. For example, the virtual environment python interpreter
-    // "python.defaultInterpreterPath": "/opt/miniforge3/bin/python",
-    // "python.defaultInterpreterPath": "/opt/isaac-sim/isaac-sim-5.1.0/python.sh",
+    "python.defaultInterpreterPath": "~/.conda/envs/env_isaaclab/bin/python",
     // Autocomplete and IntelliSense
     "python.analysis.autoImportCompletions": true,
     // ROS distribution
@@ -203,7 +202,8 @@
         "/opt/isaac-sim/isaac-sim-5.1.0/exts/isaacsim.robot.manipulators.examples",
         "/opt/isaac-sim/isaac-sim-5.1.0/exts/isaacsim.test.collection",
         "/opt/isaac-sim/isaac-sim-5.1.0/exts/isaacsim.code_editor.vscode",
-        "/opt/isaac-sim/isaac-sim-5.1.0/exts/isaacsim.asset.importer.mjcf"
+        "/opt/isaac-sim/isaac-sim-5.1.0/exts/isaacsim.asset.importer.mjcf",
+        "./so101_rl/source/so101_rl"
     ],
     // See infrastructure/generate_paths.py for how this list is generated
     // Note that the IsaacLab paths must be added manually
@@ -313,5 +313,7 @@
         "/opt/isaac-sim/isaac-sim-5.1.0/exts/isaacsim.asset.importer.mjcf",
         "./so101_rl/source/so101_rl"
     ],
-    "github.copilot.chat.codeGeneration.useInstructionFiles": true
+    "github.copilot.chat.codeGeneration.useInstructionFiles": true,
+    "python-envs.defaultEnvManager": "ms-python.python:conda",
+    "python-envs.defaultPackageManager": "ms-python.python:conda"
 }

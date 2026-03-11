@@ -11,6 +11,7 @@ NC='\033[0m' # No Color
 
 # Defaults
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+ARTIFACT_TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
 
 HEADLESS=false
 ENABLE_CAMERAS=false
@@ -24,6 +25,7 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TASK_ROOT="${PROJECT_ROOT}/so101_rl"
 ENV_CONFIG_PATH="${PROJECT_ROOT}/configs/baseline.yaml"
 STAGED_ENV_CONFIG_PATH=""
+ARTIFACTS_DIR="${PROJECT_ROOT}/artifacts/${ARTIFACT_TIMESTAMP}"
 # CUSTOM_OUTPUT_DIR=""
 # OUTPUT_DIR="${PROJECT_ROOT}/outputs/output_${TIMESTAMP}"
 # LOGS_DIR="${OUTPUT_DIR}/logs"
@@ -270,6 +272,18 @@ train_model() {
     fi
 
     ARGS+=" --num_envs ${NUM_ENVS}"
+    ARGS+=" --artifacts_dir ${ARTIFACTS_DIR}"
+    ARGS+=" hydra.run.dir=${ARTIFACTS_DIR}/hydra"
+
+    # Copy env config into artifacts dir for reproducibility
+    mkdir -p "${ARTIFACTS_DIR}"
+    if [ -n "${STAGED_ENV_CONFIG_PATH}" ] && [ -f "${STAGED_ENV_CONFIG_PATH}" ]; then
+        cp "${STAGED_ENV_CONFIG_PATH}" "${ARTIFACTS_DIR}/env_config.yaml"
+        print_success "Env config copied to ${ARTIFACTS_DIR}/env_config.yaml"
+    elif [ -n "${ENV_CONFIG_PATH}" ] && [ -f "${ENV_CONFIG_PATH}" ]; then
+        cp "${ENV_CONFIG_PATH}" "${ARTIFACTS_DIR}/env_config.yaml"
+        print_success "Env config copied to ${ARTIFACTS_DIR}/env_config.yaml"
+    fi
 
     local TRAIN_COMMAND="$ISAAC_LAB_PATH/isaaclab.sh -p ${TASK_ROOT}/scripts/skrl/train.py ${ARGS}"
     print_info "Executing training command: ${TRAIN_COMMAND}"
@@ -327,7 +341,10 @@ play() {
 
     ARGS+=" --checkpoint ${CHECKPOINT_PATH}"
     ARGS+=" --num_envs ${NUM_ENVS}"
-    
+    local CKPT_ROOT
+    CKPT_ROOT=$(dirname "$(dirname "$(dirname "$(realpath "${CHECKPOINT_PATH}")")")") 
+    ARGS+=" hydra.run.dir=${CKPT_ROOT}/hydra_play"
+
     local PLAY_COMMAND="$ISAAC_LAB_PATH/isaaclab.sh -p ${TASK_ROOT}/scripts/skrl/play.py ${ARGS}"
     print_info "Executing play command: ${PLAY_COMMAND}"
     
@@ -377,6 +394,9 @@ export_model() {
     fi
     
     print_info "Exporting trained model for task: $TASK"
+    local CKPT_ROOT
+    CKPT_ROOT=$(dirname "$(dirname "$(dirname "$(realpath "${CHECKPOINT_PATH}")")")") 
+    ARGS+=" hydra.run.dir=${CKPT_ROOT}/hydra_export"
 
     local EXPORT_COMMAND="$ISAAC_LAB_PATH/isaaclab.sh -p ${TASK_ROOT}/scripts/skrl/export.py ${ARGS}"
     print_info "Executing export command: ${EXPORT_COMMAND}"

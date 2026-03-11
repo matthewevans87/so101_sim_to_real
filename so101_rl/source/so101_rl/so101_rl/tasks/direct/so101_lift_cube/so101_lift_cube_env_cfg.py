@@ -24,7 +24,7 @@ from isaaclab.sensors.camera import CameraCfg
 from isaaclab.sensors import FrameTransformerCfg
 from isaaclab.sensors.frame_transformer.frame_transformer_cfg import OffsetCfg
 
-from .so101_env_params import So101EnvParams
+from so101_rl.configurations.so101_env_params import So101EnvParams
 
 _Y: So101EnvParams = So101EnvParams.load(os.environ["SO101_ENV_CONFIG"])
 
