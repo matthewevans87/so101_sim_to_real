@@ -3,7 +3,7 @@ episode_length_s: 10.0
 sim:
   dt: 0.008333333333333333
 scene:
-  num_envs: 16
+  num_envs: 8
   env_spacing: 2.0
   replicate_physics: true
 
@@ -60,39 +60,56 @@ behavior:
     enabled: false
 
 rewards:
+# baseline reward components
+
+# distance from gripper to cube (meters)
   distance:
     enabled: true
-    scale: -100.0
+    scale: -5.0
+# binary reward for touching a properly positioned cube with the gripper
   grip_cube:
     enabled: true
-    scale: 100.0
+    scale: 2.0
     distance_threshold: 0.02
+# fraction lifted (to threshold)
   lift_cube:
     enabled: true
-    scale: 1000.0
+    scale: 5.0
+# sum of actions
+  action:
+    enabled: true
+    scale: -0.001
+# binary penalty for touching the table
+  safety_touch_table:
+    enabled: true
+    scale: -1.0
+# terminal reward for successfully lifting the cube above the height threshold (meters)
+  success_lift_fraction_terminal:
+    enabled: true
+    scale: 100.0
+    height_threshold: 0.10
+
+
   gripper_cube_alignment:
     enabled: false
     scale: 1.0
   camera_cube_alignment:
-    enabled: true
+    enabled: false
     scale: 1.0
   close_gripper:
-    enabled: true
+    enabled: false
     scale: 10.0
     close_target: 0.17453292519943295
     max_open: 1.7453292519943295
   gripper_force:
-    enabled: true
+    enabled: false
     scale: 10.0
     force_target: 1.0
   gripper_look_at_cube:
     enabled: false
     scale: 1.0
-  action:
-    enabled: true
-    scale: -0.001
   ee_linear_speed:
-    enabled: true
+    enabled: false
     scale: -0.01
     safe_speed: 0.1
   joint_speed:
@@ -101,13 +118,6 @@ rewards:
   ee_height_safety:
     enabled: false
     scale: -100.0
-  safety_touch_table:
-    enabled: true
-    scale: -1.0
-  success_lift_fraction_terminal:
-    enabled: true
-    scale: 2000.0
-    height_threshold: 0.10
   success_touch_terminal:
     enabled: false
     scale: 500.0
@@ -150,22 +160,22 @@ domain_randomization:
         enabled: false
         quality_range: [60, 70]
     pose:
-      enabled: true
+      enabled: false
       position_noise_range: [-0.001, 0.001]
       rotation_noise_deg_range: [-0.5, 0.5]
   world_lighting:
-    enabled: true
+    enabled: false
     intensity_range: [500.0, 1500.0]
     color_variation: 0.05
   env_lighting:
-    enabled: true
+    enabled: false
     height_range: [0.5, 2.0]
     intensity_range: [10000.0, 30000.0]
     color_variation: 0.05
     specular_range: [1.0, 5.0]
   cube:
     color_randomization_enabled: false
-    size_randomization_enabled: true
+    size_randomization_enabled: false
     size_range: [0.975, 1.025]
     position_randomization:
       enabled: true
@@ -183,7 +193,7 @@ sensors:
     debug_vis: false
   table_contact:
     track_pose: false
-    debug_vis: true
+    debug_vis: false
   gripper_transform:
     debug_vis: false
   grip_zone_transform:
