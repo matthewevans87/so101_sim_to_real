@@ -654,7 +654,7 @@ class ActionRewardStep(RewardStep):
         env = ctx.env
         if env.actions is None:
             return torch.zeros(env.num_envs, device=env.device)
-        return env.cfg.rewards.action.scale * torch.sum(env.actions ** 2, dim=-1)
+        return env.cfg.rewards.action.scale * torch.sum(env.actions, dim=-1)
 
 
 class EELinearSpeedRewardStep(RewardStep):
