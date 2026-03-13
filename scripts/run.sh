@@ -19,6 +19,9 @@ ENABLE_VIDEO=false
 TASK=""
 NUM_ENVS=""
 VIDEO_LENGTH=""
+EXPERIMENT_PATH=""
+NUM_EPISODES=""
+NUM_VIDEOS=""
 # MAX_ITERATIONS=
 
 # Tracks which parameters were explicitly provided via CLI (to emit override warnings)
@@ -389,6 +392,115 @@ set_display() {
     export XAUTHORITY="${XAUTHORITY:-/home/${USER}/.Xauthority}"
 }
 
+evaluate_model() {
+    print_info "Evaluating trained agent for experiment: ${EXPERIMENT_PATH}"
+
+    if [ -z "${EXPERIMENT_PATH}" ]; then
+        print_error "Experiment path is required for evaluation."
+        exit 1
+    fi
+
+    # Convert to absolute path if relative
+    if [[ "${EXPERIMENT_PATH}" != /* ]]; then
+        EXPERIMENT_PATH="${PROJECT_ROOT}/${EXPERIMENT_PATH}"
+    fi
+
+    if [ ! -d "${EXPERIMENT_PATH}" ]; then
+        print_error "Experiment path does not exist: ${EXPERIMENT_PATH}"
+        exit 1
+    fi
+
+    # Check if env_config.yaml exists
+    local ENV_CONFIG="${EXPERIMENT_PATH}/env_config.yaml"
+    if [ -f "${ENV_CONFIG}" ]; then
+        print_info "Found env_config.yaml: ${ENV_CONFIG}"
+        ENV_CONFIG_PATH="${ENV_CONFIG}"
+    else
+        print_warn "No env_config.yaml found at ${ENV_CONFIG}"
+    fi
+
+    # Find task name from skrl directory
+    local SKRL_DIR="${EXPERIMENT_PATH}/skrl"
+    if [ ! -d "${SKRL_DIR}" ]; then
+        print_error "No skrl directory found in experiment path"
+        exit 1
+    fi
+
+    # Get task name (should be the only subdirectory in skrl/)
+    local TASK_DIR
+    TASK_DIR=$(find "${SKRL_DIR}" -mindepth 1 -maxdepth 1 -type d | head -n 1)
+    if [ -z "${TASK_DIR}" ]; then
+        print_error "No task directory found in ${SKRL_DIR}"
+        exit 1
+    fi
+
+    local TASK_NAME
+    TASK_NAME=$(basename "${TASK_DIR}")
+    print_info "Detected task name: ${TASK_NAME}"
+
+    # Check if checkpoint exists
+    local CHECKPOINT="${TASK_DIR}/checkpoints/best_agent.pt"
+    if [ ! -f "${CHECKPOINT}" ]; then
+        print_error "Checkpoint not found: ${CHECKPOINT}"
+        exit 1
+    fi
+    print_success "Found checkpoint: ${CHECKPOINT}"
+
+    # Determine full task name (e.g., So101-LiftCube-v0)
+    # Try to match task name pattern
+    local FULL_TASK_NAME
+    if [ -n "${TASK}" ]; then
+        FULL_TASK_NAME="${TASK}"
+    else
+        # Try to construct task name from directory name
+        # Convert so101_lift_cube to So101-LiftCube-v0
+        FULL_TASK_NAME=$(echo "${TASK_NAME}" | sed -E 's/so101_(.*)_v([0-9]+)/So101-\U\1\E-v\2/; s/_/-/g; s/([a-z])([A-Z])/\1-\2/g; s/--/-/g')
+        
+        # If that didn't work, try simpler pattern
+        if [[ ! "${FULL_TASK_NAME}" =~ ^So101- ]]; then
+            # Default pattern
+            FULL_TASK_NAME="So101-LiftCube-v0"
+        fi
+        print_info "Using task name: ${FULL_TASK_NAME}"
+    fi
+
+    local ARGS=""
+    ARGS+=" --experiment-path ${EXPERIMENT_PATH}"
+    ARGS+=" --task ${FULL_TASK_NAME}"
+
+    if [ -n "${NUM_EPISODES}" ]; then
+        ARGS+=" --num-episodes ${NUM_EPISODES}"
+    fi
+
+    if [ -n "${NUM_VIDEOS}" ]; then
+        ARGS+=" --num-videos ${NUM_VIDEOS}"
+    fi
+
+    if [ "${HEADLESS:-false}" = "true" ]; then
+        ARGS+=" --headless"
+    fi
+
+    local EVAL_COMMAND="$ISAAC_LAB_PATH/isaaclab.sh -p ${TASK_ROOT}/scripts/skrl/evaluate.py ${ARGS}"
+    print_info "Executing evaluate command: ${EVAL_COMMAND}"
+
+    local WORKSPACE_PATH_VALUE="$ISAAC_LAB_PATH/workspace/${FULL_TASK_NAME}"
+    local ENV_VARS
+    ENV_VARS="$(get_gui_env_vars "${WORKSPACE_PATH_VALUE}" "${ENV_CONFIG_PATH}")"
+
+    if [ -n "${DISPLAY:-}" ]; then
+        print_info "Using DISPLAY=${DISPLAY}"
+    else
+        print_warn "DISPLAY is not set. GUI windows may fail to open."
+    fi
+    if [ -n "${XAUTHORITY:-}" ]; then
+        print_info "Using XAUTHORITY=${XAUTHORITY}"
+    else
+        print_warn "XAUTHORITY is not set. X11 auth may fail over SSH."
+    fi
+
+    /bin/bash -c "$ENV_VARS /bin/bash ${EVAL_COMMAND}"
+}
+
 export_model() {
 
     local ARGS=""
@@ -453,12 +565,16 @@ Commands:
     train           Stage assets, install task, check GPU, then train
     export          Stage assets, install task, check GPU, then export model from checkpoint
     play            Stage assets, install task, check GPU, then run policy playback
+    evaluate        Run comprehensive evaluation on a trained agent from an experiment directory
     doctor          Print detected DISPLAY / XAUTHORITY guidance for remote SSH use
     help            Show this help message
 
 Options:
-    --task TASK              Set task name (required)
-    --env-config PATH        YAML file for So101-LiftCube env parameters (required)
+    --task TASK              Set task name (required for most commands; auto-detected for evaluate)
+    --env-config PATH        YAML file for So101-LiftCube env parameters (required for train/play/export)
+    --experiment-path PATH   Path to experiment directory (required for evaluate)
+    --num-episodes NUM       Override evaluation episode count (default: 100) [Warning emitted]
+    --num-videos NUM         Override evaluation video episodes (default: 5) [Warning emitted]
     --num-envs NUM           Override num_envs from YAML config [Warning emitted]
     --max-iterations NUM     Override max training iterations (multiplied by rollouts) [Warning emitted]
     --checkpoint PATH        Path to checkpoint file (required for export; used by play)
@@ -480,6 +596,7 @@ Examples:
     $0 train --task So101-LiftCube-v0 --env-config configs/baseline.yaml
     $0 export --task So101-LiftCube-v0 --checkpoint logs/skrl/so101_rl/<run>/checkpoints/checkpoint_10000.pt
     $0 play --task So101-LiftCube-v0 --checkpoint logs/skrl/so101_rl/<run>/checkpoints/checkpoint_10000.pt --video --video-length 1200
+    $0 evaluate --experiment-path artifacts/2026-03-12_09-52-10
     $0 train --task So101-LiftCube-v0 --display 0
 
 Notes:
@@ -540,7 +657,21 @@ while [[ $# -gt 0 ]]; do
             X_SOCK="$2"
             shift 2
             ;;
-        all|train|export|play|install|doctor|help)
+        --experiment-path)
+            EXPERIMENT_PATH="$2"
+            shift 2
+            ;;
+        --num-episodes)
+            NUM_EPISODES="$2"
+            CLI_OVERRIDE_WARNINGS+=("--num-episodes=${NUM_EPISODES} (overrides evaluation default)")
+            shift 2
+            ;;
+        --num-videos)
+            NUM_VIDEOS="$2"
+            CLI_OVERRIDE_WARNINGS+=("--num-videos=${NUM_VIDEOS} (overrides evaluation default)")
+            shift 2
+            ;;
+        all|train|export|play|evaluate|install|doctor|help)
             COMMAND="$1"
             shift
             ;;
@@ -572,7 +703,7 @@ main() {
     fi
 
     # Validate required arguments
-    if [[ "${COMMAND}" != "help" && "${COMMAND}" != "doctor" ]]; then
+    if [[ "${COMMAND}" != "help" && "${COMMAND}" != "doctor" && "${COMMAND}" != "evaluate" ]]; then
         if [[ -z "${TASK}" ]]; then
             print_error "--task is required for command: ${COMMAND:-<none>}"
             show_usage
@@ -581,6 +712,35 @@ main() {
         if [[ -z "${ENV_CONFIG_PATH}" ]]; then
             print_error "--env-config is required for command: ${COMMAND:-<none>}"
             show_usage
+            exit 1
+        fi
+    fi
+
+    # Validate evaluate-specific arguments
+    if [[ "${COMMAND}" == "evaluate" ]]; then
+        if [[ -z "${EXPERIMENT_PATH}" ]]; then
+            print_error "--experiment-path is required for evaluate command"
+            show_usage
+            exit 1
+        fi
+        if [[ -n "${NUM_EPISODES}" && ! "${NUM_EPISODES}" =~ ^[0-9]+$ ]]; then
+            print_error "--num-episodes must be a positive integer"
+            exit 1
+        fi
+        if [[ -n "${NUM_EPISODES}" && "${NUM_EPISODES}" -lt 1 ]]; then
+            print_error "--num-episodes must be at least 1"
+            exit 1
+        fi
+        if [[ -n "${NUM_VIDEOS}" && ! "${NUM_VIDEOS}" =~ ^[0-9]+$ ]]; then
+            print_error "--num-videos must be a positive integer"
+            exit 1
+        fi
+        if [[ -n "${NUM_VIDEOS}" && "${NUM_VIDEOS}" -lt 0 ]]; then
+            print_error "--num-videos cannot be negative"
+            exit 1
+        fi
+        if [[ -n "${NUM_EPISODES}" && -n "${NUM_VIDEOS}" && "${NUM_VIDEOS}" -gt "${NUM_EPISODES}" ]]; then
+            print_error "--num-videos cannot exceed --num-episodes"
             exit 1
         fi
     fi
@@ -619,6 +779,12 @@ main() {
             install_task
             check_gpu
             play
+            ;;
+        evaluate)
+            stage_assets
+            install_task
+            check_gpu
+            evaluate_model
             ;;
         all)
             stage_assets
