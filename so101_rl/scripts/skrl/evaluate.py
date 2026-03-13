@@ -87,6 +87,9 @@ args_cli, hydra_args = parser.parse_known_args()
 # Always enable cameras for evaluation
 args_cli.enable_cameras = True
 
+# Ensure overhead camera is enabled only for evaluation
+os.environ["SO101_ENABLE_OVERHEAD_CAMERA"] = "1"
+
 # clear out sys.argv for Hydra
 sys.argv = [sys.argv[0]] + hydra_args
 # launch omniverse app
@@ -288,8 +291,12 @@ def main(
                         overhead_rgb = overhead_cam.data.output["rgb"][0].cpu().numpy()
                         h, w = overhead_rgb.shape[:2]
                         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-                        perspective_video_path = eval_dir / f"perspective_cam_episode_{current_episode:03d}.mp4"
+                        perspective_video_path = eval_dir / f"overhead_cam_episode_{current_episode:03d}.mp4"
                         perspective_writer = cv2.VideoWriter(str(perspective_video_path), fourcc, 30, (w, h))
+                    else:
+                        raise RuntimeError(
+                            "overhead_camera is not available. Ensure SO101_ENABLE_OVERHEAD_CAMERA is set for evaluation."
+                        )
                 except Exception as e:
                     print(f"[WARNING] Failed to initialize video writers: {e}")
         
@@ -366,7 +373,7 @@ def main(
                 if perspective_writer is not None:
                     perspective_writer.release()
                     perspective_writer = None
-                    print(f"[INFO] Saved perspective camera video for episode {current_episode}")
+                    print(f"[INFO] Saved overhead camera video for episode {current_episode}")
                 
                 # Move to next episode
                 current_episode += 1

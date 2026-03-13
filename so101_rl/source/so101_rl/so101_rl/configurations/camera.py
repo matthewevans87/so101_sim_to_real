@@ -38,8 +38,8 @@ CAMERA_CFG = CameraCfg(
 OVERHEAD_CAMERA_CFG = CameraCfg(
     prim_path="{ENV_REGEX_NS}/overhead_camera",
     update_period=(1.0 / 30.0),
-    height=128,
-    width=128,
+    height=768,
+    width=1024,
     data_types=["rgb"],
     spawn=sim_utils.PinholeCameraCfg(
         focal_length=6.12,
@@ -48,8 +48,8 @@ OVERHEAD_CAMERA_CFG = CameraCfg(
         clipping_range=(0.01, 10.0),
     ),
     offset=CameraCfg.OffsetCfg(
-        pos=(0.0, 0.0, 1.0),  # 1m above env origin
-        rot=(0.7071068, 0.7071068, 0.0, 0.0),  # look-down: 90deg about X (w,x,y,z)
+        pos=(0.0, -0.5, 1.0),
+        rot=(0.9763, 0.21644, 0.0, 0.0),
         convention="opengl",
     ),
 )

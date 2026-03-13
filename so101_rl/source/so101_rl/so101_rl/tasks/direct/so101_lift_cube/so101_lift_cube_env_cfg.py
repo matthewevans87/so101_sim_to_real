@@ -10,7 +10,7 @@ from so101_rl.configurations.so101 import (
     GRIPPER_CONTACT_SENSOR_CFG,
 )
 from so101_rl.configurations.cube import DEX_CUBE_CFG
-from so101_rl.configurations.camera import CAMERA_CFG
+from so101_rl.configurations.camera import CAMERA_CFG, OVERHEAD_CAMERA_CFG
 from so101_rl.configurations.table import TABLE_CFG, TABLE_CONTACT_SENSOR_CFG
 
 from isaaclab.assets import RigidObjectCfg
@@ -28,6 +28,11 @@ from so101_rl.configurations.so101_env_params import So101EnvParams
 from so101_rl.env_pipeline import KEY_OBS_DIMS
 
 _Y: So101EnvParams = So101EnvParams.load(os.environ["SO101_ENV_CONFIG"])
+_ENABLE_OVERHEAD_CAMERA = os.environ.get("SO101_ENABLE_OVERHEAD_CAMERA", "0").lower() in (
+    "1",
+    "true",
+    "yes",
+)
 
 
 @configclass
@@ -66,6 +71,14 @@ class So101LiftCubeCfg(DirectRLEnvCfg):
         prim_path="/World/envs/env_.*/Robot/gripper/gripper_camera",
         height=_Y.sensors.camera.height,
         width=_Y.sensors.camera.width,
+    )
+
+    overhead_camera_cfg: CameraCfg | None = (
+        OVERHEAD_CAMERA_CFG.replace(  # type: ignore
+            prim_path="/World/envs/env_.*/overhead_camera",
+        )
+        if _ENABLE_OVERHEAD_CAMERA
+        else None
     )
 
     # ── Sensor configs ──────────────────────────────────────────────────────

@@ -207,6 +207,11 @@ class So101LiftCube(DirectRLEnv):
         self.robot = Articulation(self.cfg.robot_cfg)
         self.cube = RigidObject(self.cfg.cube_cfg)
         self.camera = Camera(self.cfg.camera_cfg)
+        self.overhead_camera = (
+            Camera(self.cfg.overhead_camera_cfg)
+            if self.cfg.overhead_camera_cfg is not None
+            else None
+        )
         self.gripper_contact_sensor = ContactSensor(self.cfg.gripper_contact_sensor_cfg)
         self.table_contact_sensor = ContactSensor(self.cfg.table_contact_sensor_cfg)
         self.gripper_tf = FrameTransformer(self.cfg.gripper_transforms_cfg)
@@ -223,6 +228,8 @@ class So101LiftCube(DirectRLEnv):
         self.scene.rigid_objects["table"] = self.table
         self.scene.rigid_objects["cube"] = self.cube
         self.scene.sensors["gripper_camera"] = self.camera
+        if self.overhead_camera is not None:
+            self.scene.sensors["overhead_camera"] = self.overhead_camera
         self.scene.sensors["gripper_contact_sensor"] = self.gripper_contact_sensor
         self.scene.sensors["table_contact_sensor"] = self.table_contact_sensor
         self.scene.sensors["gripper_tf"] = self.gripper_tf
