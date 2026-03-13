@@ -578,7 +578,7 @@ Options:
     --num-envs NUM           Override num_envs from YAML config [Warning emitted]
     --max-iterations NUM     Override max training iterations (multiplied by rollouts) [Warning emitted]
     --checkpoint PATH        Path to checkpoint file (required for export; used by play)
-    --output-dir PATH        Override the artifacts output directory (default: artifacts/<timestamp>/) [Warning emitted]
+    --output-dir PATH        Override the artifacts base directory (default: artifacts/; timestamped subdir still created) [Warning emitted]
     --video-length NUM       Override video length in frames (downstream default used if unset) [Warning emitted]
     --video                  Enable video recording during play
     --headless               Run in headless mode (no GUI)
@@ -601,7 +601,7 @@ Examples:
 
 Notes:
     The script does not currently auto-detect checkpoints.
-    --output-dir is parsed but not used by the current pipeline.
+    --output-dir sets the base output folder; the run still creates a timestamped subdirectory.
 EOF
 }
 
@@ -633,7 +633,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         --output-dir)
             CUSTOM_OUTPUT_DIR="$2"
-            CLI_OVERRIDE_WARNINGS+=("--output-dir=${CUSTOM_OUTPUT_DIR} (overrides default timestamped artifacts dir)")
+            CLI_OVERRIDE_WARNINGS+=("--output-dir=${CUSTOM_OUTPUT_DIR} (overrides default artifacts base dir)")
             shift 2
             ;;
         --headless)
@@ -692,7 +692,7 @@ main() {
         if [[ "${CUSTOM_OUTPUT_DIR}" != /* ]]; then
             CUSTOM_OUTPUT_DIR="${PROJECT_ROOT}/${CUSTOM_OUTPUT_DIR}"
         fi
-        ARTIFACTS_DIR="${CUSTOM_OUTPUT_DIR}"
+        ARTIFACTS_DIR="${CUSTOM_OUTPUT_DIR%/}/${ARTIFACT_TIMESTAMP}"
     fi
 
     # Emit warnings for any CLI overrides
