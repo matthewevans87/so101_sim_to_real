@@ -6,9 +6,9 @@
 """
 Script to evaluate a trained RL agent from skrl and collect comprehensive metrics.
 
-This script runs evaluation episodes with a single environment (defaults to 100), recording:
+This script runs evaluation episodes with one or more environments (defaults to 1), recording:
 - Step metrics and rewards for all episodes
-- Videos from perspective and wrist cameras for the first 5 episodes by default
+- Videos from overhead and wrist cameras for the first 5 episodes by default
 - Results saved to JSON file
 """
 
@@ -77,6 +77,12 @@ parser.add_argument(
     type=int,
     default=5,
     help="Number of episodes to record videos for.",
+)
+parser.add_argument(
+    "--num_envs",
+    type=int,
+    default=None,
+    help="Number of environments to simulate.",
 )
 
 # append AppLauncher cli args
@@ -205,7 +211,9 @@ def main(
         print(f"[WARNING] No env_config.yaml found at {env_config_path}")
     
     # Override configurations for evaluation
-    env_cfg.scene.num_envs = 1  # Always use 1 environment for evaluation
+    env_cfg.scene.num_envs = (
+        args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
+    )
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
     
     # Configure the ML framework
@@ -245,61 +253,39 @@ def main(
     # Evaluation parameters
     NUM_EPISODES = args_cli.num_episodes
     NUM_VIDEO_EPISODES = args_cli.num_videos
-    
+    num_envs = env_cfg.scene.num_envs
+
     # Storage for results
     all_episode_data = []
-    
-    # Video writers for first 5 episodes
-    perspective_writer = None
-    wrist_writer = None
-    current_episode = 0
-    episode_step = 0
-    
-    # Storage for current episode metrics
-    current_episode_metrics = {
-        "episode_num": 0,
-        "steps": [],
-        "total_reward": 0.0,
-        "episode_length": 0,
-    }
-    
+    completed_episodes = 0
+    recorded_episodes = 0
+
+    episode_counts = [0 for _ in range(num_envs)]
+    episode_steps = [0 for _ in range(num_envs)]
+    record_active = [False for _ in range(num_envs)]
+
+    current_episode_metrics = [
+        {
+            "env_id": env_idx,
+            "episode_num": 0,
+            "steps": [],
+            "total_reward": 0.0,
+            "episode_length": 0,
+        }
+        for env_idx in range(num_envs)
+    ]
+
+    wrist_writers = {}
+    overhead_writers = {}
+
     # reset environment
     obs, info = env.reset()
-    
-    print(f"[INFO] Starting evaluation: {NUM_EPISODES} episodes")
+
+    print(f"[INFO] Starting evaluation: {NUM_EPISODES} episodes across {num_envs} envs")
     print(f"[INFO] Recording videos for first {NUM_VIDEO_EPISODES} episodes")
-    
+
     # Run evaluation
-    while current_episode < NUM_EPISODES:
-        # Initialize video writers for first 5 episodes
-        if current_episode < NUM_VIDEO_EPISODES and episode_step == 0:
-            # Get first frame to determine video properties
-            if hasattr(env.unwrapped, "scene"):
-                try:
-                    # Get gripper camera (wrist)
-                    gripper_cam = env.unwrapped.scene.sensors.get("gripper_camera")
-                    if gripper_cam is not None and "rgb" in gripper_cam.data.output:
-                        gripper_rgb = gripper_cam.data.output["rgb"][0].cpu().numpy()
-                        h, w = gripper_rgb.shape[:2]
-                        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-                        wrist_video_path = eval_dir / f"wrist_cam_episode_{current_episode:03d}.mp4"
-                        wrist_writer = cv2.VideoWriter(str(wrist_video_path), fourcc, 30, (w, h))
-                    
-                    # Get overhead camera (perspective)
-                    overhead_cam = env.unwrapped.scene.sensors.get("overhead_camera")
-                    if overhead_cam is not None and "rgb" in overhead_cam.data.output:
-                        overhead_rgb = overhead_cam.data.output["rgb"][0].cpu().numpy()
-                        h, w = overhead_rgb.shape[:2]
-                        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-                        perspective_video_path = eval_dir / f"overhead_cam_episode_{current_episode:03d}.mp4"
-                        perspective_writer = cv2.VideoWriter(str(perspective_video_path), fourcc, 30, (w, h))
-                    else:
-                        raise RuntimeError(
-                            "overhead_camera is not available. Ensure SO101_ENABLE_OVERHEAD_CAMERA is set for evaluation."
-                        )
-                except Exception as e:
-                    print(f"[WARNING] Failed to initialize video writers: {e}")
-        
+    while simulation_app.is_running() and completed_episodes < NUM_EPISODES:
         # Run inference
         with torch.inference_mode():
             # agent stepping
@@ -313,96 +299,164 @@ def main(
             # - single-agent (deterministic) actions
             else:
                 actions = outputs[-1].get("mean_actions", outputs[0])
-            
+
             # env stepping
             obs, reward, terminated, truncated, info = env.step(actions)
-            done = terminated or truncated
-            
-            # Extract step-level data from environment
+
+        if torch.is_tensor(terminated):
+            done = torch.logical_or(terminated, truncated)
+        else:
+            done = np.logical_or(terminated, truncated)
+
+        extras_log = None
+        if hasattr(env.unwrapped, "extras") and "log" in env.unwrapped.extras:
+            extras_log = env.unwrapped.extras["log"]
+
+        active_record_count = sum(record_active)
+
+        for env_idx in range(num_envs):
+            reward_val = reward[env_idx]
+            if torch.is_tensor(reward_val):
+                reward_val = reward_val.item()
+            else:
+                reward_val = float(reward_val)
+
             step_data = {
-                "step": episode_step,
-                "reward": float(reward[0]),
+                "step": episode_steps[env_idx],
+                "reward": reward_val,
             }
-            
-            # Get step metrics from environment if available
-            if hasattr(env.unwrapped, "extras") and "log" in env.unwrapped.extras:
-                extras_log = env.unwrapped.extras["log"]
+
+            if extras_log is not None:
                 for key, value in extras_log.items():
                     if torch.is_tensor(value):
                         step_data[key] = float(value)
                     else:
                         step_data[key] = value
-            
-            current_episode_metrics["steps"].append(step_data)
-            current_episode_metrics["total_reward"] += float(reward[0])
-            
-            # Record video frames if in recording episodes
-            if current_episode < NUM_VIDEO_EPISODES and hasattr(env.unwrapped, "scene"):
-                try:
-                    # Wrist camera
+
+            current_episode_metrics[env_idx]["steps"].append(step_data)
+            current_episode_metrics[env_idx]["total_reward"] += reward_val
+
+            if (
+                NUM_VIDEO_EPISODES > 0
+                and episode_steps[env_idx] == 0
+                and not record_active[env_idx]
+            ):
+                available_slots = NUM_VIDEO_EPISODES - recorded_episodes - active_record_count
+                if available_slots > 0:
+                    if not hasattr(env.unwrapped, "scene"):
+                        raise RuntimeError("Scene sensors are unavailable for video recording.")
+
+                    gripper_cam = env.unwrapped.scene.sensors.get("gripper_camera")
+                    overhead_cam = env.unwrapped.scene.sensors.get("overhead_camera")
+                    if (
+                        gripper_cam is None
+                        or "rgb" not in gripper_cam.data.output
+                        or overhead_cam is None
+                        or "rgb" not in overhead_cam.data.output
+                    ):
+                        raise RuntimeError(
+                            "Required cameras are unavailable. Ensure SO101_ENABLE_OVERHEAD_CAMERA is set for evaluation."
+                        )
+
+                    gripper_rgb = gripper_cam.data.output["rgb"][env_idx].cpu().numpy()
+                    overhead_rgb = overhead_cam.data.output["rgb"][env_idx].cpu().numpy()
+
+                    wrist_h, wrist_w = gripper_rgb.shape[:2]
+                    overhead_h, overhead_w = overhead_rgb.shape[:2]
+                    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+
+                    wrist_video_path = eval_dir / (
+                        f"wrist_cam_env_{env_idx:03d}_ep_{episode_counts[env_idx]:03d}.mp4"
+                    )
+                    overhead_video_path = eval_dir / (
+                        f"overhead_cam_env_{env_idx:03d}_ep_{episode_counts[env_idx]:03d}.mp4"
+                    )
+
+                    wrist_writers[env_idx] = cv2.VideoWriter(
+                        str(wrist_video_path), fourcc, 30, (wrist_w, wrist_h)
+                    )
+                    overhead_writers[env_idx] = cv2.VideoWriter(
+                        str(overhead_video_path), fourcc, 30, (overhead_w, overhead_h)
+                    )
+
+                    record_active[env_idx] = True
+                    active_record_count += 1
+
+            if record_active[env_idx] and hasattr(env.unwrapped, "scene"):
+                gripper_cam = env.unwrapped.scene.sensors.get("gripper_camera")
+                overhead_cam = env.unwrapped.scene.sensors.get("overhead_camera")
+                if (
+                    gripper_cam is not None
+                    and overhead_cam is not None
+                    and "rgb" in gripper_cam.data.output
+                    and "rgb" in overhead_cam.data.output
+                ):
+                    gripper_frame = gripper_cam.data.output["rgb"][env_idx].cpu().numpy()
+                    overhead_frame = overhead_cam.data.output["rgb"][env_idx].cpu().numpy()
+
+                    wrist_writer = wrist_writers.get(env_idx)
+                    overhead_writer = overhead_writers.get(env_idx)
                     if wrist_writer is not None:
-                        gripper_cam = env.unwrapped.scene.sensors.get("gripper_camera")
-                        if gripper_cam is not None and "rgb" in gripper_cam.data.output:
-                            frame = gripper_cam.data.output["rgb"][0].cpu().numpy()
-                            frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-                            wrist_writer.write(frame_bgr)
-                    
-                    # Perspective camera
-                    if perspective_writer is not None:
-                        overhead_cam = env.unwrapped.scene.sensors.get("overhead_camera")
-                        if overhead_cam is not None and "rgb" in overhead_cam.data.output:
-                            frame = overhead_cam.data.output["rgb"][0].cpu().numpy()
-                            frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-                            perspective_writer.write(frame_bgr)
-                except Exception as e:
-                    print(f"[WARNING] Failed to record video frame: {e}")
-            
-            episode_step += 1
-            
-            # Check if episode is done
-            if done[0]:
-                current_episode_metrics["episode_length"] = episode_step
-                all_episode_data.append(current_episode_metrics.copy())
-                
-                # Release video writers if recording
-                if wrist_writer is not None:
-                    wrist_writer.release()
-                    wrist_writer = None
-                    print(f"[INFO] Saved wrist camera video for episode {current_episode}")
-                
-                if perspective_writer is not None:
-                    perspective_writer.release()
-                    perspective_writer = None
-                    print(f"[INFO] Saved overhead camera video for episode {current_episode}")
-                
-                # Move to next episode
-                current_episode += 1
-                episode_step = 0
-                
-                if current_episode < NUM_EPISODES:
-                    # Reset environment
-                    obs, info = env.reset()
-                    
-                    # Reset episode metrics
-                    current_episode_metrics = {
-                        "episode_num": current_episode,
-                        "steps": [],
-                        "total_reward": 0.0,
-                        "episode_length": 0,
-                    }
-                    
-                    # Print progress
-                    if current_episode % 10 == 0:
-                        print(f"[INFO] Completed {current_episode}/{NUM_EPISODES} episodes")
-    
-    print(f"[INFO] Evaluation complete: {NUM_EPISODES} episodes")
+                        wrist_writer.write(cv2.cvtColor(gripper_frame, cv2.COLOR_RGB2BGR))
+                    if overhead_writer is not None:
+                        overhead_writer.write(
+                            cv2.cvtColor(overhead_frame, cv2.COLOR_RGB2BGR)
+                        )
+
+            episode_steps[env_idx] += 1
+
+            done_flag = done[env_idx]
+            if torch.is_tensor(done_flag):
+                done_flag = bool(done_flag.item())
+            else:
+                done_flag = bool(done_flag)
+
+            if done_flag:
+                current_episode_metrics[env_idx]["episode_length"] = episode_steps[env_idx]
+                all_episode_data.append(current_episode_metrics[env_idx].copy())
+                completed_episodes += 1
+
+                if record_active[env_idx]:
+                    wrist_writer = wrist_writers.pop(env_idx, None)
+                    overhead_writer = overhead_writers.pop(env_idx, None)
+                    if wrist_writer is not None:
+                        wrist_writer.release()
+                    if overhead_writer is not None:
+                        overhead_writer.release()
+                    record_active[env_idx] = False
+                    recorded_episodes += 1
+                    print(
+                        f"[INFO] Saved camera videos for env {env_idx} episode {episode_counts[env_idx]}"
+                    )
+
+                episode_counts[env_idx] += 1
+                episode_steps[env_idx] = 0
+                current_episode_metrics[env_idx] = {
+                    "env_id": env_idx,
+                    "episode_num": episode_counts[env_idx],
+                    "steps": [],
+                    "total_reward": 0.0,
+                    "episode_length": 0,
+                }
+
+                if completed_episodes % 10 == 0:
+                    print(
+                        f"[INFO] Completed {completed_episodes}/{NUM_EPISODES} episodes"
+                    )
+
+                if completed_episodes >= NUM_EPISODES:
+                    break
+
+    print(f"[INFO] Evaluation complete: {completed_episodes} episodes")
     
     # Compute summary statistics
     episode_rewards = [ep["total_reward"] for ep in all_episode_data]
     episode_lengths = [ep["episode_length"] for ep in all_episode_data]
     
     summary = {
-        "num_episodes": NUM_EPISODES,
+        "num_envs": num_envs,
+        "num_episodes": len(all_episode_data),
+        "requested_num_episodes": NUM_EPISODES,
         "checkpoint_path": str(checkpoint_path),
         "task_name": task_name,
         "seed": args_cli.seed,

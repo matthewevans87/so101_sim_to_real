@@ -476,6 +476,10 @@ evaluate_model() {
         ARGS+=" --num-videos ${NUM_VIDEOS}"
     fi
 
+    if [ -n "${NUM_ENVS}" ]; then
+        ARGS+=" --num_envs ${NUM_ENVS}"
+    fi
+
     if [ "${HEADLESS:-false}" = "true" ]; then
         ARGS+=" --headless"
     fi
@@ -721,6 +725,14 @@ main() {
         if [[ -z "${EXPERIMENT_PATH}" ]]; then
             print_error "--experiment-path is required for evaluate command"
             show_usage
+            exit 1
+        fi
+        if [[ -n "${NUM_ENVS}" && ! "${NUM_ENVS}" =~ ^[0-9]+$ ]]; then
+            print_error "--num-envs must be a positive integer"
+            exit 1
+        fi
+        if [[ -n "${NUM_ENVS}" && "${NUM_ENVS}" -lt 1 ]]; then
+            print_error "--num-envs must be at least 1"
             exit 1
         fi
         if [[ -n "${NUM_EPISODES}" && ! "${NUM_EPISODES}" =~ ^[0-9]+$ ]]; then
