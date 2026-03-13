@@ -24,6 +24,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 import torch
+from statistics import StatisticsError, mode
+from tqdm import tqdm
 
 from isaaclab.app import AppLauncher
 
@@ -83,6 +85,13 @@ parser.add_argument(
     type=int,
     default=None,
     help="Number of environments to simulate.",
+)
+parser.add_argument(
+    "--verbosity",
+    type=str,
+    default="basic",
+    choices=["full", "basic"],
+    help="Output verbosity for results.json (full includes step arrays).",
 )
 
 # append AppLauncher cli args
@@ -179,6 +188,53 @@ def find_checkpoint_and_task(experiment_path: Path) -> tuple[Path, str]:
     return checkpoint_path, task_name
 
 
+def _first_step_index(values: list[float], predicate) -> int | None:
+    for idx, val in enumerate(values):
+        if predicate(val):
+            return idx
+    return None
+
+
+def _summary_for_values(values: list[float]) -> dict:
+    if not values:
+        return {
+            "min": None,
+            "max": None,
+            "mean": None,
+            "mode": None,
+            "stdev": None,
+            "steps_till_min": None,
+            "steps_till_max": None,
+            "steps_till_value_gt_0": None,
+            "steps_till_value_lt_0": None,
+            "steps_till_value_eq_0": None,
+        }
+
+    min_val = float(np.min(values))
+    max_val = float(np.max(values))
+    mean_val = float(np.mean(values))
+    stdev_val = float(np.std(values))
+
+    rounded = [round(val, 6) for val in values]
+    try:
+        mode_val = float(mode(rounded))
+    except StatisticsError:
+        mode_val = None
+
+    return {
+        "min": min_val,
+        "max": max_val,
+        "mean": mean_val,
+        "mode": mode_val,
+        "stdev": stdev_val,
+        "steps_till_min": _first_step_index(values, lambda v: v == min_val),
+        "steps_till_max": _first_step_index(values, lambda v: v == max_val),
+        "steps_till_value_gt_0": _first_step_index(values, lambda v: v > 0),
+        "steps_till_value_lt_0": _first_step_index(values, lambda v: v < 0),
+        "steps_till_value_eq_0": _first_step_index(values, lambda v: v == 0),
+    }
+
+
 @hydra_task_config(args_cli.task, agent_cfg_entry_point)
 def main(
     env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg,
@@ -260,6 +316,9 @@ def main(
     completed_episodes = 0
     recorded_episodes = 0
 
+    global_step_values: dict[str, list[float]] = {}
+    global_reward_values: dict[str, list[float]] = {}
+
     episode_counts = [0 for _ in range(num_envs)]
     episode_steps = [0 for _ in range(num_envs)]
     record_active = [False for _ in range(num_envs)]
@@ -285,6 +344,7 @@ def main(
     print(f"[INFO] Recording videos for first {NUM_VIDEO_EPISODES} episodes")
 
     # Run evaluation
+    progress = tqdm(total=NUM_EPISODES, desc="Evaluating", unit="episode")
     while simulation_app.is_running() and completed_episodes < NUM_EPISODES:
         # Run inference
         with torch.inference_mode():
@@ -413,8 +473,41 @@ def main(
 
             if done_flag:
                 current_episode_metrics[env_idx]["episode_length"] = episode_steps[env_idx]
-                all_episode_data.append(current_episode_metrics[env_idx].copy())
+                episode_entry = current_episode_metrics[env_idx].copy()
+
+                step_values: dict[str, list[float]] = {}
+                reward_values: dict[str, list[float]] = {}
+                for step_item in episode_entry["steps"]:
+                    for key, value in step_item.items():
+                        if key in ("step", "reward"):
+                            continue
+                        if not isinstance(value, (int, float)):
+                            continue
+                        if key.startswith("Step_Metrics/"):
+                            step_values.setdefault(key, []).append(float(value))
+                        if key.startswith("Episode_Reward/"):
+                            reward_values.setdefault(key, []).append(float(value))
+
+                episode_entry["metrics"] = {
+                    key: _summary_for_values(values)
+                    for key, values in step_values.items()
+                }
+                episode_entry["rewards"] = {
+                    key: _summary_for_values(values)
+                    for key, values in reward_values.items()
+                }
+
+                for key, values in step_values.items():
+                    global_step_values.setdefault(key, []).extend(values)
+                for key, values in reward_values.items():
+                    global_reward_values.setdefault(key, []).extend(values)
+
+                if args_cli.verbosity == "basic":
+                    episode_entry.pop("steps", None)
+
+                all_episode_data.append(episode_entry)
                 completed_episodes += 1
+                progress.update(1)
 
                 if record_active[env_idx]:
                     wrist_writer = wrist_writers.pop(env_idx, None)
@@ -447,6 +540,7 @@ def main(
                 if completed_episodes >= NUM_EPISODES:
                     break
 
+    progress.close()
     print(f"[INFO] Evaluation complete: {completed_episodes} episodes")
     
     # Compute summary statistics
@@ -457,9 +551,18 @@ def main(
         "num_envs": num_envs,
         "num_episodes": len(all_episode_data),
         "requested_num_episodes": NUM_EPISODES,
+        "verbosity": args_cli.verbosity,
         "checkpoint_path": str(checkpoint_path),
         "task_name": task_name,
         "seed": args_cli.seed,
+        "metrics_summary": {
+            key: _summary_for_values(values)
+            for key, values in global_step_values.items()
+        },
+        "rewards_summary": {
+            key: _summary_for_values(values)
+            for key, values in global_reward_values.items()
+        },
         "summary_statistics": {
             "mean_reward": float(np.mean(episode_rewards)),
             "std_reward": float(np.std(episode_rewards)),

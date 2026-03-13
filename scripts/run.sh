@@ -22,6 +22,7 @@ VIDEO_LENGTH=""
 EXPERIMENT_PATH=""
 NUM_EPISODES=""
 NUM_VIDEOS=""
+VERBOSITY="basic"
 # MAX_ITERATIONS=
 
 # Tracks which parameters were explicitly provided via CLI (to emit override warnings)
@@ -480,6 +481,10 @@ evaluate_model() {
         ARGS+=" --num_envs ${NUM_ENVS}"
     fi
 
+    if [ -n "${VERBOSITY}" ]; then
+        ARGS+=" --verbosity ${VERBOSITY}"
+    fi
+
     if [ "${HEADLESS:-false}" = "true" ]; then
         ARGS+=" --headless"
     fi
@@ -579,6 +584,7 @@ Options:
     --experiment-path PATH   Path to experiment directory (required for evaluate)
     --num-episodes NUM       Override evaluation episode count (default: 100) [Warning emitted]
     --num-videos NUM         Override evaluation video episodes (default: 5) [Warning emitted]
+    --verbosity LEVEL        Output verbosity for results.json (full|basic, default: basic)
     --num-envs NUM           Override num_envs from YAML config [Warning emitted]
     --max-iterations NUM     Override max training iterations (multiplied by rollouts) [Warning emitted]
     --checkpoint PATH        Path to checkpoint file (required for export; used by play)
@@ -675,6 +681,11 @@ while [[ $# -gt 0 ]]; do
             CLI_OVERRIDE_WARNINGS+=("--num-videos=${NUM_VIDEOS} (overrides evaluation default)")
             shift 2
             ;;
+        --verbosity)
+            VERBOSITY="$2"
+            CLI_OVERRIDE_WARNINGS+=("--verbosity=${VERBOSITY} (overrides evaluation default)")
+            shift 2
+            ;;
         all|train|export|play|evaluate|install|doctor|help)
             COMMAND="$1"
             shift
@@ -749,6 +760,10 @@ main() {
         fi
         if [[ -n "${NUM_VIDEOS}" && "${NUM_VIDEOS}" -lt 0 ]]; then
             print_error "--num-videos cannot be negative"
+            exit 1
+        fi
+        if [[ -n "${VERBOSITY}" && "${VERBOSITY}" != "full" && "${VERBOSITY}" != "basic" ]]; then
+            print_error "--verbosity must be one of: full, basic"
             exit 1
         fi
         if [[ -n "${NUM_EPISODES}" && -n "${NUM_VIDEOS}" && "${NUM_VIDEOS}" -gt "${NUM_EPISODES}" ]]; then
