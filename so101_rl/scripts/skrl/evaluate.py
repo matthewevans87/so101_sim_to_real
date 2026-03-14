@@ -235,6 +235,51 @@ def _summary_for_values(values: list[float]) -> dict:
     }
 
 
+def _global_summary_for_key(flat_values: list[float], per_episode_summaries: list[dict]) -> dict:
+    """Compute global summary: statistics over all steps of all episodes, mean steps_till across episodes."""
+    if not flat_values:
+        return {
+            "min": None,
+            "max": None,
+            "mean": None,
+            "mode": None,
+            "stdev": None,
+            "mean_steps_till_min": None,
+            "mean_steps_till_max": None,
+            "mean_steps_till_value_gt_0": None,
+            "mean_steps_till_value_lt_0": None,
+            "mean_steps_till_value_eq_0": None,
+        }
+
+    min_val = float(np.min(flat_values))
+    max_val = float(np.max(flat_values))
+    mean_val = float(np.mean(flat_values))
+    stdev_val = float(np.std(flat_values))
+
+    rounded = [round(val, 6) for val in flat_values]
+    try:
+        mode_val = float(mode(rounded))
+    except StatisticsError:
+        mode_val = None
+
+    def _mean_steps_till(key: str) -> float | None:
+        vals = [s[key] for s in per_episode_summaries if s.get(key) is not None]
+        return float(np.mean(vals)) if vals else None
+
+    return {
+        "min": min_val,
+        "max": max_val,
+        "mean": mean_val,
+        "mode": mode_val,
+        "stdev": stdev_val,
+        "mean_steps_till_min": _mean_steps_till("steps_till_min"),
+        "mean_steps_till_max": _mean_steps_till("steps_till_max"),
+        "mean_steps_till_value_gt_0": _mean_steps_till("steps_till_value_gt_0"),
+        "mean_steps_till_value_lt_0": _mean_steps_till("steps_till_value_lt_0"),
+        "mean_steps_till_value_eq_0": _mean_steps_till("steps_till_value_eq_0"),
+    }
+
+
 @hydra_task_config(args_cli.task, agent_cfg_entry_point)
 def main(
     env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg,
@@ -318,6 +363,8 @@ def main(
 
     global_step_values: dict[str, list[float]] = {}
     global_reward_values: dict[str, list[float]] = {}
+    global_step_summaries: dict[str, list[dict]] = {}
+    global_reward_summaries: dict[str, list[dict]] = {}
 
     episode_counts = [0 for _ in range(num_envs)]
     episode_steps = [0 for _ in range(num_envs)]
@@ -369,8 +416,12 @@ def main(
             done = np.logical_or(terminated, truncated)
 
         extras_log = None
-        if hasattr(env.unwrapped, "extras") and "log" in env.unwrapped.extras:
-            extras_log = env.unwrapped.extras["log"]
+        extras_per_env_log = None
+        if hasattr(env.unwrapped, "extras"):
+            if "log" in env.unwrapped.extras:
+                extras_log = env.unwrapped.extras["log"]
+            if "per_env_log" in env.unwrapped.extras:
+                extras_per_env_log = env.unwrapped.extras["per_env_log"]
 
         active_record_count = sum(record_active)
 
@@ -386,7 +437,13 @@ def main(
                 "reward": reward_val,
             }
 
-            if extras_log is not None:
+            if extras_per_env_log is not None:
+                for key, value in extras_per_env_log.items():
+                    if torch.is_tensor(value):
+                        step_data[key] = float(value[env_idx])
+                    else:
+                        step_data[key] = value
+            elif extras_log is not None:
                 for key, value in extras_log.items():
                     if torch.is_tensor(value):
                         step_data[key] = float(value)
@@ -502,6 +559,11 @@ def main(
                 for key, values in reward_values.items():
                     global_reward_values.setdefault(key, []).extend(values)
 
+                for key, ep_summary in episode_entry["metrics"].items():
+                    global_step_summaries.setdefault(key, []).append(ep_summary)
+                for key, ep_summary in episode_entry["rewards"].items():
+                    global_reward_summaries.setdefault(key, []).append(ep_summary)
+
                 if args_cli.verbosity == "basic":
                     episode_entry.pop("steps", None)
 
@@ -556,11 +618,11 @@ def main(
         "task_name": task_name,
         "seed": args_cli.seed,
         "metrics_summary": {
-            key: _summary_for_values(values)
+            key: _global_summary_for_key(values, global_step_summaries.get(key, []))
             for key, values in global_step_values.items()
         },
         "rewards_summary": {
-            key: _summary_for_values(values)
+            key: _global_summary_for_key(values, global_reward_summaries.get(key, []))
             for key, values in global_reward_values.items()
         },
         "summary_statistics": {

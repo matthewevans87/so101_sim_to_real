@@ -367,6 +367,8 @@ class So101LiftCube(DirectRLEnv):
 
         if "log" not in self.extras:
             self.extras["log"] = {}
+        if "per_env_log" not in self.extras:
+            self.extras["per_env_log"] = {}
 
         self._compute_step_metrics()
         for key in self.step_metrics:
@@ -374,9 +376,9 @@ class So101LiftCube(DirectRLEnv):
                 self.step_metrics[key].size(-1) == 1
                 or self.step_metrics[key].dim() == 1
             ):
-                self.extras["log"][f"Step_Metrics/{key}"] = (
-                    self.step_metrics[key].float().mean()
-                )
+                val = self.step_metrics[key].float()
+                self.extras["log"][f"Step_Metrics/{key}"] = val.mean()
+                self.extras["per_env_log"][f"Step_Metrics/{key}"] = val
 
         # Episode timeout
         time_out = self.episode_length_buf >= self.max_episode_length - 1

@@ -173,11 +173,14 @@ class RewardPipeline:
         env = ctx.env
         if "log" not in env.extras:
             env.extras["log"] = {}
+        if "per_env_log" not in env.extras:
+            env.extras["per_env_log"] = {}
 
         total = torch.zeros(env.num_envs, device=env.device)
         for step in self.steps:
             rew = step.compute(ctx)
             env.extras["log"][f"Episode_Reward/{step.name}"] = rew.mean()
+            env.extras["per_env_log"][f"Episode_Reward/{step.name}"] = rew
             total += rew
         return total
 
