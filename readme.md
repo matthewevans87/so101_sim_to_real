@@ -1,15 +1,30 @@
 # Vision-Based Manipulation via Sim-to-Real RL
 
-Training a vision-conditioned RL policy for the SO-101 robotic arm using NVIDIA Isaac Sim + Isaac Lab, targeting zero-shot sim-to-real transfer.
+## Overview
 
-## Task
+Inspired by the likes of [skild.ai](https://www.youtube.com/watch?v=JQAfxp-FB0I), [NVIDIA](https://www.youtube.com/watch?v=S4tvirlG8sQ), and [Tesla](https://www.youtube.com/watch?v=g6bOwQdCJrc), this project is an introductory investigation into what can be achieved by learning RL policies on consumer hardware for zero-shot transfer to physical robotic devices.
 
-**`So101-LiftCube-v0`**: Locate and lift a cube using a wrist-mounted RGB camera.
-- **Actor obs**: SpatialSoftmax features (1024-D) + joint positions (6-D)
-- **Critic obs**: Privileged state (joints, cube pose, contact forces)
-- **Actions**: 6-D joint position deltas
+The project aims for experimental rigor and reproducibility. All configurations (rewards, seeds, network, etc.) are made via YAML configs and saved along with the results of each experiment. An evaluation script enables comparing the results of different experiments and supports a data driven approach to tuning and improvement. 
 
-## Prerequisites
+## Problem
+**Task Definition**. The agent, an [SO-101](https://github.com/TheRobotStudio/SO-ARM100) robotic arm with a single [wrist-mounted](https://github.com/TheRobotStudio/SO-ARM100/blob/main/media/UVC_cam_mount_so101.jpg) [camera](https://www.amazon.com/dp/B07ZRJDTBQ), is tasked with finding a small [cube](https://developer.nvidia.com/blog/reinforcing-the-value-of-simulation-by-teaching-dexterity-to-a-real-robot-hand) on its work surface and lifting it to a height of 10 cm within 10 seconds. 
+
+**Observations**. The agent vision features (1024D) and joint positions (6D) at each time step, normalized to `[0.0, 1.0]`. All other information (e.g., explicit cube position, etc.) is hidden.
+
+**Actions**. The agent can issue joint position commands, a 6D vector normalized to `[0.0, 1.0]`.
+
+**Episodes**. Each episode is set to 10 seconds (see `episode_length_s` config). Physics steps are calculated 120 times per second, and observations are taken every 2 ticks (see `decimation` config) for a total of `10*120/2` steps.
+
+## Environment
+
+
+## RL Setup
+
+## Baseline
+
+## Usage
+
+## System Requirements
 
 - **NVIDIA Isaac Sim** (https://developer.nvidia.com/isaac-sim)
 - **Isaac Lab** (https://isaac-sim.github.io/IsaacLab/)
@@ -37,17 +52,19 @@ The YAML is validated against a typed dataclass hierarchy (`so101_env_params.py`
 
 ```bash
 # Train
-./scripts/run.sh train --task So101-LiftCube-v0 \
-    --num-envs 64 --enable-cameras --headless
+./scripts/run.sh train 
+    --task So101-LiftCube-v0 \
+    --num-envs 10 \ # num of parallel envs to simulate
+    --enable-cameras \ # required for vision features
+    --headless # run a headless instance of Isaac Sim
 
 # Evaluate
-./scripts/run.sh play --task So101-LiftCube-v0 \
-    --checkpoint logs/skrl/.../checkpoints/agent.pt \
-    --enable-cameras --video
-
-# Export
-./scripts/run.sh export --task So101-LiftCube-v0 \
-    --checkpoint logs/skrl/.../checkpoints/agent.pt --enable-cameras
+./scripts/run.sh evaluate \
+    --experiment-path artifacts/2026-03-12_09-52-10 \
+    --num-episodes 100 \ # the number of episodes to evaluate
+    --num-videos 5 \ # the number of episodes to record video for
+    --num-envs 10 \
+    --headless
 ```
 
 **Useful flags:**
@@ -62,20 +79,12 @@ The YAML is validated against a typed dataclass hierarchy (`so101_env_params.py`
 | `--video`            | Record evaluation video                  |
 | `--display N`        | X11 display (useful over SSH)            |
 
-## Architecture
+## Domain Randomization
 
-- **Vision encoder**: ResNet18 → SpatialSoftmax → 1024-D (frozen)
-- **Actor MLP**: `[256, 128, 64]` with ELU activations
-- **Critic MLP**: `[256, 128, 64]` with ELU activations (privileged obs)
-- **RL algorithm**: PPO with KL-adaptive LR (via skrl)
-
-## Domain Randomisation
-
-Lighting, camera feed augmentation (noise, brightness, contrast, motion blur, JPEG compression), camera pose, cube colour/size/position, distractor objects.
+Lighting, camera feed augmentation (noise, brightness, contrast, motion blur, JPEG compression), camera pose, cube color/size/position, distractor objects.
 
 ## Credits
 
-- Simulator: [NVIDIA Isaac Sim](https://developer.nvidia.com/isaac-sim) + [Isaac Lab](https://isaac-sim.github.io/IsaacLab/)
-- RL library: [skrl](https://skrl.readthedocs.io/)
 - SO-101 URDF: [TheRobotStudio/SO-ARM100](https://github.com/TheRobotStudio/SO-ARM100)
+- This project traces its origins to a [class project](https://github.com/utd-fall-25-cs-6341-robotics/cs6341-robotics-project-direct) created by myself and Kiran Hegde.
 
