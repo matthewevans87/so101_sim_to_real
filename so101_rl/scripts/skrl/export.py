@@ -3,7 +3,6 @@
 import argparse
 import sys
 import os
-from datetime import datetime
 
 from isaaclab.app import AppLauncher
 
@@ -79,16 +78,9 @@ def main(
 ):
     from skrl.utils.runner.torch import Runner
 
-    # minimal logging location - not used for export itself
-    log_root_path = os.path.abspath(
-        os.path.join("logs", "export", agent_cfg["agent"]["experiment"]["directory"])
-    )
-    os.makedirs(log_root_path, exist_ok=True)
-    log_dir = os.path.join(
-        log_root_path,
-        datetime.now().strftime("%Y-%m-%d_%H-%M-%S") + "_export",
-    )
-    os.makedirs(log_dir, exist_ok=True)
+    # Derive the log_dir from the checkpoint path: go up 2 levels (checkpoints/ -> experiment_name/)
+    log_dir = os.path.dirname(os.path.dirname(os.path.abspath(args_cli.checkpoint)))
+    log_root_path = os.path.dirname(log_dir)
     print(f"[INFO] Export log dir: {log_dir}")
     agent_cfg["agent"]["experiment"]["directory"] = log_root_path
     agent_cfg["agent"]["experiment"]["experiment_name"] = os.path.basename(log_dir)

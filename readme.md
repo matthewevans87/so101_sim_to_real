@@ -1,132 +1,90 @@
 # Vision-Based Manipulation via Sim-to-Real RL
 
-Training vision-conditioned RL policies for the SO-101 robotic arm using NVIDIA Isaac Sim + Isaac Lab with zero-shot sim-to-real transfer.
-
 ## Overview
 
-This project implements two key RL tasks:
-- **Proprioception-Only** (`So101-JointPosGoUp-v0`): Maximize end-effector height using joint states (12-D obs)
-- **Vision-Based** (`So101-LiftCube-v0`): Locate and interact with target cube using wrist-mounted RGB camera (256×192 + 6-D joints)
+Inspired by the likes of [skild.ai](https://www.youtube.com/watch?v=JQAfxp-FB0I), [NVIDIA](https://www.youtube.com/watch?v=S4tvirlG8sQ), and [Tesla](https://www.youtube.com/watch?v=g6bOwQdCJrc), this project is an introductory investigation into what can be achieved by learning RL policies on consumer hardware for zero-shot transfer to physical robotic devices.
 
-**Key Features:**
-- On-policy PPO training with asymmetric actor-critic
-- ResNet18 + Spatial Softmax vision encoding (frozen)
-- Extensive domain randomization (lighting, camera augmentation, object placement, physics)
-- Joint-space position control via LeRobot API
+The project aims for experimental rigor and reproducibility. All configurations (rewards, seeds, network, etc.) are made via YAML configs and saved along with the results of each experiment. An evaluation script enables comparing the results of different experiments and supports a data driven approach to tuning and improvement. 
 
-## Prerequisites
+## Problem
+**Task Definition**. The agent, an [SO-101](https://github.com/TheRobotStudio/SO-ARM100) robotic arm with a single [wrist-mounted](https://github.com/TheRobotStudio/SO-ARM100/blob/main/media/UVC_cam_mount_so101.jpg) [camera](https://www.amazon.com/dp/B07ZRJDTBQ), is tasked with finding a small [cube](https://developer.nvidia.com/blog/reinforcing-the-value-of-simulation-by-teaching-dexterity-to-a-real-robot-hand) on its work surface and lifting it to a height of 10 cm within 10 seconds. 
 
-1. **NVIDIA Isaac Sim**: Install to `$ISAAC_SIM_PATH` (https://developer.nvidia.com/isaac-sim)
-2. **Isaac Lab**: Install to `$ISAAC_LAB_PATH` (https://isaac-sim.github.io/IsaacLab/)
-3. **LeRobot API**: Install from HuggingFace (https://huggingface.co/lerobot) for robot control interface
-4. **Hardware**: CUDA-capable GPU with >16GB VRAM (tested on RTX 5090)
-5. **Physical Robot** (for deployment): SO-101 arm with calibrated wrist camera
+**Observations**. The agent vision features (1024D) and joint positions (6D) at each time step, normalized to `[0.0, 1.0]`. All other information (e.g., explicit cube position, etc.) is hidden.
 
-## Installation
+**Actions**. The agent can issue joint position commands, a 6D vector normalized to `[0.0, 1.0]`.
 
-After installing Isaac Sim and Isaac Lab:
+**Episodes**. Each episode is set to 10 seconds (see `episode_length_s` config). Physics steps are calculated 120 times per second, and observations are taken every 2 ticks (see `decimation` config) for a total of `10*120/2` steps.
 
-1. **Install shared utilities** (required for both simulation and deployment):
-   ```bash
-   cd /path/to/so101_sim_to_real
-   pip install -e .
-   ```
+## Environment
 
-   This installs the `so101_utils` package which contains shared image processing utilities used by both simulation and real-world deployment code.
 
-2. **Verify installation**:
-   ```bash
-   python -c "from so101_utils.image_processing import ImagePipeline; print('Success')"
-   ```
+## RL Setup
+
+## Baseline
 
 ## Usage
 
-The `scripts/run.sh` script handles the full pipeline:
+## System Requirements
+
+- **NVIDIA Isaac Sim** (https://developer.nvidia.com/isaac-sim)
+- **Isaac Lab** (https://isaac-sim.github.io/IsaacLab/)
+- CUDA GPU with ≥16 GB VRAM
+
+## Installation
 
 ```bash
-# Train a policy
-./scripts/run.sh train --task So101-LiftCube-v0 \
-    --num-envs 32 --enable-cameras --headless
-
-# Play/evaluate policy
-./scripts/run.sh play --task So101-LiftCube-v0 \
-    --checkpoint outputs/.../checkpoints/agent.pt \
-    --enable-cameras --video --video-length 1000
-
-# Export trained model
-./scripts/run.sh export --task So101-LiftCube-v0 \
-    --checkpoint outputs/.../checkpoints/agent.pt --enable-cameras
-
+pip install -e .   # installs so101_utils (shared image processing)
 ```
 
-**Common Options:**
-- `--task TASK`: Task name (default: `So101-JointVelGoUp-v0`)
-- `--num-envs N`: Parallel environments (default: 1024)
-- `--max-iterations N`: Training iterations
-- `--checkpoint PATH`: Model checkpoint path
-- `--headless`: Run without GUI
-- `--enable-cameras`: Enable camera observations (required for vision tasks)
-- `--video`: Record evaluation video
-- `--video-length N`: Video length in frames (default: 1000)
-- `--display N`: Set the X11 display; useful if executing training from SSH to remote machine with a connected display
+## Configuration
 
-## Architecture
+There are two YAML configuration files:
 
-**Vision Task:**
-- **Actor**: RGB → ResNet18 → SpatialSoftmax (1024-D) + Joint Pos (6-D) → MLP[256,128,64] → Actions (6-D)
-- **Critic**: Privileged observations (14-D: joints + cube state) → MLP[256,128,64] → Value
-- **Training**: PPO with GAE, 2048 rollout steps, 16 epochs per update, KL-adaptive LR
-
-**Reward Shaping:**
-- Approach reward (exp decay with distance)
-- Camera alignment (dot product of camera forward & cube direction)
-- Lift reward (gated by contact, scaled by height)
-- Touch reward (contact force threshold)
-- Penalties for excessive velocity and action magnitude
-
-## Sim-to-Real Transfer
-
-1. **Camera Calibration**: Hand-eye calibration to match simulation camera pose
-2. **Observation Preprocessing**: ImageNet normalization, joint angle scaling
-3. **Deployment**: Export policy to Torch, load via LeRobot API
-4. **Zero-Shot**: No fine-tuning on physical robot
-
-## Physical Robot Deployment
-
-After training and exporting policies, deploy them on the physical SO-101 arm. Pre-trained policies are available in the `trained_policies/` directory.
-
-**Joint Position Policy (proprioception-only):**
+**`configs/baseline.yaml`** — environment parameters (physics, rewards, domain randomisation, sensors, etc.). `run.sh` passes this automatically via `SO101_ENV_CONFIG`; defaults to `configs/baseline.yaml`. Override with:
 ```bash
-python so101_controller/run_joint_policy_controller.py \
-    --checkpoint trained_policies/so101_joint_pos_go_up_policy.pt \
-    --robot-port /dev/ttyACM0 \
-    --urdf-path so101_controller/assets/SO101/so101_new_calib.urdf
+./scripts/run.sh train ... --env-config configs/my_config.yaml
 ```
+The YAML is validated against a typed dataclass hierarchy (`so101_env_params.py`) at startup.
 
-**Vision Policy (camera-based):**
+**`so101_rl/.../agents/skrl_ppo_cfg.yaml`** — PPO hyperparameters, network architecture, and training schedule. Also holds the `seed`, which propagates to all RNGs (`torch`, `numpy`, `random`). Override the seed at the command line with `--seed N` (use `-1` for a random seed).
+
+## Usage
+
 ```bash
-# List available cameras
-python so101_controller/run_vision_policy_controller.py --list-cameras
+# Train
+./scripts/run.sh train 
+    --task So101-LiftCube-v0 \
+    --num-envs 10 \ # num of parallel envs to simulate
+    --enable-cameras \ # required for vision features
+    --headless # run a headless instance of Isaac Sim
 
-# Run vision policy with wrist camera
-python so101_controller/run_vision_policy_controller.py \
-    --checkpoint trained_policies/so101_lift_cube.pt \
-    --camera 0 \
-    --policy-type conv \
-    --robot-port /dev/ttyACM0 \
-    --urdf-path so101_controller/assets/SO101/so101_new_calib.urdf
+# Evaluate
+./scripts/run.sh evaluate \
+    --experiment-path artifacts/2026-03-12_09-52-10 \
+    --num-episodes 100 \ # the number of episodes to evaluate
+    --num-videos 5 \ # the number of episodes to record video for
+    --num-envs 10 \
+    --headless
 ```
 
-**Policy Types:**
-- `fc`: Uses 512-D features from ResNet18 avgpool layer
-- `conv`: Uses 1024-D spatial features from Spatial Softmax (matches training)
+**Useful flags:**
+| Flag                 | Description                              |
+| -------------------- | ---------------------------------------- |
+| `--num-envs N`       | Parallel environments                    |
+| `--max-iterations N` | Training iterations                      |
+| `--seed N`           | RNG seed (overrides YAML; `-1` = random) |
+| `--checkpoint PATH`  | Resume from checkpoint                   |
+| `--headless`         | No GUI                                   |
+| `--enable-cameras`   | Required for vision tasks                |
+| `--video`            | Record evaluation video                  |
+| `--display N`        | X11 display (useful over SSH)            |
 
-## Results
+## Domain Randomization
 
-See `report/final-report/final-report.pdf` for detailed experimental results, including training curves, ablation studies, and sim-to-real transfer analysis.
+Lighting, camera feed augmentation (noise, brightness, contrast, motion blur, JPEG compression), camera pose, cube color/size/position, distractor objects.
 
 ## Credits
 
-- Framework: NVIDIA Isaac Sim + Isaac Lab
-- RL Library: SKRL
-- SO-101 URDF: https://github.com/TheRobotStudio/SO-ARM100/blob/main/Simulation/SO101/so101_new_calib.urdf
+- SO-101 URDF: [TheRobotStudio/SO-ARM100](https://github.com/TheRobotStudio/SO-ARM100)
+- This project traces its origins to a [class project](https://github.com/utd-fall-25-cs-6341-robotics/cs6341-robotics-project-direct) created by myself and Kiran Hegde.
+

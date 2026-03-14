@@ -554,7 +554,7 @@ def randomize_ground_material():
     UsdShade.MaterialBindingAPI(plane_prim).Bind(material)
 
 
-def randomly_placed_lights(
+def randomize_env_lights(
     env_ids,
     height_range,
     light_intensity_range,
@@ -619,7 +619,7 @@ def randomly_placed_lights(
                 light_prim.SetActive(False)
 
 
-def randomize_lighting(
+def randomize_world_light(
     light_intensity_range: tuple[float, float],
     light_color_variation: float,
 ):
