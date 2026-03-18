@@ -278,7 +278,11 @@ def main(
 
     # configure and instantiate the skrl runner
     # https://skrl.readthedocs.io/en/latest/api/utils/runner.html
-    runner = Runner(env, agent_cfg)
+    if getattr(env_cfg, "vision_encoder", None) is not None and env_cfg.vision_encoder.type == "trainable_cnn":
+        print("[INFO] Using custom runner with trainable CNN policy.")
+        runner = _build_cnn_runner(env, env_cfg, agent_cfg)
+    else:
+        runner = Runner(env, agent_cfg)
 
     # load checkpoint (if specified)
     if resume_path:
@@ -290,6 +294,141 @@ def main(
 
     # close the simulator
     env.close()
+
+
+def _build_cnn_runner(env, env_cfg, agent_cfg: dict):
+    """Build a PPO runner with trainable CNN policy.
+
+    Used when ``vision_encoder.type == 'trainable_cnn'``.  skrl's :class:`Runner`
+    constructs models from a YAML description and cannot inject custom ``nn.Module``
+    classes, so we assemble PPO manually here.
+
+    The returned object exposes ``.agent`` (for checkpoint loading) and ``.run()``
+    so it is a drop-in replacement for the :class:`Runner` in the caller.
+    """
+    import copy
+
+    from skrl.agents.torch.ppo import PPO_DEFAULT_CONFIG
+    from skrl.memories.torch import RandomMemory
+    from skrl.resources.preprocessors.torch import RunningStandardScaler
+    from skrl.resources.schedulers.torch import KLAdaptiveLR
+    from skrl.trainers.torch import SequentialTrainer
+
+    from so101_rl.nnmodules.cnn_skrl_models import CnnDeterministicValue, CnnGaussianPolicy, MonitoredCnnPPO
+
+    device = env_cfg.sim.device
+    ve = env_cfg.vision_encoder
+    num_joints = len(env_cfg.joints.active)
+    agent_section = agent_cfg["agent"]
+
+    # ── Policy (actor): trainable CNN + MLP head ───────────────────────────
+    policy_model = CnnGaussianPolicy(
+        observation_space=env.observation_space,
+        action_space=env.action_space,
+        device=device,
+        image_height=ve.image_height,
+        image_width=ve.image_width,
+        num_joints=num_joints,
+        cnn_channels=list(ve.channels),
+        cnn_kernel_sizes=list(ve.kernel_sizes),
+        cnn_strides=list(ve.strides),
+        cnn_mlp_hidden_dims=list(ve.mlp_hidden_dims),
+        cnn_output_dim=ve.output_dim,
+    )
+
+    # ── Value (critic): MLP on joint positions (proprioceptive tail of actor obs) ─
+    # skrl's single_agent_train passes the full policy observation as `states` to
+    # the value function; it does NOT route the env's separate "critic" obs.  To
+    # keep the critic MLP tractable we slice the last num_joints dims (joint
+    # positions), which are always appended at the end of the actor observation.
+    value_model = CnnDeterministicValue(
+        observation_space=env.observation_space,
+        action_space=env.action_space,
+        device=device,
+        num_proprioception=num_joints,
+    )
+
+    # ── Rollout memory ─────────────────────────────────────────────────────
+    rollouts = agent_section.get("rollouts", 32)
+    memory = RandomMemory(memory_size=rollouts, num_envs=env.num_envs, device=device)
+
+    # ── PPO config ─────────────────────────────────────────────────────────
+    cfg = copy.deepcopy(PPO_DEFAULT_CONFIG)
+
+    # Keys that need special handling (not a direct copy from agent YAML)
+    _special = {
+        "class",
+        "experiment",
+        "state_preprocessor", "state_preprocessor_kwargs",
+        "value_preprocessor", "value_preprocessor_kwargs",
+        "learning_rate_scheduler", "learning_rate_scheduler_kwargs",
+        "rewards_shaper_scale",
+    }
+    for k, v in agent_section.items():
+        if k not in _special:
+            cfg[k] = v
+
+    # Disable state preprocessor: RunningStandardScaler would corrupt pixel values.
+    cfg["state_preprocessor"] = None
+    cfg["state_preprocessor_kwargs"] = {}
+
+    # Keep value preprocessor to normalise scalar value targets.
+    cfg["value_preprocessor"] = RunningStandardScaler
+    cfg["value_preprocessor_kwargs"] = {"size": 1, "device": device}
+
+    # Rewards shaper
+    shaper_scale = agent_section.get("rewards_shaper_scale")
+    if shaper_scale is not None:
+        _scale = float(shaper_scale)  # capture in closure
+        cfg["rewards_shaper"] = lambda tensor, timestep, timesteps: tensor * _scale
+
+    # Learning rate scheduler
+    if agent_section.get("learning_rate_scheduler") == "KLAdaptiveLR":
+        cfg["learning_rate_scheduler"] = KLAdaptiveLR
+        cfg["learning_rate_scheduler_kwargs"] = agent_section.get(
+            "learning_rate_scheduler_kwargs", {"kl_threshold": 0.008}
+        )
+
+    # Experiment directories (already set by caller before env creation)
+    exp = agent_section["experiment"]
+    cfg["experiment"]["directory"] = exp["directory"]
+    cfg["experiment"]["experiment_name"] = exp["experiment_name"]
+    cfg["experiment"]["write_interval"] = exp.get("write_interval", "auto")
+    cfg["experiment"]["checkpoint_interval"] = exp.get("checkpoint_interval", "auto")
+
+    # ── Assemble PPO agent ─────────────────────────────────────────────────
+    ppo_agent = MonitoredCnnPPO(
+        cnn_module=policy_model._cnn,
+        models={"policy": policy_model, "value": value_model},
+        memory=memory,
+        cfg=cfg,
+        observation_space=env.observation_space,
+        action_space=env.action_space,
+        device=device,
+    )
+
+    # ── Trainer ───────────────────────────────────────────────────────────
+    trainer_cfg = agent_cfg.get("trainer", {})
+    trainer = SequentialTrainer(
+        env=env,
+        agents=ppo_agent,
+        cfg={
+            "timesteps": trainer_cfg.get("timesteps", 1_000_000),
+            "environment_info": trainer_cfg.get("environment_info", "log"),
+        },
+    )
+
+    class _ManualRunner:
+        """Thin wrapper so callers can use `runner.agent.load()` and `runner.run()`."""
+
+        def __init__(self, agent, trainer):
+            self.agent = agent
+            self._trainer = trainer
+
+        def run(self):
+            self._trainer.train()
+
+    return _ManualRunner(ppo_agent, trainer)
 
 
 if __name__ == "__main__":

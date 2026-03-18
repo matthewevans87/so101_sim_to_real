@@ -38,15 +38,19 @@ pip install -e .   # installs so101_utils (shared image processing)
 
 ## Configuration
 
-There are two YAML configuration files:
+Configuration is made in two YAML files: **env config** and **SKRL config**:
 
-**`configs/baseline.yaml`** — environment parameters (physics, rewards, domain randomisation, sensors, etc.). `run.sh` passes this automatically via `SO101_ENV_CONFIG`; defaults to `configs/baseline.yaml`. Override with:
+**env config** — environment parameters (physics, rewards, domain randomization, sensors, etc.). `run.sh` passes this automatically via `SO101_ENV_CONFIG`; defaults to `configs/baseline.yaml`. Override with:
 ```bash
 ./scripts/run.sh train ... --env-config configs/my_config.yaml
 ```
 The YAML is validated against a typed dataclass hierarchy (`so101_env_params.py`) at startup.
+Current options are:
+- `configs/baseline.yaml` - uses frozen weights of ResNet18 model for vision feature extraction
+- `configs/trainable_cnn` - trains a CNN feature extractor in the PPO training loop.
 
 **`so101_rl/.../agents/skrl_ppo_cfg.yaml`** — PPO hyperparameters, network architecture, and training schedule. Also holds the `seed`, which propagates to all RNGs (`torch`, `numpy`, `random`). Override the seed at the command line with `--seed N` (use `-1` for a random seed).
+> Note: if `vision_encoder.type` is `trainable_cnn`, then the `models`, and `memory` sections of `skrl_ppo_cfg` are ignored, and `agent` and `trainer` have some of their properties overwritten. 
 
 ## Usage
 
@@ -88,3 +92,8 @@ Lighting, camera feed augmentation (noise, brightness, contrast, motion blur, JP
 - SO-101 URDF: [TheRobotStudio/SO-ARM100](https://github.com/TheRobotStudio/SO-ARM100)
 - This project traces its origins to a [class project](https://github.com/utd-fall-25-cs-6341-robotics/cs6341-robotics-project-direct) created by myself and Kiran Hegde.
 
+<!-- 
+### Related Papers
+| Title                                                                               | Authors                                                             | Date |
+| ----------------------------------------------------------------------------------- | ------------------------------------------------------------------- | ---- |
+| [End-to-End Training of Deep Visuomotor Policies](https://arxiv.org/pdf/1504.00702) | Sergey Levine and Chelsea Finn and Trevor Darrell and Pieter Abbeel | 2016 | --> |

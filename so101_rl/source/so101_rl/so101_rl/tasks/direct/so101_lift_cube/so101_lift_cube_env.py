@@ -8,7 +8,9 @@ from __future__ import annotations
 import math
 import os
 
-from so101_utils.feature_extraction.feature_extraction import ResNet18SpatialSoftmaxFeatureExtractor
+from so101_utils.feature_extraction.feature_extraction import (
+    ResNet18SpatialSoftmaxFeatureExtractor,
+)
 from so101_utils.image_processing import (
     CameraBrightnessPipelineStep,
     CameraContrastPipelineStep,
@@ -21,6 +23,7 @@ from so101_utils.image_processing import (
     JpegCompressionPipelineStep,
     MotionBlurPipelineStep,
     ResizePipelineStep,
+    Uint8ToFloatCHWPipelineStep,
 )
 from torch import zeros_like
 
@@ -51,7 +54,14 @@ from so101_rl.helpers.variations import (
     randomize_env_lights,
 )
 from .so101_lift_cube_env_cfg import So101LiftCubeCfg
-from so101_rl.env_pipeline import StepContext, MetricPipeline, RewardPipeline, build_metric_pipeline, build_reward_pipeline, KEY_OBS_DIMS
+from so101_rl.env_pipeline import (
+    StepContext,
+    MetricPipeline,
+    RewardPipeline,
+    build_metric_pipeline,
+    build_reward_pipeline,
+    KEY_OBS_DIMS,
+)
 import torch
 from collections.abc import Sequence
 
@@ -78,9 +88,7 @@ import isaaclab.sim as sim_utils
 class So101LiftCube(DirectRLEnv):
     cfg: So101LiftCubeCfg
 
-    def __init__(
-        self, cfg: So101LiftCubeCfg, render_mode: str | None = None, **kwargs
-    ):
+    def __init__(self, cfg: So101LiftCubeCfg, render_mode: str | None = None, **kwargs):
         # Store render mode BEFORE super().__init__() because _setup_scene() needs it
         self._render_mode = render_mode
 
@@ -168,25 +176,22 @@ class So101LiftCube(DirectRLEnv):
         self.reward_pipeline: RewardPipeline = build_reward_pipeline(self.cfg)
         self.metric_pipeline: MetricPipeline = build_metric_pipeline(
             self.reward_pipeline,
-            extra_keys=frozenset({
-                # consumed by _get_dones
-                "is_success_lift_fraction_terminal",
-                "is_success_point_at_cube_terminal",
-                "is_success_touch_terminal",
-                "is_table_touched",
-                # consumed by _get_observations (critic features)
-                *self.cfg.observations.critic_obs_metrics,
-                # consumed by _pre_physics_step (arrow markers)
-                "v_grip_zone_to_cube_ee",
-            }),
+            extra_keys=frozenset(
+                {
+                    # consumed by _get_dones
+                    "is_success_lift_fraction_terminal",
+                    "is_success_point_at_cube_terminal",
+                    "is_success_touch_terminal",
+                    "is_table_touched",
+                    # consumed by _get_observations (critic features)
+                    *self.cfg.observations.critic_obs_metrics,
+                    # consumed by _pre_physics_step (arrow markers)
+                    "v_grip_zone_to_cube_ee",
+                }
+            ),
         )
-
-        self.vision_feature_extractor = ResNet18SpatialSoftmaxFeatureExtractor(device=self.device)
-
-        _image_pipeline_steps = []
-        if self.cfg.domain_randomization.camera.feed.preshape_image.enabled:
-            _image_pipeline_steps.append(ResizePipelineStep((224, 224)))
-        _image_pipeline_steps.extend([
+        _image_pipeline_steps = [
+            Uint8ToFloatCHWPipelineStep(),
             GaussianBlurPipelineStep(),
             JpegCompressionPipelineStep(),
             MotionBlurPipelineStep(),
@@ -194,9 +199,34 @@ class So101LiftCube(DirectRLEnv):
             GaussianNoisePipelineStep(),
             CameraBrightnessPipelineStep(),
             CameraContrastPipelineStep(),
-            ImageNetNormalizationPipelineStep(),
-            ClampPipelineStep(),
-        ])
+        ]
+        _vision_type = self.cfg.vision_encoder.type
+        if _vision_type == "resnet18":
+            self.vision_feature_extractor = ResNet18SpatialSoftmaxFeatureExtractor(
+                device=self.device
+            )
+            if self.cfg.domain_randomization.camera.feed.preshape_image.enabled:
+                # 224x224 matches ImageNet pretraining resolution for best feature quality
+                _image_pipeline_steps.insert(1, ResizePipelineStep((224, 224)))
+            _image_pipeline_steps.append(ImageNetNormalizationPipelineStep())
+            _image_pipeline_steps.append(ClampPipelineStep())
+        elif _vision_type == "trainable_cnn":
+            # Always resize to the configured resolution so that the flat image obs
+            # dimensions match vision_encoder.image_height × image_width exactly.
+            _image_pipeline_steps.insert(
+                1,
+                ResizePipelineStep(
+                    (
+                        self.cfg.vision_encoder.image_height,
+                        self.cfg.vision_encoder.image_width,
+                    )
+                ),
+            )
+        else:
+            raise ValueError(
+                f"Unknown vision_encoder.type: {_vision_type!r}. "
+                "Must be 'resnet18' or 'trainable_cnn'."
+            )
         self.image_pipeline = ImagePipeline(_image_pipeline_steps)
 
     # Called by super class to setup the scene
@@ -284,14 +314,24 @@ class So101LiftCube(DirectRLEnv):
         self._target_pos = target_pos
 
         if self.cfg.debug.enable_tip_markers:
-            visualize_tip_markers(self.tip_markers, self._compute_ee_pos_w(self._grip_zone_offset), self.device)
+            visualize_tip_markers(
+                self.tip_markers,
+                self._compute_ee_pos_w(self._grip_zone_offset),
+                self.device,
+            )
 
         if self.cfg.debug.enable_camera_frame_markers:
             ee_pos = self.robot.data.body_pos_w[:, self._ee_body_idx[0], :]
             ee_quat = self.robot.data.body_quat_w[:, self._ee_body_idx[0], :]
-            cam_pos_w = ee_pos + math_utils.quat_apply(ee_quat, self._camera_offset_pos.expand(self.num_envs, -1))
-            cam_quat_w = math_utils.quat_mul(ee_quat, self._camera_offset_quat.expand(self.num_envs, -1))
-            visualize_camera_frame_markers(self.camera_frame_markers, cam_pos_w, cam_quat_w, self.device)
+            cam_pos_w = ee_pos + math_utils.quat_apply(
+                ee_quat, self._camera_offset_pos.expand(self.num_envs, -1)
+            )
+            cam_quat_w = math_utils.quat_mul(
+                ee_quat, self._camera_offset_quat.expand(self.num_envs, -1)
+            )
+            visualize_camera_frame_markers(
+                self.camera_frame_markers, cam_pos_w, cam_quat_w, self.device
+            )
 
         v_ee = self.step_metrics["v_grip_zone_to_cube_ee"]
         if self.cfg.debug.enable_gripper_arrow_markers and v_ee is not None:
@@ -300,8 +340,12 @@ class So101LiftCube(DirectRLEnv):
             gripper_pos_w = src_pos[:, 0, :] if src_pos.ndim == 3 else src_pos
             gripper_quat_w = src_quat[:, 0, :] if src_quat.ndim == 3 else src_quat
             visualize_gripper_arrow(
-                self.gripper_arrow_markers, gripper_pos_w, gripper_quat_w,
-                v_ee, self.cfg.gripper.grip_zone_offset, self.device
+                self.gripper_arrow_markers,
+                gripper_pos_w,
+                gripper_quat_w,
+                v_ee,
+                self.cfg.gripper.grip_zone_offset,
+                self.device,
             )
 
     def _apply_action(self) -> None:
@@ -314,11 +358,8 @@ class So101LiftCube(DirectRLEnv):
         # Raw camera RGB: (num_envs, H, W, 3), uint8
         camera_data = self.camera.data.output["rgb"]
 
-        # Transform to (N, 3, H, W) float in [0, 1]
-        images = camera_data.permute(0, 3, 1, 2).float() / 255.0
-
-        # Apply domain randomization
-        images = self.image_pipeline.process(images)
+        # Apply domain randomization (pipeline handles uint8→float CHW conversion as first step)
+        images = self.image_pipeline.process(camera_data)
 
         if (
             self.cfg.debug.save_images
@@ -329,15 +370,24 @@ class So101LiftCube(DirectRLEnv):
                 os.path.join(f"aug_{self.common_step_counter:06d}.png"),
             )
 
-        # Extract visual features
-        visual_features = self.vision_feature_extractor.extract(images)  # (N, 1024)
-
         # Proprioception
         q = self.joint_pos[:, self._dof_idx]  # (N, num_joints)
         dq = self.joint_vel[:, self._dof_idx]  # (N, num_joints) - Joint velocities
 
-        # Observations
-        actor_obs = torch.cat([visual_features, q], dim=-1)  # (N, 1024 + num_joints)
+        # Actor observations: strategy depends on vision_encoder.type
+        if self.cfg.vision_encoder.type == "resnet18":
+            # Frozen ResNet18 + SpatialSoftmax produces 1024-D features
+            visual_features = self.vision_feature_extractor.extract(images)  # (N, 1024)
+            actor_obs = torch.cat(
+                [visual_features, q], dim=-1
+            )  # (N, 1024 + num_joints)
+        else:
+            # Trainable CNN lives inside the skrl policy model; pass pipeline-augmented
+            # pixels as flat observations so PPO can backprop through the CNN.
+            N = images.shape[0]
+            actor_obs = torch.cat(
+                [images.reshape(N, -1), q], dim=-1
+            )  # (N, H*W*3 + num_joints)
 
         # Compute on first observation call (when _get_observations is called from elf._env.reset())
         if self.step_metrics is None:
@@ -346,7 +396,7 @@ class So101LiftCube(DirectRLEnv):
 
         critic_obs = torch.cat(
             [
-                q,   # (N, num_joints)
+                q,  # (N, num_joints)
                 dq,  # (N, num_joints)
                 *[
                     self.step_metrics[key].reshape(self.num_envs, KEY_OBS_DIMS[key])
@@ -423,7 +473,10 @@ class So101LiftCube(DirectRLEnv):
         if self.cfg.joints.starting_position_noise.enabled:
             noise_range = self.cfg.joints.starting_position_noise.range
             joint_pos[:, self._dof_idx] += sample_uniform(
-                noise_range[0], noise_range[1], joint_pos[:, self._dof_idx].shape, self.device
+                noise_range[0],
+                noise_range[1],
+                joint_pos[:, self._dof_idx].shape,
+                self.device,
             )
 
         default_root_state = self.robot.data.default_root_state[env_ids].clone()
@@ -545,4 +598,3 @@ class So101LiftCube(DirectRLEnv):
             tip_pos = ee_pos
 
         return tip_pos
-

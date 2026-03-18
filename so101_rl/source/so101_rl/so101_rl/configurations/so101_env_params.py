@@ -402,6 +402,26 @@ class ObservationsCfg:
 
 
 @dataclass
+class VisionEncoderCfg:
+    """Configuration for the vision feature extractor used in the actor policy.
+
+    type:
+        'resnet18'      — frozen pretrained ResNet18 + SpatialSoftmax (1024-D output).
+                          The CNN is NOT updated during PPO training.
+        'trainable_cnn' — lightweight 4-conv CNN that IS updated by PPO backpropagation.
+                          Raw pipeline-augmented pixels are passed as policy observations.
+    """
+    type: str
+    image_height: int
+    image_width: int
+    channels: list
+    kernel_sizes: list
+    strides: list
+    mlp_hidden_dims: list
+    output_dim: int
+
+
+@dataclass
 class So101EnvParams:
     decimation: int
     episode_length_s: float
@@ -418,6 +438,7 @@ class So101EnvParams:
     domain_randomization: DomainRandomizationCfg
     sensors: SensorsCfg
     observations: ObservationsCfg
+    vision_encoder: VisionEncoderCfg
 
     @classmethod
     def load(cls, path: str | Path) -> "So101EnvParams":

@@ -49,12 +49,25 @@ class So101LiftCubeCfg(DirectRLEnvCfg):
         replicate_physics=_Y.scene.replicate_physics,
     )
 
-    # ── Observation / action space (architecture-dependent, hardcoded) ──────
+    # ── Observation / action space (architecture-dependent) ──────────────────────
     NUM_ACTIVE_JOINTS = len(_Y.joints.active)
     action_space = NUM_ACTIVE_JOINTS
 
-    SPATIAL_SOFTMAX_FEATURES = 1024
-    observation_space = SPATIAL_SOFTMAX_FEATURES + NUM_ACTIVE_JOINTS
+    if _Y.vision_encoder.type == "resnet18":
+        # Frozen ResNet18 + SpatialSoftmax: 2 × 512 channels = 1024-D features
+        observation_space = 1024 + NUM_ACTIVE_JOINTS
+    elif _Y.vision_encoder.type == "trainable_cnn":
+        # Raw pipeline-augmented pixels (resized to configured dims) + joint positions
+        observation_space = (
+            _Y.vision_encoder.image_height * _Y.vision_encoder.image_width * 3
+            + NUM_ACTIVE_JOINTS
+        )
+    else:
+        raise ValueError(
+            f"Unknown vision_encoder.type: {_Y.vision_encoder.type!r}. "
+            "Must be 'resnet18' or 'trainable_cnn'."
+        )
+
     state_space = (
         2 * NUM_ACTIVE_JOINTS
         + sum(KEY_OBS_DIMS[k] for k in _Y.observations.critic_obs_metrics)
@@ -157,4 +170,5 @@ class So101LiftCubeCfg(DirectRLEnvCfg):
     rewards           = _Y.rewards
     domain_randomization = _Y.domain_randomization
     observations      = _Y.observations
+    vision_encoder    = _Y.vision_encoder
 
