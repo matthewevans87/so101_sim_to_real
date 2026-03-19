@@ -209,7 +209,7 @@ observations:
 
 vision_encoder:
   # 'resnet18'      — frozen pretrained ResNet18 + SpatialSoftmax (1024-D, not updated by PPO)
-  # 'trainable_cnn' — 4-conv CNN trained end-to-end within the PPO loop
+  # 'trainable_cnn' — conv CNN trained end-to-end within the PPO loop
   type: trainable_cnn
   # Image dimensions the CNN sees. For 'trainable_cnn', the env resizes to these before
   # storing observations in the rollout buffer. Smaller values reduce memory pressure.
@@ -219,10 +219,5 @@ vision_encoder:
   # deployment, and is a no-op during sim training when the camera renders at this size.
   image_height: 108
   image_width: 192
-  # Conv layers: channels / kernel sizes / strides (must all be the same length)
-  channels: [32, 64, 128, 128]
-  kernel_sizes: [8, 4, 3, 3]
-  strides: [4, 2, 2, 1]
-  # MLP projection after SpatialSoftmax
-  mlp_hidden_dims: [256]
-  output_dim: 256
+  # CNN architecture (channels, kernel sizes, etc.) is defined in skrl_ppo_cfg.yaml
+  # under models.policy.cnn — keeping all model architecture in the agent config.

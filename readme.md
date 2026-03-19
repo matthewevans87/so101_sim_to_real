@@ -38,19 +38,23 @@ pip install -e .   # installs so101_utils (shared image processing)
 
 ## Configuration
 
-Configuration is made in two YAML files: **env config** and **SKRL config**:
+Each experiment is fully specified by two YAML files:
 
-**env config** — environment parameters (physics, rewards, domain randomization, sensors, etc.). `run.sh` passes this automatically via `SO101_ENV_CONFIG`; defaults to `configs/baseline.yaml`. Override with:
+**`configs/<experiment>.yaml`** — simulation and environment parameters: physics, rewards, domain randomization, sensors, and `vision_encoder.type`. Validated at startup against a typed dataclass hierarchy (`so101_env_params.py`); unknown or missing keys raise immediately. Passed via `SO101_ENV_CONFIG`; override with:
 ```bash
 ./scripts/run.sh train ... --env-config configs/my_config.yaml
 ```
-The YAML is validated against a typed dataclass hierarchy (`so101_env_params.py`) at startup.
-Current options are:
-- `configs/baseline.yaml` - uses frozen weights of ResNet18 model for vision feature extraction
-- `configs/trainable_cnn` - trains a CNN feature extractor in the PPO training loop.
+Current configs:
+- `configs/baseline.yaml` — frozen ResNet18 + SpatialSoftmax (1024-D) vision features
+- `configs/trainable_cnn.yaml` — lightweight CNN trained end-to-end within the PPO loop
 
-**`so101_rl/.../agents/skrl_ppo_cfg.yaml`** — PPO hyperparameters, network architecture, and training schedule. Also holds the `seed`, which propagates to all RNGs (`torch`, `numpy`, `random`). Override the seed at the command line with `--seed N` (use `-1` for a random seed).
-> Note: if `vision_encoder.type` is `trainable_cnn`, then the `models`, and `memory` sections of `skrl_ppo_cfg` are ignored, and `agent` and `trainer` have some of their properties overwritten. 
+**`so101_rl/.../agents/skrl_ppo_cfg.yaml`** — PPO hyperparameters, training schedule, and **all network architecture**. The `seed` here propagates to all RNGs (`torch`, `numpy`, `random`); override at the command line with `--seed N` (use `-1` for a random seed).
+
+Network architecture is split by path within `models:`:
+- `models.policy.network` / `models.value.network` — MLP layers used by the `resnet18` path (consumed by skrl's `Runner`)
+- `models.policy.cnn`, `models.policy.head_dims`, `models.value.hidden_dims` — CNN backbone and head architecture used by the `trainable_cnn` path (the `network:` block is ignored in this case)
+
+The key principle: `vision_encoder.type` and image dimensions live in the env config (they affect observation space); everything about the network architecture lives in the skrl config.
 
 ## Usage
 

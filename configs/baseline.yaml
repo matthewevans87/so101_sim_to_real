@@ -208,4 +208,13 @@ observations:
     - is_table_touched
 
 vision_encoder:
+  # 'resnet18'      — frozen pretrained ResNet18 + SpatialSoftmax (1024-D, not updated by PPO)
+  # 'trainable_cnn' — conv CNN trained end-to-end within the PPO loop
   type: resnet18
+  # Image dimensions the CNN sees. For 'trainable_cnn', the env resizes to these before
+  # storing observations in the rollout buffer. Smaller values reduce memory pressure.
+  # For 'resnet18' these values are unused (ResNet accepts any resolution).
+  image_height: 192
+  image_width: 256
+  # CNN architecture (channels, kernel sizes, etc.) is defined in skrl_ppo_cfg.yaml
+  # under models.policy.cnn — keeping all model architecture in the agent config.

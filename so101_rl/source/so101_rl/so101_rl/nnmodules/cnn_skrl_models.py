@@ -32,7 +32,9 @@ import torch.nn as nn
 from skrl.agents.torch.ppo import PPO
 from skrl.models.torch import DeterministicMixin, GaussianMixin, Model
 
-from so101_utils.feature_extraction.feature_extraction import TrainableCnnFeatureExtractor
+from so101_utils.feature_extraction.feature_extraction import (
+    TrainableCnnFeatureExtractor,
+)
 
 
 class CnnGaussianPolicy(GaussianMixin, Model):
@@ -53,7 +55,7 @@ class CnnGaussianPolicy(GaussianMixin, Model):
         cnn_mlp_hidden_dims: list,
         cnn_output_dim: int,
         # Policy head
-        head_hidden_dims: list = None,
+        head_hidden_dims: list,
         # GaussianMixin args
         clip_actions: bool = False,
         clip_log_std: bool = True,
@@ -61,6 +63,11 @@ class CnnGaussianPolicy(GaussianMixin, Model):
         max_log_std: float = 2.0,
         initial_log_std: float = 0.0,
     ):
+        if head_hidden_dims is None:
+            raise ValueError(
+                "head_hidden_dims must be provided explicitly. "
+                "Set models.policy.head_dims in skrl_ppo_cfg.yaml."
+            )
         Model.__init__(self, observation_space, action_space, device)
         GaussianMixin.__init__(
             self,
@@ -69,9 +76,6 @@ class CnnGaussianPolicy(GaussianMixin, Model):
             min_log_std=min_log_std,
             max_log_std=max_log_std,
         )
-
-        if head_hidden_dims is None:
-            head_hidden_dims = [256, 128, 64]
 
         self._image_h = image_height
         self._image_w = image_width
@@ -109,10 +113,10 @@ class CnnGaussianPolicy(GaussianMixin, Model):
         joints = obs[:, self._image_flat_dim :]
 
         images = images_flat.view(-1, 3, self._image_h, self._image_w)  # (N, 3, H, W)
-        cnn_feats = self._cnn(images)                                     # (N, cnn_output_dim)
+        cnn_feats = self._cnn(images)  # (N, cnn_output_dim)
 
-        x = torch.cat([cnn_feats, joints], dim=-1)                        # (N, cnn_output_dim + num_joints)
-        mean = self._head(x)                                               # (N, num_actions)
+        x = torch.cat([cnn_feats, joints], dim=-1)  # (N, cnn_output_dim + num_joints)
+        mean = self._head(x)  # (N, num_actions)
 
         return mean, self.log_std_parameter, {}
 
@@ -134,14 +138,20 @@ class CnnDeterministicValue(DeterministicMixin, Model):
         hidden_dims: list = None,
         clip_actions: bool = False,
     ):
+        if hidden_dims is None:
+            raise ValueError(
+                "hidden_dims must be provided explicitly. "
+                "Set models.value.hidden_dims in skrl_ppo_cfg.yaml."
+            )
         Model.__init__(self, observation_space, action_space, device)
         DeterministicMixin.__init__(self, clip_actions=clip_actions)
 
-        if hidden_dims is None:
-            hidden_dims = [256, 128, 64]
-
         # MLP input: proprioceptive slice when provided, else full observation.
-        mlp_in_dim = num_proprioception if num_proprioception is not None else self.num_observations
+        mlp_in_dim = (
+            num_proprioception
+            if num_proprioception is not None
+            else self.num_observations
+        )
         self._num_proprio = num_proprioception
 
         layers: list = []
@@ -156,7 +166,7 @@ class CnnDeterministicValue(DeterministicMixin, Model):
         states = inputs["states"]
         if self._num_proprio is not None:
             # Extract joint positions from the trailing dims of the actor obs.
-            states = states[:, -self._num_proprio:]
+            states = states[:, -self._num_proprio :]
         return self._net(states), {}
 
 

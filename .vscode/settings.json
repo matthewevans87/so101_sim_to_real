@@ -26,7 +26,7 @@
     },
     // Configuration for spelling checker
     "spellright.language": [
-        "en-US-10-1."
+        "en"
     ],
     "spellright.documentTypes": [
         "markdown",
@@ -315,5 +315,12 @@
     ],
     "github.copilot.chat.codeGeneration.useInstructionFiles": true,
     "python-envs.defaultEnvManager": "ms-python.python:conda",
-    "python-envs.defaultPackageManager": "ms-python.python:conda"
+    "python-envs.defaultPackageManager": "ms-python.python:conda",
+    "remote.SSH.defaultForwardedPorts": [
+        {
+            "localPort": 6006,
+            "name": "TensorBoard",
+            "remotePort": 6006
+        }
+    ]
 }

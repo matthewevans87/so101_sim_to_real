@@ -228,7 +228,9 @@ def main(
     agent_cfg["agent"]["experiment"]["write_interval"] = 100
 
     # log_dir is the full path including the experiment name sub-dir
-    log_dir = os.path.join(log_root_path, agent_cfg["agent"]["experiment"]["experiment_name"])
+    log_dir = os.path.join(
+        log_root_path, agent_cfg["agent"]["experiment"]["experiment_name"]
+    )
 
     # dump the configuration into log-directory
     dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
@@ -278,7 +280,10 @@ def main(
 
     # configure and instantiate the skrl runner
     # https://skrl.readthedocs.io/en/latest/api/utils/runner.html
-    if getattr(env_cfg, "vision_encoder", None) is not None and env_cfg.vision_encoder.type == "trainable_cnn":
+    if (
+        getattr(env_cfg, "vision_encoder", None) is not None
+        and env_cfg.vision_encoder.type == "trainable_cnn"
+    ):
         print("[INFO] Using custom runner with trainable CNN policy.")
         runner = _build_cnn_runner(env, env_cfg, agent_cfg)
     else:
@@ -314,12 +319,42 @@ def _build_cnn_runner(env, env_cfg, agent_cfg: dict):
     from skrl.resources.schedulers.torch import KLAdaptiveLR
     from skrl.trainers.torch import SequentialTrainer
 
-    from so101_rl.nnmodules.cnn_skrl_models import CnnDeterministicValue, CnnGaussianPolicy, MonitoredCnnPPO
+    from so101_rl.nnmodules.cnn_skrl_models import (
+        CnnDeterministicValue,
+        CnnGaussianPolicy,
+        MonitoredCnnPPO,
+    )
 
     device = env_cfg.sim.device
     ve = env_cfg.vision_encoder
     num_joints = len(env_cfg.joints.active)
     agent_section = agent_cfg["agent"]
+
+    # Validate CNN architecture config is present in the agent config.
+    _models_policy = agent_cfg.get("models", {}).get("policy", {})
+    _models_value = agent_cfg.get("models", {}).get("value", {})
+    if "cnn" not in _models_policy:
+        raise KeyError(
+            "agent_cfg['models']['policy']['cnn'] is required when "
+            "vision_encoder.type == 'trainable_cnn'. "
+            "Add a 'cnn:' subsection to models.policy in skrl_ppo_cfg.yaml."
+        )
+    if "head_dims" not in _models_policy:
+        raise KeyError(
+            "agent_cfg['models']['policy']['head_dims'] is required when "
+            "vision_encoder.type == 'trainable_cnn'. "
+            "Add 'head_dims:' to models.policy in skrl_ppo_cfg.yaml."
+        )
+    if "hidden_dims" not in _models_value:
+        raise KeyError(
+            "agent_cfg['models']['value']['hidden_dims'] is required when "
+            "vision_encoder.type == 'trainable_cnn'. "
+            "Add 'hidden_dims:' to models.value in skrl_ppo_cfg.yaml."
+        )
+
+    cnn_cfg = _models_policy["cnn"]
+    head_dims = _models_policy["head_dims"]
+    value_hidden_dims = _models_value["hidden_dims"]
 
     # ── Policy (actor): trainable CNN + MLP head ───────────────────────────
     policy_model = CnnGaussianPolicy(
@@ -329,11 +364,12 @@ def _build_cnn_runner(env, env_cfg, agent_cfg: dict):
         image_height=ve.image_height,
         image_width=ve.image_width,
         num_joints=num_joints,
-        cnn_channels=list(ve.channels),
-        cnn_kernel_sizes=list(ve.kernel_sizes),
-        cnn_strides=list(ve.strides),
-        cnn_mlp_hidden_dims=list(ve.mlp_hidden_dims),
-        cnn_output_dim=ve.output_dim,
+        cnn_channels=list(cnn_cfg["channels"]),
+        cnn_kernel_sizes=list(cnn_cfg["kernel_sizes"]),
+        cnn_strides=list(cnn_cfg["strides"]),
+        cnn_mlp_hidden_dims=list(cnn_cfg["mlp_hidden_dims"]),
+        cnn_output_dim=cnn_cfg["output_dim"],
+        head_hidden_dims=list(head_dims),
     )
 
     # ── Value (critic): MLP on joint positions (proprioceptive tail of actor obs) ─
@@ -346,6 +382,7 @@ def _build_cnn_runner(env, env_cfg, agent_cfg: dict):
         action_space=env.action_space,
         device=device,
         num_proprioception=num_joints,
+        hidden_dims=list(value_hidden_dims),
     )
 
     # ── Rollout memory ─────────────────────────────────────────────────────
@@ -359,9 +396,12 @@ def _build_cnn_runner(env, env_cfg, agent_cfg: dict):
     _special = {
         "class",
         "experiment",
-        "state_preprocessor", "state_preprocessor_kwargs",
-        "value_preprocessor", "value_preprocessor_kwargs",
-        "learning_rate_scheduler", "learning_rate_scheduler_kwargs",
+        "state_preprocessor",
+        "state_preprocessor_kwargs",
+        "value_preprocessor",
+        "value_preprocessor_kwargs",
+        "learning_rate_scheduler",
+        "learning_rate_scheduler_kwargs",
         "rewards_shaper_scale",
     }
     for k, v in agent_section.items():

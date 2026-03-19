@@ -19,6 +19,7 @@ import yaml
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _from_dict(cls: type, data: dict) -> object:
     """Recursively construct a dataclass from a mapping.
 
@@ -57,6 +58,7 @@ def _from_dict(cls: type, data: dict) -> object:
 # Sim / scene
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class SimCfg:
     dt: float
@@ -72,6 +74,7 @@ class SceneCfg:
 # ---------------------------------------------------------------------------
 # Joints / control / safety
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 @dataclass
@@ -104,6 +107,7 @@ class SafetyCfg:
 # Gripper
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class GripperCfg:
     ee_link_name: str
@@ -117,6 +121,7 @@ class GripperCfg:
 # ---------------------------------------------------------------------------
 # Distractors
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class DistractorGeometryCfg:
@@ -153,6 +158,7 @@ class DistractorsCfg:
 # Debug / behavior
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class DebugCfg:
     save_images: bool
@@ -175,6 +181,7 @@ class BehaviorCfg:
 # ---------------------------------------------------------------------------
 # Rewards
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class RewardCfg:
@@ -263,6 +270,7 @@ class RewardsCfg:
 # ---------------------------------------------------------------------------
 # Domain randomization
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class PreshapeImageCfg:
@@ -366,6 +374,7 @@ class DomainRandomizationCfg:
 # Sensors
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class CameraSensorCfg:
     height: int
@@ -396,6 +405,7 @@ class SensorsCfg:
 # Root
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class ObservationsCfg:
     critic_obs_metrics: list[str]
@@ -408,17 +418,14 @@ class VisionEncoderCfg:
     type:
         'resnet18'      — frozen pretrained ResNet18 + SpatialSoftmax (1024-D output).
                           The CNN is NOT updated during PPO training.
-        'trainable_cnn' — lightweight 4-conv CNN that IS updated by PPO backpropagation.
+        'trainable_cnn' — lightweight conv CNN that IS updated by PPO backpropagation.
                           Raw pipeline-augmented pixels are passed as policy observations.
+                          CNN architecture is defined in skrl_ppo_cfg.yaml models.policy.cnn.
     """
+
     type: str
     image_height: int
     image_width: int
-    channels: list
-    kernel_sizes: list
-    strides: list
-    mlp_hidden_dims: list
-    output_dim: int
 
 
 @dataclass
@@ -444,9 +451,7 @@ class So101EnvParams:
     def load(cls, path: str | Path) -> "So101EnvParams":
         config_path = Path(path).expanduser().resolve()
         if not config_path.exists():
-            raise FileNotFoundError(
-                f"SO101 env config not found at '{config_path}'."
-            )
+            raise FileNotFoundError(f"SO101 env config not found at '{config_path}'.")
         with config_path.open("r", encoding="utf-8") as fh:
             data = yaml.safe_load(fh) or {}
         if not isinstance(data, dict):

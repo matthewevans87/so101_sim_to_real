@@ -3,6 +3,10 @@ seed: 42
 
 # Models are instantiated using skrl's model instantiator utility
 # https://skrl.readthedocs.io/en/latest/api/utils/model_instantiators.html
+#
+# NOTE: 'network:' applies when vision_encoder.type == 'resnet18' (used by skrl's Runner).
+#       'cnn:', 'head_dims:', and 'value.hidden_dims:' apply when type == 'trainable_cnn'
+#       (used by _build_cnn_runner in train.py; ignored by Runner).
 models:
   separate: True  # Use separate networks for actor and critic
   policy:  # Actor: vision-based only
@@ -12,21 +16,32 @@ models:
     min_log_std: -20.0
     max_log_std: 2.0
     initial_log_std: 0.0
+    # resnet18 path: MLP operating on 1024-D ResNet features + joint positions
     network:
       - name: net
         input: OBSERVATIONS
         layers: [256, 128, 64]
         activations: elu
     output: ACTIONS
+    # trainable_cnn path: CNN backbone architecture (ignored by resnet18 path)
+    cnn:
+      channels: [32, 64, 128, 128]
+      kernel_sizes: [8, 4, 3, 3]
+      strides: [4, 2, 2, 1]
+      mlp_hidden_dims: [256]  # SpatialSoftmax projection MLP hidden dims
+      output_dim: 256         # CNN feature vector dimension
+    head_dims: [256, 128, 64]  # Policy head: CNN features + joints → action means
   value:  # Critic: privileged state information
     class: DeterministicMixin
     clip_actions: False
+    # resnet18 path: MLP operating on full observations
     network:
       - name: net
         input: OBSERVATIONS
         layers: [256, 128, 64]
         activations: elu
     output: ONE
+    hidden_dims: [256, 128, 64]  # Value MLP dims (trainable_cnn path; ignored by resnet18 path)
 
 
 # Rollout memory
