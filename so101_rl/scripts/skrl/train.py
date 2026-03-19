@@ -151,6 +151,82 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 
 import so101_rl.tasks  # noqa: F401
 
+
+def _flatten_for_hparams(obj, prefix: str = "") -> dict:
+    """Recursively flatten a nested dict/object into a flat dict for TensorBoard add_hparams.
+
+    Keys are joined with '/' (e.g. ``"env/rewards/distance/scale"``).  Values are
+    coerced to types accepted by PyTorch's SummaryWriter.add_hparams:
+    int, float, str, bool; everything else is stringified.
+    """
+    result: dict[str, int | float | str | bool] = {}
+    if isinstance(obj, dict):
+        items = obj.items()
+    elif hasattr(obj, "__dict__"):
+        items = vars(obj).items()
+    else:
+        # Scalar leaf — shouldn't normally be called directly with a scalar
+        key = prefix or "value"
+        if isinstance(obj, (int, float, bool)):
+            return {key: obj}
+        return {key: str(obj) if obj is not None else "null"}
+
+    for k, v in items:
+        full_key = f"{prefix}/{k}" if prefix else k
+        if isinstance(v, dict) or hasattr(v, "__dict__"):
+            result.update(_flatten_for_hparams(v, full_key))
+        elif isinstance(v, (int, float, bool)):
+            result[full_key] = v
+        elif v is None:
+            result[full_key] = "null"
+        else:
+            # lists, tuples, and any other type → human-readable string
+            result[full_key] = str(v)
+    return result
+
+
+def _log_configs_to_tensorboard(
+    log_dir: str, env_yaml_path: str, agent_yaml_path: str
+) -> None:
+    """Write env and agent configs to TensorBoard as both TEXT and HPARAMS entries.
+
+    TEXT entries (``config/env``, ``config/agent``) show the raw YAML in the TEXT tab
+    for quick human inspection.  The HPARAMS entry writes a single row to the HPARAMS
+    tab so that multiple runs can be compared side-by-side.
+
+    Both config YAML files are expected to already exist on disk (written by
+    ``dump_yaml`` earlier in ``main()``).
+    """
+    import yaml
+    from torch.utils.tensorboard import SummaryWriter
+
+    with open(env_yaml_path, "r") as f:
+        env_yaml_text = f.read()
+    with open(agent_yaml_path, "r") as f:
+        agent_yaml_text = f.read()
+
+    env_cfg_dict = yaml.safe_load(env_yaml_text) or {}
+    agent_cfg_dict = yaml.safe_load(agent_yaml_text) or {}
+
+    # Write to the run's log_dir directly; SKRL writes its own events into
+    # log_dir/runs/{uuid}/ — TensorBoard discovers all event files recursively.
+    writer = SummaryWriter(log_dir=log_dir)
+    try:
+        writer.add_text("config/env", f"```yaml\n{env_yaml_text}\n```", global_step=0)
+        writer.add_text(
+            "config/agent", f"```yaml\n{agent_yaml_text}\n```", global_step=0
+        )
+
+        flat: dict[str, int | float | str | bool] = {
+            **_flatten_for_hparams(env_cfg_dict, "env"),
+            **_flatten_for_hparams(agent_cfg_dict, "agent"),
+        }
+        # add_hparams requires at least one metric; use a dummy placeholder.
+        writer.add_hparams(flat, {"_placeholder": 0.0})
+    finally:
+        writer.close()
+
+
 # config shortcuts
 if args_cli.agent is None:
     algorithm = args_cli.algorithm.lower()
@@ -235,6 +311,13 @@ def main(
     # dump the configuration into log-directory
     dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
     dump_yaml(os.path.join(log_dir, "params", "agent.yaml"), agent_cfg)
+
+    # log configs to TensorBoard (TEXT tab + HPARAMS comparison tab)
+    _log_configs_to_tensorboard(
+        log_dir=log_dir,
+        env_yaml_path=os.path.join(log_dir, "params", "env.yaml"),
+        agent_yaml_path=os.path.join(log_dir, "params", "agent.yaml"),
+    )
 
     # get checkpoint path (to resume training)
     resume_path = (
