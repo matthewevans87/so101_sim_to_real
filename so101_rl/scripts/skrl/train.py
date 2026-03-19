@@ -486,6 +486,7 @@ def _build_cnn_runner(env, env_cfg, agent_cfg: dict):
         "learning_rate_scheduler",
         "learning_rate_scheduler_kwargs",
         "rewards_shaper_scale",
+        "viz_interval",  # consumed by MonitoredCnnPPO, not the PPO config dict
     }
     for k, v in agent_section.items():
         if k not in _special:
@@ -522,6 +523,7 @@ def _build_cnn_runner(env, env_cfg, agent_cfg: dict):
     # ── Assemble PPO agent ─────────────────────────────────────────────────
     ppo_agent = MonitoredCnnPPO(
         cnn_module=policy_model._cnn,
+        viz_interval=agent_section.get("viz_interval", 500),
         models={"policy": policy_model, "value": value_model},
         memory=memory,
         cfg=cfg,

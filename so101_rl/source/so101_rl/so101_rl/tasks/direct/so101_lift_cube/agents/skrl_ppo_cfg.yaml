@@ -79,6 +79,9 @@ agent:
   kl_threshold: 0.0
   rewards_shaper_scale: 0.1
   time_limit_bootstrap: False
+  # How often (in PPO update steps) to write keypoint and activation-heatmap
+  # overlay images to TensorBoard (trainable_cnn path only).
+  viz_interval: 500
   # logging and checkpoint
   experiment:
     directory: "so101_rl"

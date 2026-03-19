@@ -190,14 +190,28 @@ class MonitoredCnnPPO(PPO):
         ``CNN / feature_mean``         — Mean of CNN output features, last batch.
         ``CNN / feature_std``          — Std of CNN output features, last batch.
                                         Healthy range: std > 0.01 (not collapsed).
+
+    Visual diagnostics (IMAGES tab, logged every ``viz_interval`` PPO updates):
+        ``CNN/keypoints``              — Raw camera image (env 0) with each
+                                        SpatialSoftmax keypoint drawn as a
+                                        coloured square.
+        ``CNN/activation_heatmap``     — Same image alpha-blended with a jet
+                                        heatmap of the mean conv trunk activation.
     """
 
-    def __init__(self, cnn_module: nn.Module, *args, **kwargs):
+    def __init__(self, cnn_module: nn.Module, *args, viz_interval: int = 500, **kwargs):
         super().__init__(*args, **kwargs)
         self._monitored_cnn = cnn_module
+        self._viz_interval = viz_interval
         self._cnn_grad_out_norm: float = 0.0
         self._cnn_feature_mean: float = 0.0
         self._cnn_feature_std: float = 0.0
+
+        # Tensors captured during the most-recent mini-batch forward pass.
+        # Stored on CPU to avoid holding GPU memory between updates.
+        self._last_input_image: torch.Tensor | None = None  # (3, H, W) float
+        self._last_conv_feats: torch.Tensor | None = None  # (C, Hc, Wc) float
+        self._last_keypoints: torch.Tensor | None = None  # (2C,) float
 
         # Backward hook: fires every mini-batch backward pass.
         # Captures the gradient of the loss w.r.t. the CNN's output features;
@@ -208,13 +222,63 @@ class MonitoredCnnPPO(PPO):
 
         self._monitored_cnn.register_full_backward_hook(_bwd_hook)
 
-        # Forward hook: captures CNN output feature statistics on every forward pass.
+        # Forward hook on the whole CNN: captures output stats + env-0 input image.
         def _fwd_hook(module, inputs, output):
             out = output.detach()
             self._cnn_feature_mean = out.mean().item()
             self._cnn_feature_std = out.std().item()
+            # inputs is a tuple; inputs[0] is the (N, 3, H, W) image batch.
+            if inputs and inputs[0] is not None:
+                self._last_input_image = inputs[0][0].detach().cpu()  # (3, H, W)
 
         self._monitored_cnn.register_forward_hook(_fwd_hook)
+
+        # Forward hook on the conv trunk: captures feature maps before SpatialSoftmax.
+        def _conv_trunk_fwd_hook(module, inputs, output):
+            # output is (N, C, Hc, Wc); store env-0 slice only.
+            self._last_conv_feats = output[0].detach().cpu()  # (C, Hc, Wc)
+
+        self._monitored_cnn._conv_trunk.register_forward_hook(_conv_trunk_fwd_hook)
+
+        # Forward hook on SpatialSoftmax: captures normalised keypoint coordinates.
+        def _spatial_softmax_fwd_hook(module, inputs, output):
+            # output is (N, 2C); store env-0 slice only.
+            self._last_keypoints = output[0].detach().cpu()  # (2C,)
+
+        self._monitored_cnn._spatial_softmax.register_forward_hook(
+            _spatial_softmax_fwd_hook
+        )
+
+    def _maybe_log_visuals(self, timestep: int) -> None:
+        """Write keypoint and activation-heatmap overlays to TensorBoard.
+
+        Called from :meth:`_update`; no-ops when ``timestep`` is not a multiple
+        of ``viz_interval`` or when no forward pass has fired yet.
+        """
+        if timestep % self._viz_interval != 0:
+            return
+        if (
+            self._last_input_image is None
+            or self._last_conv_feats is None
+            or self._last_keypoints is None
+        ):
+            return
+        writer = getattr(self, "writer", None)
+        if writer is None:
+            return
+
+        from so101_rl.nnmodules.cnn_visualization import (
+            draw_activation_heatmap_overlay,
+            draw_keypoints_overlay,
+        )
+
+        kp_img = draw_keypoints_overlay(self._last_input_image, self._last_keypoints)
+        writer.add_image("CNN/keypoints", kp_img, global_step=timestep)
+
+        hm_img = draw_activation_heatmap_overlay(
+            self._last_input_image, self._last_conv_feats
+        )
+        writer.add_image("CNN/activation_heatmap", hm_img, global_step=timestep)
 
     def _update(self, timestep: int, timesteps: int) -> None:
         # Flatten all CNN parameters to a single vector before the update so we
@@ -238,3 +302,5 @@ class MonitoredCnnPPO(PPO):
         self.track_data("CNN / grad_norm_at_output", self._cnn_grad_out_norm)
         self.track_data("CNN / feature_mean", self._cnn_feature_mean)
         self.track_data("CNN / feature_std", self._cnn_feature_std)
+
+        self._maybe_log_visuals(timestep)
