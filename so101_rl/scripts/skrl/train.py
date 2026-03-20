@@ -432,6 +432,12 @@ def _build_cnn_runner(env, env_cfg, agent_cfg: dict):
             "agent.cnn_learning_rate must be set explicitly when "
             "vision_encoder.type == 'trainable_cnn'."
         )
+    if "cnn_freeze_steps" not in agent_section:
+        raise ValueError(
+            "agent.cnn_freeze_steps must be set explicitly when "
+            "vision_encoder.type == 'trainable_cnn'. "
+            "Set to 0 to disable CNN weight freezing."
+        )
 
     # Validate CNN architecture config is present in the agent config.
     _models_policy = agent_cfg.get("models", {}).get("policy", {})
@@ -504,6 +510,7 @@ def _build_cnn_runner(env, env_cfg, agent_cfg: dict):
         "value_preprocessor",
         "value_preprocessor_kwargs",
         "cnn_learning_rate",
+        "cnn_freeze_steps",
         "learning_rate_scheduler",
         "learning_rate_scheduler_kwargs",
         "rewards_shaper_scale",
@@ -545,6 +552,7 @@ def _build_cnn_runner(env, env_cfg, agent_cfg: dict):
     ppo_agent = MonitoredCnnPPO(
         cnn_module=policy_model._cnn,
         cnn_learning_rate=float(agent_section["cnn_learning_rate"]),
+        cnn_freeze_steps=int(agent_section["cnn_freeze_steps"]),
         viz_interval=agent_section.get("viz_interval", 500),
         models={"policy": policy_model, "value": value_model},
         memory=memory,

@@ -203,6 +203,7 @@ class MonitoredCnnPPO(PPO):
         self,
         cnn_module: nn.Module,
         cnn_learning_rate: float,
+        cnn_freeze_steps: int,
         *args,
         viz_interval: int = 500,
         **kwargs,
@@ -212,8 +213,19 @@ class MonitoredCnnPPO(PPO):
         self._cnn_learning_rate = float(cnn_learning_rate)
         if self._cnn_learning_rate <= 0.0:
             raise ValueError("cnn_learning_rate must be > 0")
+        self._cnn_freeze_steps = int(cnn_freeze_steps)
+        if self._cnn_freeze_steps < 0:
+            raise ValueError("cnn_freeze_steps must be >= 0")
 
         self._rebuild_optimizer_with_cnn_lr()
+
+        # Freeze CNN weights for the first cnn_freeze_steps simulation timesteps.
+        # _rebuild_optimizer_with_cnn_lr sets CNN LR correctly; requires_grad=False
+        # prevents gradient accumulation while frozen.
+        self._cnn_frozen: bool = self._cnn_freeze_steps > 0
+        if self._cnn_frozen:
+            for p in self._monitored_cnn.parameters():
+                p.requires_grad_(False)
 
         self._viz_interval = viz_interval
         self._update_count: int = 0  # counts PPO update cycles, used for viz_interval
@@ -337,6 +349,14 @@ class MonitoredCnnPPO(PPO):
         writer.add_image("CNN/activation_heatmap", hm_img, global_step=timestep)
 
     def _update(self, timestep: int, timesteps: int) -> None:
+        # Unfreeze CNN once the threshold is reached (fires exactly once).
+        if self._cnn_frozen and timestep >= self._cnn_freeze_steps:
+            for p in self._monitored_cnn.parameters():
+                p.requires_grad_(True)
+            self._cnn_frozen = False
+
+        self.track_data("CNN / frozen", 1.0 if self._cnn_frozen else 0.0)
+
         # Flatten all CNN parameters to a single vector before the update so we
         # can compute the L2 weight change afterwards.
         with torch.no_grad():
