@@ -194,7 +194,7 @@ class MonitoredCnnPPO(PPO):
     Visual diagnostics (IMAGES tab, logged every ``viz_interval`` PPO updates):
         ``CNN/keypoints``              — Raw camera image (env 0) with each
                                         SpatialSoftmax keypoint drawn as a
-                                        coloured square.
+                                        colored square.
         ``CNN/activation_heatmap``     — Same image alpha-blended with a jet
                                         heatmap of the mean conv trunk activation.
     """
@@ -203,6 +203,7 @@ class MonitoredCnnPPO(PPO):
         super().__init__(*args, **kwargs)
         self._monitored_cnn = cnn_module
         self._viz_interval = viz_interval
+        self._update_count: int = 0  # counts PPO update cycles, used for viz_interval
         self._cnn_grad_out_norm: float = 0.0
         self._cnn_feature_mean: float = 0.0
         self._cnn_feature_std: float = 0.0
@@ -252,10 +253,10 @@ class MonitoredCnnPPO(PPO):
     def _maybe_log_visuals(self, timestep: int) -> None:
         """Write keypoint and activation-heatmap overlays to TensorBoard.
 
-        Called from :meth:`_update`; no-ops when ``timestep`` is not a multiple
-        of ``viz_interval`` or when no forward pass has fired yet.
+        Fires every ``viz_interval`` PPO update cycles (not simulation timesteps).
+        No-ops when no forward pass has fired yet or the writer is unavailable.
         """
-        if timestep % self._viz_interval != 0:
+        if self._update_count % self._viz_interval != 0:
             return
         if (
             self._last_input_image is None
@@ -272,7 +273,13 @@ class MonitoredCnnPPO(PPO):
             draw_keypoints_overlay,
         )
 
-        kp_img = draw_keypoints_overlay(self._last_input_image, self._last_keypoints)
+        # Raw input image (no overlays).
+        raw_u8 = (self._last_input_image.float().clamp(0.0, 1.0) * 255).byte()
+        writer.add_image("CNN/input_image", raw_u8, global_step=timestep)
+
+        kp_img = draw_keypoints_overlay(
+            self._last_input_image, self._last_keypoints, radius=1
+        )
         writer.add_image("CNN/keypoints", kp_img, global_step=timestep)
 
         hm_img = draw_activation_heatmap_overlay(
@@ -303,4 +310,5 @@ class MonitoredCnnPPO(PPO):
         self.track_data("CNN / feature_mean", self._cnn_feature_mean)
         self.track_data("CNN / feature_std", self._cnn_feature_std)
 
+        self._update_count += 1
         self._maybe_log_visuals(timestep)

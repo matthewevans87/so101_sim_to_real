@@ -15,7 +15,7 @@ import torch.nn.functional as F
 
 
 def _build_jet_lut() -> torch.Tensor:
-    """Return a ``(256, 3)`` float32 tensor of the jet colourmap in ``[0, 1]``."""
+    """Return a ``(256, 3)`` float32 tensor of the jet colormap in ``[0, 1]``."""
     t = torch.linspace(0.0, 1.0, 256)
     r = torch.clamp(1.5 - torch.abs(4.0 * t - 3.0), 0.0, 1.0)
     g = torch.clamp(1.5 - torch.abs(4.0 * t - 2.0), 0.0, 1.0)
@@ -51,7 +51,7 @@ def draw_activation_heatmap_overlay(
     # Mean over channels → (Hc, Wc); retain activation polarity info.
     heatmap = conv_feats_chw.float().mean(0)  # (Hc, Wc)
 
-    # Normalise to [0, 1]; guard against constant activation maps.
+    # Normalize to [0, 1]; guard against constant activation maps.
     hmin, hmax = heatmap.min(), heatmap.max()
     if hmax - hmin > 1e-8:
         heatmap = (heatmap - hmin) / (hmax - hmin)
@@ -80,7 +80,7 @@ def draw_keypoints_overlay(
     keypoints_2c: torch.Tensor,
     radius: int = 3,
 ) -> torch.Tensor:
-    """Draw SpatialSoftmax keypoints as coloured squares over a camera image.
+    """Draw SpatialSoftmax keypoints as colored squares over a camera image.
 
     ``keypoints_2c`` follows the layout produced by :class:`SpatialSoftmax``:
     ``[x_0, …, x_{C-1}, y_0, …, y_{C-1}]`` where each coordinate is in
@@ -88,7 +88,7 @@ def draw_keypoints_overlay(
 
     Args:
         image_chw: ``(3, H, W)`` float tensor in ``[0, 1]``.  Must be on CPU.
-        keypoints_2c: ``(2C,)`` float tensor of normalised keypoint coordinates.
+        keypoints_2c: ``(2C,)`` float tensor of normalized keypoint coordinates.
             Must be on CPU.
         radius: Half-size (pixels) of each drawn square.  Default 3 → 7×7 px.
 
@@ -101,13 +101,13 @@ def draw_keypoints_overlay(
     xs = keypoints_2c[:C]  # (C,) horizontal coordinates in [-1, 1]
     ys = keypoints_2c[C:]  # (C,) vertical   coordinates in [-1, 1]
 
-    # Map normalised [-1, 1] → pixel coordinates.
+    # Map normalized [-1, 1] → pixel coordinates.
     # x → column (0 = left),  y → row (0 = top)
     px = ((xs + 1.0) * 0.5 * (W - 1)).long().clamp(0, W - 1)  # (C,)
     py = ((ys + 1.0) * 0.5 * (H - 1)).long().clamp(0, H - 1)  # (C,)
 
     img_u8 = (image_chw.float().clamp(0.0, 1.0) * 255).byte().clone()  # (3, H, W)
-    colours = _keypoint_colours(C)  # (C, 3) uint8
+    colors = _keypoint_colors(C)  # (C, 3) uint8
 
     r = max(1, radius)
     for i in range(C):
@@ -116,21 +116,21 @@ def draw_keypoints_overlay(
         x1 = min(W, x_c + r + 1)
         y0 = max(0, y_c - r)
         y1 = min(H, y_c + r + 1)
-        img_u8[:, y0:y1, x0:x1] = colours[i].view(3, 1, 1)
+        img_u8[:, y0:y1, x0:x1] = colors[i].view(3, 1, 1)
 
     return img_u8
 
 
-def _keypoint_colours(n: int) -> torch.Tensor:
+def _keypoint_colors(n: int) -> torch.Tensor:
     """Return an ``(n, 3)`` uint8 tensor of evenly-spaced HSV hues converted to RGB.
 
     Uses HSV with full saturation and value (s=1, v=1) so every keypoint gets
-    a distinct, highly saturated colour.
+    a distinct, highly saturated color.
     """
     if n == 0:
         return torch.zeros(0, 3, dtype=torch.uint8)
 
-    # Evenly space hues across [0, 1) to avoid wrapping back to the same colour.
+    # Evenly space hues across [0, 1) to avoid wrapping back to the same color.
     hues = torch.linspace(0.0, 1.0 - 1.0 / n, n)  # (n,)
     h6 = hues * 6.0
     i = h6.long()

@@ -24,10 +24,13 @@ models:
         activations: elu
     output: ACTIONS
     # trainable_cnn path: CNN backbone architecture (ignored by resnet18 path)
+    # Layer 1: k=5,s=2 (was k=8,s=4) — finer first-layer stride preserves more
+    # spatial resolution; final SpatialSoftmax map is 14×25 vs prev 8×13,
+    # giving ~7.7 px/cell instead of ~14 px/cell for better keypoint precision.
     cnn:
       channels: [32, 64, 128, 128]
-      kernel_sizes: [8, 4, 3, 3]
-      strides: [4, 2, 2, 1]
+      kernel_sizes: [5, 4, 3, 3]
+      strides: [2, 2, 2, 1]
       mlp_hidden_dims: [256]  # SpatialSoftmax projection MLP hidden dims
       output_dim: 256         # CNN feature vector dimension
     head_dims: [256, 128, 64]  # Policy head: CNN features + joints → action means
@@ -81,7 +84,7 @@ agent:
   time_limit_bootstrap: False
   # How often (in PPO update steps) to write keypoint and activation-heatmap
   # overlay images to TensorBoard (trainable_cnn path only).
-  viz_interval: 500
+  viz_interval: 1
   # logging and checkpoint
   experiment:
     directory: "so101_rl"
