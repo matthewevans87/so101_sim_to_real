@@ -200,13 +200,25 @@ def _log_configs_to_tensorboard(
     import yaml
     from torch.utils.tensorboard import SummaryWriter
 
+    # Isaac Lab's dump_yaml serialises Python tuples as !!python/tuple tags.
+    # yaml.safe_load refuses these, so we add a single targeted constructor that
+    # coerces tuples to lists — safe because these files are machine-generated
+    # by our own code and contain no arbitrary Python objects.
+    class _Loader(yaml.SafeLoader):
+        pass
+
+    _Loader.add_constructor(
+        "tag:yaml.org,2002:python/tuple",
+        lambda loader, node: list(loader.construct_sequence(node)),
+    )
+
     with open(env_yaml_path, "r") as f:
         env_yaml_text = f.read()
     with open(agent_yaml_path, "r") as f:
         agent_yaml_text = f.read()
 
-    env_cfg_dict = yaml.safe_load(env_yaml_text) or {}
-    agent_cfg_dict = yaml.safe_load(agent_yaml_text) or {}
+    env_cfg_dict = yaml.load(env_yaml_text, Loader=_Loader) or {}  # noqa: S506 (controlled input)
+    agent_cfg_dict = yaml.load(agent_yaml_text, Loader=_Loader) or {}  # noqa: S506
 
     # Write to the run's log_dir directly; SKRL writes its own events into
     # log_dir/runs/{uuid}/ — TensorBoard discovers all event files recursively.
