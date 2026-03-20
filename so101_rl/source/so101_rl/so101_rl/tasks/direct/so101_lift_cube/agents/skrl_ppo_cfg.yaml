@@ -63,6 +63,7 @@ agent:
   mini_batches: 8
   discount_factor: 0.99
   lambda: 0.95
+  cnn_learning_rate: 1.0e-05  # CNN encoder only (conv trunk + SpatialSoftmax + projection MLP)
   learning_rate: 1.0e-04  # Lower LR for vision
   learning_rate_scheduler: KLAdaptiveLR
   learning_rate_scheduler_kwargs:

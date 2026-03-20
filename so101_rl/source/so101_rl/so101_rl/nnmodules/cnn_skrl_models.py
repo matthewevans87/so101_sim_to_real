@@ -199,9 +199,22 @@ class MonitoredCnnPPO(PPO):
                                         heatmap of the mean conv trunk activation.
     """
 
-    def __init__(self, cnn_module: nn.Module, *args, viz_interval: int = 500, **kwargs):
+    def __init__(
+        self,
+        cnn_module: nn.Module,
+        cnn_learning_rate: float,
+        *args,
+        viz_interval: int = 500,
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
         self._monitored_cnn = cnn_module
+        self._cnn_learning_rate = float(cnn_learning_rate)
+        if self._cnn_learning_rate <= 0.0:
+            raise ValueError("cnn_learning_rate must be > 0")
+
+        self._rebuild_optimizer_with_cnn_lr()
+
         self._viz_interval = viz_interval
         self._update_count: int = 0  # counts PPO update cycles, used for viz_interval
         self._cnn_grad_out_norm: float = 0.0
@@ -249,6 +262,42 @@ class MonitoredCnnPPO(PPO):
         self._monitored_cnn._spatial_softmax.register_forward_hook(
             _spatial_softmax_fwd_hook
         )
+
+    def _rebuild_optimizer_with_cnn_lr(self) -> None:
+        """Use parameter groups so CNN encoder has its own learning rate."""
+        cnn_params = list(self._monitored_cnn.parameters())
+        cnn_param_ids = {id(p) for p in cnn_params}
+
+        policy_non_cnn_params: list[torch.nn.Parameter] = []
+        if self.policy is not None:
+            policy_non_cnn_params = [
+                p for p in self.policy.parameters() if id(p) not in cnn_param_ids
+            ]
+
+        value_params: list[torch.nn.Parameter] = []
+        if self.value is not None and self.value is not self.policy:
+            value_params = list(self.value.parameters())
+
+        param_groups = []
+        if cnn_params:
+            param_groups.append({"params": cnn_params, "lr": self._cnn_learning_rate})
+        if policy_non_cnn_params:
+            param_groups.append(
+                {"params": policy_non_cnn_params, "lr": self._learning_rate}
+            )
+        if value_params:
+            param_groups.append({"params": value_params, "lr": self._learning_rate})
+
+        if not param_groups:
+            raise ValueError("No trainable parameters found while building optimizer")
+
+        self.optimizer = torch.optim.Adam(param_groups)
+        self.checkpoint_modules["optimizer"] = self.optimizer
+
+        if self._learning_rate_scheduler is not None:
+            self.scheduler = self._learning_rate_scheduler(
+                self.optimizer, **self.cfg["learning_rate_scheduler_kwargs"]
+            )
 
     def _maybe_log_visuals(self, timestep: int) -> None:
         """Write keypoint and activation-heatmap overlays to TensorBoard.

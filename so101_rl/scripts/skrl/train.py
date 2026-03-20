@@ -217,7 +217,9 @@ def _log_configs_to_tensorboard(
     with open(agent_yaml_path, "r") as f:
         agent_yaml_text = f.read()
 
-    env_cfg_dict = yaml.load(env_yaml_text, Loader=_Loader) or {}  # noqa: S506 (controlled input)
+    env_cfg_dict = (
+        yaml.load(env_yaml_text, Loader=_Loader) or {}
+    )  # noqa: S506 (controlled input)
     agent_cfg_dict = yaml.load(agent_yaml_text, Loader=_Loader) or {}  # noqa: S506
 
     # Write to the run's log_dir directly; SKRL writes its own events into
@@ -425,6 +427,12 @@ def _build_cnn_runner(env, env_cfg, agent_cfg: dict):
     num_joints = len(env_cfg.joints.active)
     agent_section = agent_cfg["agent"]
 
+    if "cnn_learning_rate" not in agent_section:
+        raise ValueError(
+            "agent.cnn_learning_rate must be set explicitly when "
+            "vision_encoder.type == 'trainable_cnn'."
+        )
+
     # Validate CNN architecture config is present in the agent config.
     _models_policy = agent_cfg.get("models", {}).get("policy", {})
     _models_value = agent_cfg.get("models", {}).get("value", {})
@@ -495,6 +503,7 @@ def _build_cnn_runner(env, env_cfg, agent_cfg: dict):
         "state_preprocessor_kwargs",
         "value_preprocessor",
         "value_preprocessor_kwargs",
+        "cnn_learning_rate",
         "learning_rate_scheduler",
         "learning_rate_scheduler_kwargs",
         "rewards_shaper_scale",
@@ -535,6 +544,7 @@ def _build_cnn_runner(env, env_cfg, agent_cfg: dict):
     # ── Assemble PPO agent ─────────────────────────────────────────────────
     ppo_agent = MonitoredCnnPPO(
         cnn_module=policy_model._cnn,
+        cnn_learning_rate=float(agent_section["cnn_learning_rate"]),
         viz_interval=agent_section.get("viz_interval", 500),
         models={"policy": policy_model, "value": value_model},
         memory=memory,
