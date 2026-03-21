@@ -214,15 +214,16 @@ class MonitoredCnnPPO(PPO):
         if self._cnn_learning_rate <= 0.0:
             raise ValueError("cnn_learning_rate must be > 0")
         self._cnn_freeze_steps = int(cnn_freeze_steps)
-        if self._cnn_freeze_steps < 0:
-            raise ValueError("cnn_freeze_steps must be >= 0")
+        if self._cnn_freeze_steps < -1:
+            raise ValueError("cnn_freeze_steps must be >= 0 or == -1")
 
         self._rebuild_optimizer_with_cnn_lr()
 
-        # Freeze CNN weights for the first cnn_freeze_steps simulation timesteps.
-        # _rebuild_optimizer_with_cnn_lr sets CNN LR correctly; requires_grad=False
-        # prevents gradient accumulation while frozen.
-        self._cnn_frozen: bool = self._cnn_freeze_steps > 0
+        # Freeze CNN weights for the first cnn_freeze_steps simulation timesteps,
+        # or indefinitely when cnn_freeze_steps == -1. _rebuild_optimizer_with_cnn_lr
+        # sets CNN LR correctly; requires_grad=False prevents gradient accumulation
+        # while frozen.
+        self._cnn_frozen: bool = self._cnn_freeze_steps != 0
         if self._cnn_frozen:
             for p in self._monitored_cnn.parameters():
                 p.requires_grad_(False)
@@ -350,7 +351,12 @@ class MonitoredCnnPPO(PPO):
 
     def _update(self, timestep: int, timesteps: int) -> None:
         # Unfreeze CNN once the threshold is reached (fires exactly once).
-        if self._cnn_frozen and timestep >= self._cnn_freeze_steps:
+        # A value of -1 means keep the CNN frozen for the entire run.
+        if (
+            self._cnn_frozen
+            and self._cnn_freeze_steps >= 0
+            and timestep >= self._cnn_freeze_steps
+        ):
             for p in self._monitored_cnn.parameters():
                 p.requires_grad_(True)
             self._cnn_frozen = False

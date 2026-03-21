@@ -436,7 +436,8 @@ def _build_cnn_runner(env, env_cfg, agent_cfg: dict):
         raise ValueError(
             "agent.cnn_freeze_steps must be set explicitly when "
             "vision_encoder.type == 'trainable_cnn'. "
-            "Set to 0 to disable CNN weight freezing."
+            "Set to 0 to disable CNN weight freezing or -1 to keep it frozen "
+            "for the full run."
         )
 
     # Validate CNN architecture config is present in the agent config.
