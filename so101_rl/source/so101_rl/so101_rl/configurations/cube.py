@@ -25,6 +25,7 @@ DEX_CUBE_CFG = RigidObjectCfg(
             disable_gravity=False,
         ),
         activate_contact_sensors=True,
+        semantic_tags=[("class", "cube")],
     ),
 )
 

@@ -23,6 +23,10 @@ EXPERIMENT_PATH=""
 NUM_EPISODES=""
 NUM_VIDEOS=""
 VERBOSITY="basic"
+SAMPLE_EVERY_STEPS=""
+SAMPLES_PER_SHARD=""
+TELEMETRY_OUTPUT_DIR=""
+SEED=""
 # MAX_ITERATIONS=
 
 # Tracks which parameters were explicitly provided via CLI (to emit override warnings)
@@ -510,6 +514,78 @@ evaluate_model() {
     /bin/bash -c "$ENV_VARS /bin/bash ${EVAL_COMMAND}"
 }
 
+collect_telemetry() {
+    print_info "Collecting telemetry for experiment: ${EXPERIMENT_PATH}"
+
+    if [ -z "${EXPERIMENT_PATH}" ]; then
+        print_error "Experiment path is required for telemetry collection."
+        exit 1
+    fi
+
+    # Convert to absolute path if relative
+    if [[ "${EXPERIMENT_PATH}" != /* ]]; then
+        EXPERIMENT_PATH="${PROJECT_ROOT}/${EXPERIMENT_PATH}"
+    fi
+
+    if [ ! -d "${EXPERIMENT_PATH}" ]; then
+        print_error "Experiment path does not exist: ${EXPERIMENT_PATH}"
+        exit 1
+    fi
+
+    # Check if env_config.yaml exists
+    local ENV_CONFIG="${EXPERIMENT_PATH}/env_config.yaml"
+    if [ -f "${ENV_CONFIG}" ]; then
+        print_info "Found env_config.yaml: ${ENV_CONFIG}"
+        ENV_CONFIG_PATH="${ENV_CONFIG}"
+    else
+        print_warn "No env_config.yaml found at ${ENV_CONFIG}"
+    fi
+
+    local ARGS=""
+    ARGS+=" --experiment-path ${EXPERIMENT_PATH}"
+    ARGS+=" --task ${TASK}"
+    ARGS+=" --sample-every-steps ${SAMPLE_EVERY_STEPS}"
+    ARGS+=" --num-episodes ${NUM_EPISODES}"
+    ARGS+=" --output-dir ${TELEMETRY_OUTPUT_DIR}"
+    ARGS+=" --seed ${SEED}"
+
+    if [ -n "${SAMPLES_PER_SHARD}" ]; then
+        ARGS+=" --samples-per-shard ${SAMPLES_PER_SHARD}"
+    fi
+
+    if [ -n "${CHECKPOINT_PATH}" ]; then
+        ARGS+=" --checkpoint ${CHECKPOINT_PATH}"
+    fi
+
+    if [ -n "${NUM_ENVS}" ]; then
+        ARGS+=" --num_envs ${NUM_ENVS}"
+    fi
+
+    if [ "${HEADLESS:-false}" = "true" ]; then
+        ARGS+=" --headless"
+    fi
+
+    local COLLECT_COMMAND="$ISAAC_LAB_PATH/isaaclab.sh -p ${TASK_ROOT}/scripts/skrl/collect_telemetry.py ${ARGS}"
+    print_info "Executing collect command: ${COLLECT_COMMAND}"
+
+    local WORKSPACE_PATH_VALUE="$ISAAC_LAB_PATH/workspace/${TASK}"
+    local ENV_VARS
+    ENV_VARS="$(get_gui_env_vars "${WORKSPACE_PATH_VALUE}" "${ENV_CONFIG_PATH}")"
+
+    if [ -n "${DISPLAY:-}" ]; then
+        print_info "Using DISPLAY=${DISPLAY}"
+    else
+        print_warn "DISPLAY is not set. GUI windows may fail to open."
+    fi
+    if [ -n "${XAUTHORITY:-}" ]; then
+        print_info "Using XAUTHORITY=${XAUTHORITY}"
+    else
+        print_warn "XAUTHORITY is not set. X11 auth may fail over SSH."
+    fi
+
+    /bin/bash -c "$ENV_VARS /bin/bash ${COLLECT_COMMAND}"
+}
+
 export_model() {
 
     local ARGS=""
@@ -575,6 +651,7 @@ Commands:
     export          Stage assets, install task, check GPU, then export model from checkpoint
     play            Stage assets, install task, check GPU, then run policy playback
     evaluate        Run comprehensive evaluation on a trained agent from an experiment directory
+    collect         Run policy rollout telemetry collection from an experiment directory
     doctor          Print detected DISPLAY / XAUTHORITY guidance for remote SSH use
     help            Show this help message
 
@@ -582,6 +659,10 @@ Options:
     --task TASK              Set task name (required for most commands; auto-detected for evaluate)
     --env-config PATH        YAML file for So101-LiftCube env parameters (required for train/play/export)
     --experiment-path PATH   Path to experiment directory (required for evaluate)
+    --sample-every-steps N   Sample telemetry every N steps per environment episode (required for collect)
+    --samples-per-shard N    Number of samples per NPZ shard (optional for collect)
+    --seed N                 Explicit RNG seed (required for collect)
+    --telemetry-output-dir   Output directory for telemetry shards + metadata (required for collect)
     --num-episodes NUM       Override evaluation episode count (default: 100) [Warning emitted]
     --num-videos NUM         Override evaluation video episodes (default: 5) [Warning emitted]
     --verbosity LEVEL        Output verbosity for results.json (full|basic, default: basic)
@@ -607,6 +688,7 @@ Examples:
     $0 export --task So101-LiftCube-v0 --checkpoint logs/skrl/so101_rl/<run>/checkpoints/checkpoint_10000.pt
     $0 play --task So101-LiftCube-v0 --checkpoint logs/skrl/so101_rl/<run>/checkpoints/checkpoint_10000.pt --video --video-length 1200
     $0 evaluate --experiment-path artifacts/2026-03-12_09-52-10
+    $0 collect --experiment-path artifacts/2026-03-12_09-52-10 --task So101-LiftCube-v0 --sample-every-steps 8 --num-episodes 200 --seed 42 --telemetry-output-dir artifacts/telemetry/2026-03-23
     $0 train --task So101-LiftCube-v0 --display 0
 
 Notes:
@@ -686,7 +768,27 @@ while [[ $# -gt 0 ]]; do
             CLI_OVERRIDE_WARNINGS+=("--verbosity=${VERBOSITY} (overrides evaluation default)")
             shift 2
             ;;
-        all|train|export|play|evaluate|install|doctor|help)
+        --sample-every-steps)
+            SAMPLE_EVERY_STEPS="$2"
+            CLI_OVERRIDE_WARNINGS+=("--sample-every-steps=${SAMPLE_EVERY_STEPS} (collect telemetry sampling cadence)")
+            shift 2
+            ;;
+        --samples-per-shard)
+            SAMPLES_PER_SHARD="$2"
+            CLI_OVERRIDE_WARNINGS+=("--samples-per-shard=${SAMPLES_PER_SHARD} (collect telemetry shard size)")
+            shift 2
+            ;;
+        --seed)
+            SEED="$2"
+            CLI_OVERRIDE_WARNINGS+=("--seed=${SEED} (explicit RNG seed)")
+            shift 2
+            ;;
+        --telemetry-output-dir)
+            TELEMETRY_OUTPUT_DIR="$2"
+            CLI_OVERRIDE_WARNINGS+=("--telemetry-output-dir=${TELEMETRY_OUTPUT_DIR} (collect telemetry output path)")
+            shift 2
+            ;;
+        all|train|export|play|evaluate|collect|install|doctor|help)
             COMMAND="$1"
             shift
             ;;
@@ -718,7 +820,7 @@ main() {
     fi
 
     # Validate required arguments
-    if [[ "${COMMAND}" != "help" && "${COMMAND}" != "doctor" && "${COMMAND}" != "evaluate" ]]; then
+    if [[ "${COMMAND}" != "help" && "${COMMAND}" != "doctor" && "${COMMAND}" != "evaluate" && "${COMMAND}" != "collect" ]]; then
         if [[ -z "${TASK}" ]]; then
             print_error "--task is required for command: ${COMMAND:-<none>}"
             show_usage
@@ -727,6 +829,65 @@ main() {
         if [[ -z "${ENV_CONFIG_PATH}" ]]; then
             print_error "--env-config is required for command: ${COMMAND:-<none>}"
             show_usage
+            exit 1
+        fi
+    fi
+
+    # Validate collect-specific arguments
+    if [[ "${COMMAND}" == "collect" ]]; then
+        if [[ -z "${EXPERIMENT_PATH}" ]]; then
+            print_error "--experiment-path is required for collect command"
+            show_usage
+            exit 1
+        fi
+        if [[ -z "${TASK}" ]]; then
+            print_error "--task is required for collect command"
+            show_usage
+            exit 1
+        fi
+        if [[ -z "${SAMPLE_EVERY_STEPS}" ]]; then
+            print_error "--sample-every-steps is required for collect command"
+            show_usage
+            exit 1
+        fi
+        if [[ -z "${NUM_EPISODES}" ]]; then
+            print_error "--num-episodes is required for collect command"
+            show_usage
+            exit 1
+        fi
+        if [[ -z "${SEED}" ]]; then
+            print_error "--seed is required for collect command"
+            show_usage
+            exit 1
+        fi
+        if [[ -z "${TELEMETRY_OUTPUT_DIR}" ]]; then
+            print_error "--telemetry-output-dir is required for collect command"
+            show_usage
+            exit 1
+        fi
+
+        if [[ "${TELEMETRY_OUTPUT_DIR}" != /* ]]; then
+            TELEMETRY_OUTPUT_DIR="${PROJECT_ROOT}/${TELEMETRY_OUTPUT_DIR}"
+        fi
+
+        if [[ ! "${SAMPLE_EVERY_STEPS}" =~ ^[0-9]+$ || "${SAMPLE_EVERY_STEPS}" -lt 1 ]]; then
+            print_error "--sample-every-steps must be a positive integer"
+            exit 1
+        fi
+        if [[ ! "${NUM_EPISODES}" =~ ^[0-9]+$ || "${NUM_EPISODES}" -lt 1 ]]; then
+            print_error "--num-episodes must be a positive integer"
+            exit 1
+        fi
+        if [[ ! "${SEED}" =~ ^-?[0-9]+$ ]]; then
+            print_error "--seed must be an integer"
+            exit 1
+        fi
+        if [[ -n "${SAMPLES_PER_SHARD}" && ( ! "${SAMPLES_PER_SHARD}" =~ ^[0-9]+$ || "${SAMPLES_PER_SHARD}" -lt 1 ) ]]; then
+            print_error "--samples-per-shard must be a positive integer"
+            exit 1
+        fi
+        if [[ -n "${NUM_ENVS}" && ( ! "${NUM_ENVS}" =~ ^[0-9]+$ || "${NUM_ENVS}" -lt 1 ) ]]; then
+            print_error "--num-envs must be a positive integer"
             exit 1
         fi
     fi
@@ -812,6 +973,12 @@ main() {
             install_task
             check_gpu
             evaluate_model
+            ;;
+        collect)
+            stage_assets
+            install_task
+            check_gpu
+            collect_telemetry
             ;;
         all)
             stage_assets

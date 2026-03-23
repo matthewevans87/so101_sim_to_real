@@ -73,19 +73,33 @@ The key principle: `vision_encoder.type` and image dimensions live in the env co
     --num-videos 5 \ # the number of episodes to record video for
     --num-envs 10 \
     --headless
+
+# Collect telemetry from a trained checkpoint
+./scripts/run.sh collect \
+    --experiment-path artifacts/2026-03-12_09-52-10 \
+    --task So101-LiftCube-v0 \
+    --sample-every-steps 10 \
+    --num-episodes 200 \
+    --seed 42 \
+    --telemetry-output-dir test/collect/2026-03-12_09-52-10 \
+    --headless --enable-cameras
 ```
 
 **Useful flags:**
-| Flag                 | Description                              |
-| -------------------- | ---------------------------------------- |
-| `--num-envs N`       | Parallel environments                    |
-| `--max-iterations N` | Training iterations                      |
-| `--seed N`           | RNG seed (overrides YAML; `-1` = random) |
-| `--checkpoint PATH`  | Resume from checkpoint                   |
-| `--headless`         | No GUI                                   |
-| `--enable-cameras`   | Required for vision tasks                |
-| `--video`            | Record evaluation video                  |
-| `--display N`        | X11 display (useful over SSH)            |
+| Flag                          | Description                                        |
+| ----------------------------- | -------------------------------------------------- |
+| `--num-envs N`                | Parallel environments                              |
+| `--max-iterations N`          | Training iterations                                |
+| `--seed N`                    | RNG seed (overrides YAML; `-1` = random)           |
+| `--checkpoint PATH`           | Resume from checkpoint                             |
+| `--sample-every-steps N`      | Collect one telemetry sample every N env steps     |
+| `--num-episodes N`            | Stop collection after N completed episodes         |
+| `--samples-per-shard N`       | NPZ shard size for telemetry output                |
+| `--telemetry-output-dir PATH` | Output directory for telemetry shards and metadata |
+| `--headless`                  | No GUI                                             |
+| `--enable-cameras`            | Required for vision tasks                          |
+| `--video`                     | Record evaluation video                            |
+| `--display N`                 | X11 display (useful over SSH)                      |
 
 ## Domain Randomization
 
