@@ -1,0 +1,82 @@
+{
+  "telemetry_dir": "/home/matthew-evans/src/so101_sim_to_real/test/collect/2026-03-12_09-52-10",
+  "output_dir": "/home/matthew-evans/src/so101_sim_to_real/test/curate/2026-03-12_09-52-10",
+  "config": "/home/matthew-evans/src/so101_sim_to_real/configs/cnn_pretrain.yaml",
+  "seed": 42,
+  "curation": {
+    "step_bin_width": 50,
+    "bin_cap_factor": 1.5,
+    "max_samples_per_episode": 30,
+    "val_fraction": 0.1,
+    "test_fraction": 0.1,
+    "split_seed": 0
+  },
+  "raw_total_samples": 481,
+  "step_histogram_pre_all": {
+    "0": 45,
+    "1": 45,
+    "2": 45,
+    "3": 45,
+    "4": 45,
+    "5": 43,
+    "6": 38,
+    "7": 35,
+    "8": 35,
+    "9": 35,
+    "10": 35,
+    "11": 35
+  },
+  "splits": {
+    "train": {
+      "episodes": 7,
+      "samples_pre_rebalance": 393,
+      "samples_post_rebalance": 210,
+      "step_histogram_post": {
+        "0": 17,
+        "1": 23,
+        "2": 22,
+        "3": 20,
+        "4": 18,
+        "5": 19,
+        "6": 15,
+        "7": 14,
+        "8": 15,
+        "9": 15,
+        "10": 13,
+        "11": 19
+      }
+    },
+    "val": {
+      "episodes": 1,
+      "samples_pre_rebalance": 28,
+      "samples_post_rebalance": 28,
+      "step_histogram_post": {
+        "0": 5,
+        "1": 5,
+        "2": 5,
+        "3": 5,
+        "4": 5,
+        "5": 3
+      }
+    },
+    "test": {
+      "episodes": 1,
+      "samples_pre_rebalance": 60,
+      "samples_post_rebalance": 27,
+      "step_histogram_post": {
+        "0": 3,
+        "1": 2,
+        "2": 2,
+        "3": 2,
+        "4": 2,
+        "5": 1,
+        "6": 3,
+        "7": 2,
+        "8": 3,
+        "9": 2,
+        "10": 3,
+        "11": 2
+      }
+    }
+  }
+}

@@ -1,14 +1,13 @@
-
-
 from abc import ABC, abstractmethod, abstractmethod
 
 import torch
 from torchvision.models import resnet18, ResNet18_Weights
 import torch.nn as nn
 
-from so101_rl.nnmodules.spatial_softmax import (
+from so101_utils.feature_extraction.spatial_softmax import (
     SpatialSoftmax,
 )
+
 
 class VisionFeatureExtractor(ABC):
     def __init__(self):
@@ -25,6 +24,7 @@ class VisionFeatureExtractor(ABC):
         :rtype: torch.Tensor
         """
         pass
+
 
 class ResNet18SpatialSoftmaxFeatureExtractor(VisionFeatureExtractor):
     def __init__(self, device: str = "cuda"):
@@ -45,7 +45,6 @@ class ResNet18SpatialSoftmaxFeatureExtractor(VisionFeatureExtractor):
             p.requires_grad = False
 
         self._spatial_softmax = SpatialSoftmax().to(self.device)
-
 
     def extract(self, images: torch.Tensor) -> torch.Tensor:
         # Extract features with frozen ResNet
@@ -77,10 +76,10 @@ class TrainableCnnFeatureExtractor(nn.Module):
     def __init__(
         self,
         in_channels: int = 3,
-        channels: list|None = None,
-        kernel_sizes: list|None = None,
-        strides: list|None = None,
-        mlp_hidden_dims: list|None = None,
+        channels: list | None = None,
+        kernel_sizes: list | None = None,
+        strides: list | None = None,
+        mlp_hidden_dims: list | None = None,
         output_dim: int = 256,
     ):
         super().__init__()
@@ -106,11 +105,20 @@ class TrainableCnnFeatureExtractor(nn.Module):
         conv_layers = []
         in_ch = in_channels
         for out_ch, k, s in zip(channels, kernel_sizes, strides):
-            conv_layers.extend([
-                nn.Conv2d(in_ch, out_ch, kernel_size=k, stride=s, padding=k // 2, bias=False),
-                nn.BatchNorm2d(out_ch),
-                nn.ReLU(inplace=True),
-            ])
+            conv_layers.extend(
+                [
+                    nn.Conv2d(
+                        in_ch,
+                        out_ch,
+                        kernel_size=k,
+                        stride=s,
+                        padding=k // 2,
+                        bias=False,
+                    ),
+                    nn.BatchNorm2d(out_ch),
+                    nn.ReLU(inplace=True),
+                ]
+            )
             in_ch = out_ch
         self._conv_trunk = nn.Sequential(*conv_layers)
 
@@ -135,6 +143,6 @@ class TrainableCnnFeatureExtractor(nn.Module):
         :param images: (N, C, H, W) float tensor, values in [0, 1]
         :return: (N, output_dim) feature tensor; gradients flow freely for PPO updates
         """
-        conv_feats = self._conv_trunk(images)             # (N, channels[-1], Hc, Wc)
-        spatial_feats = self._spatial_softmax(conv_feats) # (N, 2*channels[-1])
-        return self._mlp(spatial_feats)                   # (N, output_dim)
+        conv_feats = self._conv_trunk(images)  # (N, channels[-1], Hc, Wc)
+        spatial_feats = self._spatial_softmax(conv_feats)  # (N, 2*channels[-1])
+        return self._mlp(spatial_feats)  # (N, output_dim)

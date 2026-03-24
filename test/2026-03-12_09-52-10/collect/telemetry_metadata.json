@@ -1,0 +1,79 @@
+{
+  "run": {
+    "started_at_utc": "2026-03-23T20:13:12.005400+00:00",
+    "finished_at_utc": "2026-03-23T20:14:03.901394+00:00",
+    "duration_seconds": 51.895994,
+    "task": "So101-LiftCube-v0",
+    "checkpoint_path": "/mnt/nas_1/matthew-evans/so101_sim_to_real/experiments/2026-03-12_09-52-10/skrl/so101_lift_cube/checkpoints/best_agent.pt",
+    "experiment_path": "/mnt/nas_1/matthew-evans/so101_sim_to_real/experiments/2026-03-12_09-52-10",
+    "env_config_path": "/mnt/nas_1/matthew-evans/so101_sim_to_real/experiments/2026-03-12_09-52-10/env_config.yaml",
+    "seed": 42,
+    "num_envs": 8,
+    "sample_every_steps": 10,
+    "step_dt_seconds": 0.016666666666666666,
+    "num_episodes_target": 8,
+    "num_episodes_completed": 8,
+    "samples_per_shard": 2048,
+    "samples_collected": 481,
+    "ml_framework": "torch",
+    "algorithm": "PPO"
+  },
+  "schema": {
+    "rgb": "uint8 [S, H, W, 3]",
+    "joint_pos": "float32 [S, num_active_joints]",
+    "is_cube_in_grip_position": "bool [S]",
+    "cube_quat_gripzone_wxyz": "float32 [S, 4]",
+    "cube_in_camera_frame": "bool [S]",
+    "env_id": "int32 [S]",
+    "episode_id": "int32 [S]",
+    "episode_step": "int32 [S]",
+    "global_step": "int64 [S]",
+    "simulation_step": "int64 [S]",
+    "sim_time_s": "float64 [S]",
+    "done": "bool [S]"
+  },
+  "camera": {
+    "enabled_data_types": [
+      "rgb",
+      "instance_segmentation_fast"
+    ]
+  },
+  "shards": [
+    {
+      "shard": "telemetry_00000.npz",
+      "num_samples": 481,
+      "global_step_min": 1,
+      "global_step_max": 592
+    }
+  ],
+  "argv": {
+    "experiment_path": "/mnt/nas_1/matthew-evans/so101_sim_to_real/experiments/2026-03-12_09-52-10",
+    "task": "So101-LiftCube-v0",
+    "sample_every_steps": 10,
+    "num_episodes": 8,
+    "output_dir": "/home/matthew-evans/src/so101_sim_to_real/test/collect/2026-03-12_09-52-10",
+    "samples_per_shard": 2048,
+    "seed": 42,
+    "checkpoint": null,
+    "num_envs": null,
+    "ml_framework": "torch",
+    "algorithm": "PPO",
+    "agent": null,
+    "enable_cameras": true,
+    "xr": false,
+    "device": "cuda:0",
+    "cpu": false,
+    "verbose": false,
+    "info": false,
+    "rendering_mode": null,
+    "kit_args": "",
+    "anim_recording_enabled": false,
+    "anim_recording_start_time": 0,
+    "anim_recording_stop_time": 10,
+    "headless": true,
+    "hide_ui": true,
+    "create_new_stage": false,
+    "physics_gpu": 0,
+    "active_gpu": 0
+  }
+}

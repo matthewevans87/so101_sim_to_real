@@ -28,6 +28,14 @@ SAMPLES_PER_SHARD=""
 TELEMETRY_OUTPUT_DIR=""
 SEED=""
 # MAX_ITERATIONS=
+TELEMETRY_DIR=""             # Input telemetry dir for the curate command
+CURATED_DIR=""               # Input curated dir for train-cnn; output dir for curate
+CNN_OUTPUT_DIR=""            # Output dir for train-cnn
+CNN_CONFIG=""                # CNN pretrain config YAML (defaults to configs/cnn_pretrain.yaml)
+CNN_DEVICE=""                # Optional device override for train-cnn (e.g. cuda:0)
+CNN_BACKBONE_CHECKPOINT=""   # Pretrained backbone .pt for train command (optional)
+CNN_CONDA_ENV=""             # Optional conda env name for curate/train-cnn
+CNN_PYTHON_EXECUTABLE=""     # Optional Python executable for curate/train-cnn
 
 # Tracks which parameters were explicitly provided via CLI (to emit override warnings)
 CLI_OVERRIDE_WARNINGS=()
@@ -289,6 +297,9 @@ train_model() {
     if [ -n "${NUM_ENVS}" ]; then
         ARGS+=" --num_envs ${NUM_ENVS}"
     fi
+    if [ -n "${CNN_BACKBONE_CHECKPOINT}" ]; then
+        ARGS+=" --cnn_backbone_checkpoint ${CNN_BACKBONE_CHECKPOINT}"
+    fi
     ARGS+=" --artifacts_dir ${ARTIFACTS_DIR}"
     ARGS+=" hydra.run.dir=${ARTIFACTS_DIR}/hydra"
 
@@ -323,6 +334,132 @@ train_model() {
     
     /bin/bash -c "$ENV_VARS /bin/bash ${TRAIN_COMMAND}"
 }
+
+# ── Offline CNN pipeline commands (no Isaac Sim required) ─────────────────────
+
+resolve_cnn_python_command() {
+    OFFLINE_PYTHON_COMMAND=()
+
+    if [ -n "${CNN_PYTHON_EXECUTABLE}" ]; then
+        if [[ "${CNN_PYTHON_EXECUTABLE}" != /* ]]; then
+            CNN_PYTHON_EXECUTABLE="${PROJECT_ROOT}/${CNN_PYTHON_EXECUTABLE}"
+        fi
+        if [ ! -x "${CNN_PYTHON_EXECUTABLE}" ]; then
+            print_error "Python executable not found or not executable: ${CNN_PYTHON_EXECUTABLE}"
+            exit 1
+        fi
+        OFFLINE_PYTHON_COMMAND=("${CNN_PYTHON_EXECUTABLE}")
+        return
+    fi
+
+    if [ -n "${CNN_CONDA_ENV}" ]; then
+        if ! command -v conda >/dev/null 2>&1; then
+            print_error "conda is required when using --cnn-conda-env"
+            exit 1
+        fi
+        OFFLINE_PYTHON_COMMAND=(conda run -n "${CNN_CONDA_ENV}" python)
+        return
+    fi
+
+    OFFLINE_PYTHON_COMMAND=(python)
+}
+
+curate_dataset() {
+    print_info "Curating telemetry dataset from: ${TELEMETRY_DIR}"
+
+    if [ -z "${TELEMETRY_DIR}" ]; then
+        print_error "--telemetry-dir is required for curate command"
+        exit 1
+    fi
+    if [ -z "${CURATED_DIR}" ]; then
+        print_error "--curated-dir is required for curate command (output directory)"
+        exit 1
+    fi
+
+    local EFFECTIVE_CONFIG="${CNN_CONFIG:-${PROJECT_ROOT}/configs/cnn_pretrain.yaml}"
+    if [ ! -f "${EFFECTIVE_CONFIG}" ]; then
+        print_error "CNN config not found: ${EFFECTIVE_CONFIG}"
+        exit 1
+    fi
+
+    # Convert to absolute paths
+    if [[ "${TELEMETRY_DIR}" != /* ]]; then
+        TELEMETRY_DIR="${PROJECT_ROOT}/${TELEMETRY_DIR}"
+    fi
+    if [[ "${CURATED_DIR}" != /* ]]; then
+        CURATED_DIR="${PROJECT_ROOT}/${CURATED_DIR}"
+    fi
+
+    resolve_cnn_python_command
+
+    local -a CURATE_CMD
+    CURATE_CMD=(
+        "${OFFLINE_PYTHON_COMMAND[@]}"
+        "${PROJECT_ROOT}/cnn_trainer/data_pipeline/curate.py"
+        --telemetry-dir "${TELEMETRY_DIR}"
+        --output-dir "${CURATED_DIR}"
+        --config "${EFFECTIVE_CONFIG}"
+    )
+    if [ -n "${SEED}" ]; then
+        CURATE_CMD+=(--seed "${SEED}")
+    fi
+
+    local CURATE_CMD_STR
+    printf -v CURATE_CMD_STR '%q ' "${CURATE_CMD[@]}"
+    print_info "Executing curate command: ${CURATE_CMD_STR}"
+    "${CURATE_CMD[@]}"
+}
+
+train_cnn() {
+    print_info "Training CNN backbone"
+
+    if [ -z "${CURATED_DIR}" ]; then
+        print_error "--curated-dir is required for train-cnn command (input curated dataset)"
+        exit 1
+    fi
+    if [ -z "${CNN_OUTPUT_DIR}" ]; then
+        print_error "--cnn-output-dir is required for train-cnn command"
+        exit 1
+    fi
+
+    local EFFECTIVE_CONFIG="${CNN_CONFIG:-${PROJECT_ROOT}/configs/cnn_pretrain.yaml}"
+    if [ ! -f "${EFFECTIVE_CONFIG}" ]; then
+        print_error "CNN config not found: ${EFFECTIVE_CONFIG}"
+        exit 1
+    fi
+
+    # Convert to absolute paths
+    if [[ "${CURATED_DIR}" != /* ]]; then
+        CURATED_DIR="${PROJECT_ROOT}/${CURATED_DIR}"
+    fi
+    if [[ "${CNN_OUTPUT_DIR}" != /* ]]; then
+        CNN_OUTPUT_DIR="${PROJECT_ROOT}/${CNN_OUTPUT_DIR}"
+    fi
+
+    resolve_cnn_python_command
+
+    local -a TRAIN_CNN_CMD
+    TRAIN_CNN_CMD=(
+        "${OFFLINE_PYTHON_COMMAND[@]}"
+        "${PROJECT_ROOT}/cnn_trainer/train.py"
+        --curated-dir "${CURATED_DIR}"
+        --output-dir "${CNN_OUTPUT_DIR}"
+        --config "${EFFECTIVE_CONFIG}"
+    )
+    if [ -n "${CNN_DEVICE}" ]; then
+        TRAIN_CNN_CMD+=(--device "${CNN_DEVICE}")
+    fi
+    if [ -n "${SEED}" ]; then
+        TRAIN_CNN_CMD+=(--seed "${SEED}")
+    fi
+
+    local TRAIN_CNN_CMD_STR
+    printf -v TRAIN_CNN_CMD_STR '%q ' "${TRAIN_CNN_CMD[@]}"
+    print_info "Executing train-cnn command: ${TRAIN_CNN_CMD_STR}"
+    "${TRAIN_CNN_CMD[@]}"
+}
+
+# ── Isaac-dependent commands ──────────────────────────────────────────────────
 
 install_task() {
     print_info "Installing task: $TASK"
@@ -652,6 +789,8 @@ Commands:
     play            Stage assets, install task, check GPU, then run policy playback
     evaluate        Run comprehensive evaluation on a trained agent from an experiment directory
     collect         Run policy rollout telemetry collection from an experiment directory
+    curate          Curate telemetry dataset for CNN pretraining (no Isaac required)
+    train-cnn       Train CNN backbone on curated dataset (no Isaac required)
     doctor          Print detected DISPLAY / XAUTHORITY guidance for remote SSH use
     help            Show this help message
 
@@ -661,8 +800,16 @@ Options:
     --experiment-path PATH   Path to experiment directory (required for evaluate)
     --sample-every-steps N   Sample telemetry every N steps per environment episode (required for collect)
     --samples-per-shard N    Number of samples per NPZ shard (optional for collect)
-    --seed N                 Explicit RNG seed (required for collect)
+    --seed N                 Explicit RNG seed (required for collect; optional override for curate/train-cnn)
     --telemetry-output-dir   Output directory for telemetry shards + metadata (required for collect)
+    --telemetry-dir PATH     Input telemetry directory for curate command
+    --curated-dir PATH       Output dir for curate; input dir for train-cnn
+    --cnn-output-dir PATH    Output directory for train-cnn checkpoints and report
+    --cnn-config PATH        CNN pretrain config YAML (default: configs/cnn_pretrain.yaml)
+    --cnn-device DEVICE      PyTorch device for train-cnn (e.g. cuda:0, cpu)
+    --cnn-conda-env NAME     Conda env to use for curate/train-cnn
+    --cnn-python-executable PATH  Python executable to use for curate/train-cnn
+    --cnn-backbone-checkpoint PATH  Pretrained CNN backbone .pt to load for the train command
     --num-episodes NUM       Override evaluation episode count (default: 100) [Warning emitted]
     --num-videos NUM         Override evaluation video episodes (default: 5) [Warning emitted]
     --verbosity LEVEL        Output verbosity for results.json (full|basic, default: basic)
@@ -689,6 +836,9 @@ Examples:
     $0 play --task So101-LiftCube-v0 --checkpoint logs/skrl/so101_rl/<run>/checkpoints/checkpoint_10000.pt --video --video-length 1200
     $0 evaluate --experiment-path artifacts/2026-03-12_09-52-10
     $0 collect --experiment-path artifacts/2026-03-12_09-52-10 --task So101-LiftCube-v0 --sample-every-steps 8 --num-episodes 200 --seed 42 --telemetry-output-dir artifacts/telemetry/2026-03-23
+    $0 curate --telemetry-dir artifacts/telemetry/2026-03-24 --curated-dir artifacts/curated/2026-03-24 --seed 42
+    $0 train-cnn --curated-dir artifacts/curated/2026-03-24 --cnn-output-dir artifacts/cnn_pretrain/2026-03-24
+    $0 train --task So101-LiftCube-v0 --env-config configs/trainable_cnn.yaml --cnn-backbone-checkpoint artifacts/cnn_pretrain/2026-03-24/checkpoints/best_backbone.pt
     $0 train --task So101-LiftCube-v0 --display 0
 
 Notes:
@@ -788,7 +938,41 @@ while [[ $# -gt 0 ]]; do
             CLI_OVERRIDE_WARNINGS+=("--telemetry-output-dir=${TELEMETRY_OUTPUT_DIR} (collect telemetry output path)")
             shift 2
             ;;
-        all|train|export|play|evaluate|collect|install|doctor|help)
+        --telemetry-dir)
+            TELEMETRY_DIR="$2"
+            shift 2
+            ;;
+        --curated-dir)
+            CURATED_DIR="$2"
+            shift 2
+            ;;
+        --cnn-output-dir)
+            CNN_OUTPUT_DIR="$2"
+            shift 2
+            ;;
+        --cnn-config)
+            CNN_CONFIG="$2"
+            shift 2
+            ;;
+        --cnn-device)
+            CNN_DEVICE="$2"
+            shift 2
+            ;;
+            --cnn-conda-env)
+                CNN_CONDA_ENV="$2"
+                CLI_OVERRIDE_WARNINGS+=("--cnn-conda-env=${CNN_CONDA_ENV} (offline CNN pipeline interpreter)")
+                shift 2
+                ;;
+            --cnn-python-executable)
+                CNN_PYTHON_EXECUTABLE="$2"
+                CLI_OVERRIDE_WARNINGS+=("--cnn-python-executable=${CNN_PYTHON_EXECUTABLE} (offline CNN pipeline interpreter override)")
+                shift 2
+                ;;
+        --cnn-backbone-checkpoint)
+            CNN_BACKBONE_CHECKPOINT="$2"
+            shift 2
+            ;;
+        all|train|export|play|evaluate|collect|curate|train-cnn|install|doctor|help)
             COMMAND="$1"
             shift
             ;;
@@ -819,8 +1003,8 @@ main() {
         done
     fi
 
-    # Validate required arguments
-    if [[ "${COMMAND}" != "help" && "${COMMAND}" != "doctor" && "${COMMAND}" != "evaluate" && "${COMMAND}" != "collect" ]]; then
+    # Validate required arguments (Isaac-dependent commands only)
+    if [[ "${COMMAND}" != "help" && "${COMMAND}" != "doctor" && "${COMMAND}" != "evaluate" && "${COMMAND}" != "collect" && "${COMMAND}" != "curate" && "${COMMAND}" != "train-cnn" ]]; then
         if [[ -z "${TASK}" ]]; then
             print_error "--task is required for command: ${COMMAND:-<none>}"
             show_usage
@@ -979,6 +1163,12 @@ main() {
             install_task
             check_gpu
             collect_telemetry
+            ;;
+        curate)
+            curate_dataset
+            ;;
+        train-cnn)
+            train_cnn
             ;;
         all)
             stage_assets

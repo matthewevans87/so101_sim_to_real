@@ -91,6 +91,18 @@ parser.add_argument(
     default=None,
     help="Root artifacts directory for this run (e.g. /path/to/artifacts/2026-03-11_10-20-38).",
 )
+parser.add_argument(
+    "--cnn_backbone_checkpoint",
+    type=str,
+    default=None,
+    help=(
+        "Path to a pretrained CNN backbone checkpoint produced by "
+        "cnn_trainer/train.py (best_backbone.pt or final_backbone.pt). "
+        "Only valid when vision_encoder.type == 'trainable_cnn'. "
+        "Weights are loaded into the policy _cnn module before training "
+        "starts; freeze behaviour is still controlled by cnn_freeze_steps."
+    ),
+)
 
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
@@ -377,14 +389,32 @@ def main(
 
     # configure and instantiate the skrl runner
     # https://skrl.readthedocs.io/en/latest/api/utils/runner.html
-    if (
+    _using_trainable_cnn = (
         getattr(env_cfg, "vision_encoder", None) is not None
         and env_cfg.vision_encoder.type == "trainable_cnn"
-    ):
+    )
+    if _using_trainable_cnn:
         print("[INFO] Using custom runner with trainable CNN policy.")
         runner = _build_cnn_runner(env, env_cfg, agent_cfg)
     else:
         runner = Runner(env, agent_cfg)
+
+    # Optionally load pretrained backbone weights (Generation 2+ runs).
+    # This must happen BEFORE loading a PPO checkpoint so that a full
+    # checkpoint restore (--checkpoint) takes precedence when both flags
+    # are supplied simultaneously.
+    if args_cli.cnn_backbone_checkpoint:
+        if not _using_trainable_cnn:
+            raise ValueError(
+                "--cnn_backbone_checkpoint requires vision_encoder.type == "
+                "'trainable_cnn'.  Switch to a trainable_cnn env config."
+            )
+        _load_backbone_checkpoint(
+            runner,
+            args_cli.cnn_backbone_checkpoint,
+            env_cfg.sim.device,
+            warn_if_also_resuming=resume_path is not None,
+        )
 
     # load checkpoint (if specified)
     if resume_path:
@@ -396,6 +426,84 @@ def main(
 
     # close the simulator
     env.close()
+
+
+def _load_backbone_checkpoint(
+    runner,
+    backbone_path: str,
+    device: str,
+    warn_if_also_resuming: bool,
+) -> None:
+    """Load pretrained CNN backbone weights into the policy model's _cnn module.
+
+    Validates that all required keys are present and that tensor shapes match
+    the current model before applying the state dict.  Called only when
+    ``vision_encoder.type == 'trainable_cnn'`` (i.e. when *runner* is a
+    ``_ManualRunner``).
+
+    Args:
+        runner: The ``_ManualRunner`` returned by :func:`_build_cnn_runner`.
+        backbone_path: Absolute path to the backbone ``.pt`` file saved by
+            ``cnn_trainer/train.py`` (``best_backbone.pt`` or
+            ``final_backbone.pt``).
+        device: PyTorch device string used for ``torch.load(map_location=...)``.
+        warn_if_also_resuming: If ``True``, emit a warning that the backbone
+            weights may be overwritten by the subsequent PPO checkpoint load.
+    """
+    if warn_if_also_resuming:
+        print(
+            "[WARNING] Both --cnn_backbone_checkpoint and --checkpoint are "
+            "specified.  Backbone weights are loaded first; the subsequent "
+            "--checkpoint restore will overwrite them.  Ensure this is "
+            "intentional (e.g. resuming a run that already used a pretrained "
+            "backbone)."
+        )
+
+    resolved = retrieve_file_path(backbone_path)
+    if not os.path.isfile(resolved):
+        raise FileNotFoundError(f"CNN backbone checkpoint not found: {resolved}")
+
+    print(f"[INFO] Loading pretrained CNN backbone from: {resolved}")
+    backbone_state: dict[str, torch.Tensor] = torch.load(
+        resolved, map_location=device, weights_only=True
+    )
+
+    cnn_module = runner.agent.policy._cnn
+    model_state = cnn_module.state_dict()
+
+    missing = set(model_state.keys()) - set(backbone_state.keys())
+    unexpected = set(backbone_state.keys()) - set(model_state.keys())
+    shape_errors = {
+        k
+        for k in set(backbone_state.keys()) & set(model_state.keys())
+        if backbone_state[k].shape != model_state[k].shape
+    }
+
+    if missing:
+        raise ValueError(
+            f"Backbone checkpoint is missing keys required by the model: "
+            f"{sorted(missing)}.\n"
+            "Ensure that backbone.* in cnn_pretrain.yaml exactly matches "
+            "models.policy.cnn in skrl_ppo_cfg.yaml."
+        )
+    if shape_errors:
+        raise ValueError(
+            f"Backbone checkpoint has shape mismatches for keys: "
+            f"{sorted(shape_errors)}.\n"
+            "Ensure that backbone.* in cnn_pretrain.yaml exactly matches "
+            "models.policy.cnn in skrl_ppo_cfg.yaml."
+        )
+    if unexpected:
+        print(
+            f"[WARNING] Backbone checkpoint contains unexpected keys "
+            f"(ignored): {sorted(unexpected)}"
+        )
+
+    cnn_module.load_state_dict(backbone_state, strict=False)
+    print(
+        f"[INFO] Pretrained CNN backbone loaded successfully "
+        f"({len(model_state)} tensors)."
+    )
 
 
 def _build_cnn_runner(env, env_cfg, agent_cfg: dict):
