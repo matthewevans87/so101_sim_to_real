@@ -256,29 +256,38 @@ def _get_simulation_step_value(env_unwrapped: Any) -> int:
     return parsed
 
 
-def _get_instance_segmentation_info_for_env(camera_info, env_idx: int):
-    if not isinstance(camera_info, (list, tuple)):
-        raise RuntimeError(
-            "Camera info must be a per-environment list/tuple. "
-            f"Received type: {type(camera_info).__name__}."
-        )
-    if env_idx >= len(camera_info):
-        raise IndexError(
-            f"Camera info length {len(camera_info)} does not contain env index {env_idx}."
-        )
+def _get_tiled_segmentation_info(camera_info):
+    """Extract the instance_segmentation_fast info dict from a TiledCamera info object.
 
-    env_info = camera_info[env_idx]
-    if not isinstance(env_info, dict):
+    TiledCamera produces a single flat dict (not a per-env list) containing:
+      {
+        "instance_segmentation_fast": {
+          "idToLabels":   {<int_id>: "<prim_path>", ...},
+          "idToSemantics": {<int_id>: {"class": "<label>"}, ...}
+        }
+      }
+    Integer IDs are shared across the full tiled batch; prim paths encode the env
+    index (e.g. "/World/envs/env_0/Object") allowing per-env cube-ID filtering.
+    """
+    if not isinstance(camera_info, dict):
         raise RuntimeError(
-            "Camera env info must be a dict. "
-            f"Received type at env {env_idx}: {type(env_info).__name__}."
+            "TiledCamera info must be a dict. "
+            f"Received type: {type(camera_info).__name__}. "
+            "If Camera (not TiledCamera) is still in use the info will be a list — "
+            "ensure the environment is using TiledCamera."
         )
-    if "instance_segmentation_fast" not in env_info:
+    if "instance_segmentation_fast" not in camera_info:
         raise RuntimeError(
-            "Camera env info is missing required key 'instance_segmentation_fast' "
-            f"for env {env_idx}."
+            "Camera info dict is missing required key 'instance_segmentation_fast'. "
+            f"Keys present: {list(camera_info.keys())}."
         )
-    return env_info["instance_segmentation_fast"]
+    inner = camera_info["instance_segmentation_fast"]
+    if not isinstance(inner, dict):
+        raise RuntimeError(
+            "camera_info['instance_segmentation_fast'] must be a dict. "
+            f"Received type: {type(inner).__name__}."
+        )
+    return inner
 
 
 def _to_rgba_tuple(value) -> tuple[int, int, int, int] | None:
@@ -349,7 +358,20 @@ def _extract_rgba_label_pairs(node) -> list[tuple[tuple[int, int, int, int], str
     return pairs
 
 
-def _extract_cube_targets(seg_info_for_env, env_idx: int) -> tuple[str, set[Any]]:
+def _extract_cube_targets(seg_info, env_idx: int) -> tuple[str, set[Any]]:
+    """Extract the set of segmentation IDs (or RGBA tuples) that correspond to the
+    cube in the given env.
+
+    For TiledCamera, *seg_info* is the ``idToLabels`` / ``idToSemantics`` dict shared
+    across all envs.  Prim paths in that dict encode the env index
+    (e.g. ``/World/envs/env_0/Object``), so we filter to IDs whose label contains the
+    env-specific token ``env_{env_idx}/`` when extracting cube IDs.  This prevents
+    cube IDs from neighbouring envs from contaminating the frame-occupancy check for
+    this env.
+
+    Falls back to the original tokenised search if the env-specific filter yields
+    nothing (e.g. when running with a single env without an env-index path prefix).
+    """
     cube_tokens = (
         "cube",
         "/object",
@@ -357,8 +379,21 @@ def _extract_cube_targets(seg_info_for_env, env_idx: int) -> tuple[str, set[Any]
         "object/",
         "object_",
     )
+    env_token = f"env_{env_idx}/"
 
-    id_pairs = _extract_id_label_pairs(seg_info_for_env)
+    id_pairs = _extract_id_label_pairs(seg_info)
+
+    # First try: env-specific filter (TiledCamera prim-path schema).
+    cube_ids_env = {
+        inst_id
+        for inst_id, label in id_pairs
+        if env_token in label.lower()
+        and any(token in label.lower() for token in cube_tokens)
+    }
+    if cube_ids_env:
+        return "id", cube_ids_env
+
+    # Second try: unfiltered ID search (single-env or non-TiledCamera layouts).
     cube_ids = {
         inst_id
         for inst_id, label in id_pairs
@@ -367,7 +402,7 @@ def _extract_cube_targets(seg_info_for_env, env_idx: int) -> tuple[str, set[Any]
     if cube_ids:
         return "id", cube_ids
 
-    rgba_pairs = _extract_rgba_label_pairs(seg_info_for_env)
+    rgba_pairs = _extract_rgba_label_pairs(seg_info)
     cube_rgba = {
         rgba
         for rgba, label in rgba_pairs
@@ -620,6 +655,10 @@ def main(
 
     started_at = datetime.now(timezone.utc)
 
+    # Validation checks are invariant across loop iterations; run them once on the
+    # first step so that sensor tensors are populated before we inspect them.
+    _startup_validated = False
+
     while simulation_app.is_running() and completed_episodes < args_cli.num_episodes:
         with torch.inference_mode():
             outputs: Any = runner.agent.act(obs, timestep=0, timesteps=0)
@@ -641,86 +680,92 @@ def main(
         global_step += 1
         simulation_step = _get_simulation_step_value(env.unwrapped)
 
-        if "rgb" not in gripper_cam.data.output:
-            raise RuntimeError("Camera output is missing 'rgb'.")
-        if "instance_segmentation_fast" not in gripper_cam.data.output:
-            raise RuntimeError(
-                "Camera output is missing 'instance_segmentation_fast'. Ensure "
-                "camera_cfg.data_types includes this channel."
-            )
-        if not hasattr(gripper_cam.data, "info"):
-            raise RuntimeError(
-                "Camera output info is unavailable; cannot decode instance segmentation IDs."
-            )
-        if not isinstance(gripper_cam.data.info, (list, tuple)):
-            raise RuntimeError(
-                "Camera info must be a per-environment list/tuple; cannot derive cube-in-frame labels."
-            )
-        if len(gripper_cam.data.info) != num_envs:
-            raise RuntimeError(
-                "Camera info length does not match num_envs. "
-                f"len(info)={len(gripper_cam.data.info)}, num_envs={num_envs}."
+        # One-time startup validation — runs after the first env.step() so that
+        # camera tensors and step_metrics are guaranteed to be populated.
+        if not _startup_validated:
+            if "rgb" not in gripper_cam.data.output:
+                raise RuntimeError("Camera output is missing 'rgb'.")
+            if "instance_segmentation_fast" not in gripper_cam.data.output:
+                raise RuntimeError(
+                    "Camera output is missing 'instance_segmentation_fast'. Ensure "
+                    "camera_cfg.data_types includes this channel."
+                )
+            if not hasattr(gripper_cam.data, "info"):
+                raise RuntimeError(
+                    "Camera output info is unavailable; cannot decode instance segmentation IDs."
+                )
+            # TiledCamera produces a flat dict, not a per-env list.
+            if not isinstance(gripper_cam.data.info, dict):
+                raise RuntimeError(
+                    "Camera info must be a dict (TiledCamera). "
+                    f"Received type: {type(gripper_cam.data.info).__name__}. "
+                    "Ensure the environment is using TiledCamera, not Camera."
+                )
+            if not hasattr(env.unwrapped, "step_metrics"):
+                raise RuntimeError("Environment does not expose step_metrics.")
+            if "is_cube_in_grip_position" not in env.unwrapped.step_metrics:
+                raise RuntimeError(
+                    "step_metrics is missing required key 'is_cube_in_grip_position'."
+                )
+            _startup_validated = True
+
+        # Only pay the cost of camera tensor reads on steps where at least one env
+        # is scheduled for sampling.
+        sampling_envs = [
+            i
+            for i in range(num_envs)
+            if (episode_steps[i] % args_cli.sample_every_steps) == 0
+        ]
+
+        if sampling_envs:
+            rgb_batch = gripper_cam.data.output["rgb"]
+            seg_batch = gripper_cam.data.output["instance_segmentation_fast"]
+            # TiledCamera info dict is shared across all envs; fetch it once.
+            tiled_seg_info = _get_tiled_segmentation_info(gripper_cam.data.info)
+
+            joint_pos_batch = env.unwrapped.joint_pos[:, env.unwrapped._dof_idx]
+            is_cube_in_grip_batch = env.unwrapped.step_metrics[
+                "is_cube_in_grip_position"
+            ]
+            cube_quat_batch = quat_unique(
+                env.unwrapped.grip_zone_tf.data.target_quat_source[:, 0, :]
             )
 
-        if not hasattr(env.unwrapped, "step_metrics"):
-            raise RuntimeError("Environment does not expose step_metrics.")
-        if "is_cube_in_grip_position" not in env.unwrapped.step_metrics:
-            raise RuntimeError(
-                "step_metrics is missing required key 'is_cube_in_grip_position'."
-            )
+            for env_idx in sampling_envs:
+                if env_idx not in cube_targets_by_env:
+                    cube_targets_by_env[env_idx] = _extract_cube_targets(
+                        tiled_seg_info, env_idx
+                    )
 
-        rgb_batch = gripper_cam.data.output["rgb"]
-        seg_batch = gripper_cam.data.output["instance_segmentation_fast"]
-        camera_info_batch = gripper_cam.data.info
-
-        joint_pos_batch = env.unwrapped.joint_pos[:, env.unwrapped._dof_idx]
-        is_cube_in_grip_batch = env.unwrapped.step_metrics["is_cube_in_grip_position"]
-        cube_quat_batch = quat_unique(
-            env.unwrapped.grip_zone_tf.data.target_quat_source[:, 0, :]
-        )
-
-        for env_idx in range(num_envs):
-            should_sample = (episode_steps[env_idx] % args_cli.sample_every_steps) == 0
-            if not should_sample:
-                continue
-
-            seg_info_env = _get_instance_segmentation_info_for_env(
-                camera_info_batch, env_idx
-            )
-            if env_idx not in cube_targets_by_env:
-                cube_targets_by_env[env_idx] = _extract_cube_targets(
-                    seg_info_env, env_idx
+                cube_in_frame = _cube_in_frame(
+                    seg_batch[env_idx], cube_targets_by_env[env_idx]
                 )
 
-            cube_in_frame = _cube_in_frame(
-                seg_batch[env_idx], cube_targets_by_env[env_idx]
-            )
+                done_flag = done[env_idx]
+                if torch.is_tensor(done_flag):
+                    done_flag = bool(done_flag.item())
+                else:
+                    done_flag = bool(done_flag)
 
-            done_flag = done[env_idx]
-            if torch.is_tensor(done_flag):
-                done_flag = bool(done_flag.item())
-            else:
-                done_flag = bool(done_flag)
-
-            buffer["rgb"].append(_to_numpy(rgb_batch[env_idx], dtype=np.uint8))
-            buffer["joint_pos"].append(
-                _to_numpy(joint_pos_batch[env_idx], dtype=np.float32)
-            )
-            buffer["is_cube_in_grip_position"].append(
-                bool(_to_numpy(is_cube_in_grip_batch[env_idx], dtype=np.bool_))
-            )
-            buffer["cube_quat_gripzone_wxyz"].append(
-                _to_numpy(cube_quat_batch[env_idx], dtype=np.float32)
-            )
-            buffer["cube_in_camera_frame"].append(bool(cube_in_frame))
-            buffer["env_id"].append(env_idx)
-            buffer["episode_id"].append(episode_counts[env_idx])
-            buffer["episode_step"].append(episode_steps[env_idx])
-            buffer["global_step"].append(global_step)
-            buffer["simulation_step"].append(simulation_step)
-            buffer["sim_time_s"].append(float(global_step * dt))
-            buffer["done"].append(done_flag)
-            samples_collected += 1
+                buffer["rgb"].append(_to_numpy(rgb_batch[env_idx], dtype=np.uint8))
+                buffer["joint_pos"].append(
+                    _to_numpy(joint_pos_batch[env_idx], dtype=np.float32)
+                )
+                buffer["is_cube_in_grip_position"].append(
+                    bool(_to_numpy(is_cube_in_grip_batch[env_idx], dtype=np.bool_))
+                )
+                buffer["cube_quat_gripzone_wxyz"].append(
+                    _to_numpy(cube_quat_batch[env_idx], dtype=np.float32)
+                )
+                buffer["cube_in_camera_frame"].append(bool(cube_in_frame))
+                buffer["env_id"].append(env_idx)
+                buffer["episode_id"].append(episode_counts[env_idx])
+                buffer["episode_step"].append(episode_steps[env_idx])
+                buffer["global_step"].append(global_step)
+                buffer["simulation_step"].append(simulation_step)
+                buffer["sim_time_s"].append(float(global_step * dt))
+                buffer["done"].append(done_flag)
+                samples_collected += 1
 
         if len(buffer["env_id"]) >= args_cli.samples_per_shard:
             shard_index = _flush_shard(

@@ -36,6 +36,10 @@ CNN_DEVICE=""                # Optional device override for train-cnn (e.g. cuda
 CNN_BACKBONE_CHECKPOINT=""   # Pretrained backbone .pt for train command (optional)
 CNN_CONDA_ENV=""             # Optional conda env name for curate/train-cnn
 CNN_PYTHON_EXECUTABLE=""     # Optional Python executable for curate/train-cnn
+CNN_VIZ_MODEL=""             # Full PretrainCnn checkpoint for visualize-cnn (optional)
+CNN_VIZ_SPLIT="train"        # Dataset split for visualize-cnn (train/val/test)
+CNN_VIZ_START="0"            # Starting sample index for visualize-cnn
+CNN_VIZ_MANIFEST=""          # Raw manifest path for visualize-cnn (alternative to --curated-dir)
 
 # Tracks which parameters were explicitly provided via CLI (to emit override warnings)
 CLI_OVERRIDE_WARNINGS=()
@@ -408,6 +412,57 @@ curate_dataset() {
     printf -v CURATE_CMD_STR '%q ' "${CURATE_CMD[@]}"
     print_info "Executing curate command: ${CURATE_CMD_STR}"
     "${CURATE_CMD[@]}"
+}
+
+visualize_cnn() {
+    print_info "Launching CNN pretraining data visualizer"
+
+    if [ -z "${CURATED_DIR}" ] && [ -z "${CNN_VIZ_MANIFEST}" ]; then
+        print_error "--curated-dir or --manifest is required for visualize-cnn"
+        exit 1
+    fi
+
+    local EFFECTIVE_CONFIG="${CNN_CONFIG:-${PROJECT_ROOT}/configs/cnn_pretrain.yaml}"
+
+    if [[ -n "${CURATED_DIR}" && "${CURATED_DIR}" != /* ]]; then
+        CURATED_DIR="${PROJECT_ROOT}/${CURATED_DIR}"
+    fi
+    if [[ -n "${CNN_VIZ_MANIFEST}" && "${CNN_VIZ_MANIFEST}" != /* ]]; then
+        CNN_VIZ_MANIFEST="${PROJECT_ROOT}/${CNN_VIZ_MANIFEST}"
+    fi
+
+    resolve_cnn_python_command
+
+    local -a VIZ_CMD
+    VIZ_CMD=(
+        "${OFFLINE_PYTHON_COMMAND[@]}"
+        -m cnn_trainer.visualizer
+    )
+
+    if [ -n "${CURATED_DIR}" ]; then
+        VIZ_CMD+=(--curated-dir "${CURATED_DIR}" --split "${CNN_VIZ_SPLIT}")
+    else
+        VIZ_CMD+=(--manifest "${CNN_VIZ_MANIFEST}")
+    fi
+
+    if [ -n "${CNN_VIZ_MODEL}" ]; then
+        if [ ! -f "${EFFECTIVE_CONFIG}" ]; then
+            print_error "CNN config not found: ${EFFECTIVE_CONFIG}  (required with --cnn-viz-model)"
+            exit 1
+        fi
+        VIZ_CMD+=(--model "${CNN_VIZ_MODEL}" --config "${EFFECTIVE_CONFIG}")
+    fi
+
+    VIZ_CMD+=(--start "${CNN_VIZ_START}")
+
+    if [ -n "${CNN_DEVICE}" ]; then
+        VIZ_CMD+=(--device "${CNN_DEVICE}")
+    fi
+
+    local VIZ_CMD_STR
+    printf -v VIZ_CMD_STR '%q ' "${VIZ_CMD[@]}"
+    print_info "Executing visualize-cnn command: ${VIZ_CMD_STR}"
+    "${VIZ_CMD[@]}"
 }
 
 train_cnn() {
@@ -791,6 +846,7 @@ Commands:
     collect         Run policy rollout telemetry collection from an experiment directory
     curate          Curate telemetry dataset for CNN pretraining (no Isaac required)
     train-cnn       Train CNN backbone on curated dataset (no Isaac required)
+    visualize-cnn   Interactive visualizer for CNN training data and model predictions
     doctor          Print detected DISPLAY / XAUTHORITY guidance for remote SSH use
     help            Show this help message
 
@@ -810,6 +866,10 @@ Options:
     --cnn-conda-env NAME     Conda env to use for curate/train-cnn
     --cnn-python-executable PATH  Python executable to use for curate/train-cnn
     --cnn-backbone-checkpoint PATH  Pretrained CNN backbone .pt to load for the train command
+    --cnn-viz-model PATH         Full PretrainCnn checkpoint for visualize-cnn (optional; requires --cnn-config)
+    --cnn-viz-split SPLIT        Dataset split to visualise: train|val|test (default: train)
+    --cnn-viz-start IDX          First sample index to display (default: 0)
+    --manifest PATH              Raw manifest JSON for visualize-cnn (alternative to --curated-dir)
     --num-episodes NUM       Override evaluation episode count (default: 100) [Warning emitted]
     --num-videos NUM         Override evaluation video episodes (default: 5) [Warning emitted]
     --verbosity LEVEL        Output verbosity for results.json (full|basic, default: basic)
@@ -838,6 +898,8 @@ Examples:
     $0 collect --experiment-path artifacts/2026-03-12_09-52-10 --task So101-LiftCube-v0 --sample-every-steps 8 --num-episodes 200 --seed 42 --telemetry-output-dir artifacts/telemetry/2026-03-23
     $0 curate --telemetry-dir artifacts/telemetry/2026-03-24 --curated-dir artifacts/curated/2026-03-24 --seed 42
     $0 train-cnn --curated-dir artifacts/curated/2026-03-24 --cnn-output-dir artifacts/cnn_pretrain/2026-03-24
+    $0 visualize-cnn --curated-dir artifacts/curated/2026-03-24 --cnn-viz-split val
+    $0 visualize-cnn --curated-dir artifacts/curated/2026-03-24 --cnn-viz-model artifacts/cnn_pretrain/2026-03-24/checkpoints/best_model.pt
     $0 train --task So101-LiftCube-v0 --env-config configs/trainable_cnn.yaml --cnn-backbone-checkpoint artifacts/cnn_pretrain/2026-03-24/checkpoints/best_backbone.pt
     $0 train --task So101-LiftCube-v0 --display 0
 
@@ -972,7 +1034,23 @@ while [[ $# -gt 0 ]]; do
             CNN_BACKBONE_CHECKPOINT="$2"
             shift 2
             ;;
-        all|train|export|play|evaluate|collect|curate|train-cnn|install|doctor|help)
+        --cnn-viz-model)
+            CNN_VIZ_MODEL="$2"
+            shift 2
+            ;;
+        --cnn-viz-split)
+            CNN_VIZ_SPLIT="$2"
+            shift 2
+            ;;
+        --cnn-viz-start)
+            CNN_VIZ_START="$2"
+            shift 2
+            ;;
+        --manifest)
+            CNN_VIZ_MANIFEST="$2"
+            shift 2
+            ;;
+        all|train|export|play|evaluate|collect|curate|train-cnn|visualize-cnn|install|doctor|help)
             COMMAND="$1"
             shift
             ;;
@@ -1004,7 +1082,7 @@ main() {
     fi
 
     # Validate required arguments (Isaac-dependent commands only)
-    if [[ "${COMMAND}" != "help" && "${COMMAND}" != "doctor" && "${COMMAND}" != "evaluate" && "${COMMAND}" != "collect" && "${COMMAND}" != "curate" && "${COMMAND}" != "train-cnn" ]]; then
+    if [[ "${COMMAND}" != "help" && "${COMMAND}" != "doctor" && "${COMMAND}" != "evaluate" && "${COMMAND}" != "collect" && "${COMMAND}" != "curate" && "${COMMAND}" != "train-cnn" && "${COMMAND}" != "visualize-cnn" ]]; then
         if [[ -z "${TASK}" ]]; then
             print_error "--task is required for command: ${COMMAND:-<none>}"
             show_usage
@@ -1169,6 +1247,9 @@ main() {
             ;;
         train-cnn)
             train_cnn
+            ;;
+        visualize-cnn)
+            visualize_cnn
             ;;
         all)
             stage_assets

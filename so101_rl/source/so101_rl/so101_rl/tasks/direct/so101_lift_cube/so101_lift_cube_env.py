@@ -69,7 +69,7 @@ from isaaclab.assets import Articulation, RigidObject
 from isaaclab.envs import DirectRLEnv
 from isaaclab.utils.math import sample_uniform, quat_apply
 
-from isaaclab.sensors import Camera, ContactSensor, FrameTransformer
+from isaaclab.sensors import Camera, TiledCamera, ContactSensor, FrameTransformer
 import isaaclab.utils.math as math_utils
 import isaaclab.sim as sim_utils
 
@@ -236,7 +236,7 @@ class So101LiftCube(DirectRLEnv):
         self.table = RigidObject(self.cfg.table_cfg)
         self.robot = Articulation(self.cfg.robot_cfg)
         self.cube = RigidObject(self.cfg.cube_cfg)
-        self.camera = Camera(self.cfg.camera_cfg)
+        self.camera = TiledCamera(self.cfg.camera_cfg)
         self.overhead_camera = (
             Camera(self.cfg.overhead_camera_cfg)
             if self.cfg.overhead_camera_cfg is not None
