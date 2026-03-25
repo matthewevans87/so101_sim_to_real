@@ -160,9 +160,20 @@ class DistractorsCfg:
 
 
 @dataclass
+class SaveImageStageCfg:
+    save: bool
+    interval: int
+
+
+@dataclass
+class SaveImagesCfg:
+    pre_processing: SaveImageStageCfg
+    post_processing: SaveImageStageCfg
+
+
+@dataclass
 class DebugCfg:
-    save_images: bool
-    save_image_interval: int
+    save_images: SaveImagesCfg
     enable_gripper_arrow_markers: bool
     enable_tip_markers: bool
     enable_camera_frame_markers: bool
@@ -278,6 +289,18 @@ class PreshapeImageCfg:
 
 
 @dataclass
+class GaussianNoiseCfg:
+    enabled: bool
+    std_range: list[float]
+
+
+@dataclass
+class BrightnessCfg:
+    enabled: bool
+    range: list[float]
+
+
+@dataclass
 class ContrastCfg:
     enabled: bool
     range: list[float]
@@ -286,9 +309,25 @@ class ContrastCfg:
 @dataclass
 class CameraFeedCfg:
     preshape_image: PreshapeImageCfg
-    gaussian_noise_std_range: list[float]
-    brightness_range: list[float]
+    gaussian_noise: GaussianNoiseCfg
+    brightness: BrightnessCfg
     contrast: ContrastCfg
+    gaussian_blur: GaussianBlurCfg
+    cheap_webcam_effect: CheapWebcamEffectCfg
+    motion_blur: MotionBlurCfg
+    jpeg_compression: JpegCompressionCfg
+
+
+@dataclass
+class GaussianBlurCfg:
+    enabled: bool
+    kernel_size: int
+    sigma: float
+
+
+@dataclass
+class CheapWebcamEffectCfg:
+    enabled: bool
 
 
 @dataclass
@@ -305,12 +344,6 @@ class JpegCompressionCfg:
 
 
 @dataclass
-class CameraAdvancedCfg:
-    motion_blur: MotionBlurCfg
-    jpeg_compression: JpegCompressionCfg
-
-
-@dataclass
 class CameraPoseCfg:
     enabled: bool
     position_noise_range: tuple[float, float]
@@ -320,7 +353,6 @@ class CameraPoseCfg:
 @dataclass
 class DRCameraCfg:
     feed: CameraFeedCfg
-    advanced: CameraAdvancedCfg
     pose: CameraPoseCfg
 
 

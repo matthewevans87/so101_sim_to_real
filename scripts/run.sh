@@ -40,6 +40,7 @@ CNN_VIZ_MODEL=""             # Full PretrainCnn checkpoint for visualize-cnn (op
 CNN_VIZ_SPLIT="train"        # Dataset split for visualize-cnn (train/val/test)
 CNN_VIZ_START="0"            # Starting sample index for visualize-cnn
 CNN_VIZ_MANIFEST=""          # Raw manifest path for visualize-cnn (alternative to --curated-dir)
+VIZ_PIPELINE_IMAGE=""        # Optional image/NPZ path for visualize-pipeline
 
 # Tracks which parameters were explicitly provided via CLI (to emit override warnings)
 CLI_OVERRIDE_WARNINGS=()
@@ -412,6 +413,34 @@ curate_dataset() {
     printf -v CURATE_CMD_STR '%q ' "${CURATE_CMD[@]}"
     print_info "Executing curate command: ${CURATE_CMD_STR}"
     "${CURATE_CMD[@]}"
+}
+
+visualize_pipeline() {
+    print_info "Launching image pipeline viewer"
+
+    resolve_cnn_python_command
+
+    local -a VIZ_PIPE_CMD
+    VIZ_PIPE_CMD=(
+        "${OFFLINE_PYTHON_COMMAND[@]}"
+        -m image_pipeline_viewer
+    )
+
+    if [ -n "${VIZ_PIPELINE_IMAGE}" ]; then
+        if [[ "${VIZ_PIPELINE_IMAGE}" != /* ]]; then
+            VIZ_PIPELINE_IMAGE="${PROJECT_ROOT}/${VIZ_PIPELINE_IMAGE}"
+        fi
+        VIZ_PIPE_CMD+=(--image "${VIZ_PIPELINE_IMAGE}")
+    fi
+
+    if [ -n "${CNN_DEVICE}" ]; then
+        VIZ_PIPE_CMD+=(--device "${CNN_DEVICE}")
+    fi
+
+    local VIZ_PIPE_CMD_STR
+    printf -v VIZ_PIPE_CMD_STR '%q ' "${VIZ_PIPE_CMD[@]}"
+    print_info "Executing visualize-pipeline command: ${VIZ_PIPE_CMD_STR}"
+    "${VIZ_PIPE_CMD[@]}"
 }
 
 visualize_cnn() {
@@ -846,8 +875,9 @@ Commands:
     collect         Run policy rollout telemetry collection from an experiment directory
     curate          Curate telemetry dataset for CNN pretraining (no Isaac required)
     train-cnn       Train CNN backbone on curated dataset (no Isaac required)
-    visualize-cnn   Interactive visualizer for CNN training data and model predictions
-    doctor          Print detected DISPLAY / XAUTHORITY guidance for remote SSH use
+    visualize-cnn       Interactive visualizer for CNN training data and model predictions
+    visualize-pipeline  Interactive image distortion pipeline configurator
+    doctor              Print detected DISPLAY / XAUTHORITY guidance for remote SSH use
     help            Show this help message
 
 Options:
@@ -870,6 +900,7 @@ Options:
     --cnn-viz-split SPLIT        Dataset split to visualise: train|val|test (default: train)
     --cnn-viz-start IDX          First sample index to display (default: 0)
     --manifest PATH              Raw manifest JSON for visualize-cnn (alternative to --curated-dir)
+    --pipeline-image PATH        Image or NPZ shard to open in visualize-pipeline (optional)
     --num-episodes NUM       Override evaluation episode count (default: 100) [Warning emitted]
     --num-videos NUM         Override evaluation video episodes (default: 5) [Warning emitted]
     --verbosity LEVEL        Output verbosity for results.json (full|basic, default: basic)
@@ -900,6 +931,8 @@ Examples:
     $0 train-cnn --curated-dir artifacts/curated/2026-03-24 --cnn-output-dir artifacts/cnn_pretrain/2026-03-24
     $0 visualize-cnn --curated-dir artifacts/curated/2026-03-24 --cnn-viz-split val
     $0 visualize-cnn --curated-dir artifacts/curated/2026-03-24 --cnn-viz-model artifacts/cnn_pretrain/2026-03-24/checkpoints/best_model.pt
+    $0 visualize-pipeline
+    $0 visualize-pipeline --pipeline-image /path/to/real_camera_frame.png
     $0 train --task So101-LiftCube-v0 --env-config configs/trainable_cnn.yaml --cnn-backbone-checkpoint artifacts/cnn_pretrain/2026-03-24/checkpoints/best_backbone.pt
     $0 train --task So101-LiftCube-v0 --display 0
 
@@ -1050,7 +1083,11 @@ while [[ $# -gt 0 ]]; do
             CNN_VIZ_MANIFEST="$2"
             shift 2
             ;;
-        all|train|export|play|evaluate|collect|curate|train-cnn|visualize-cnn|install|doctor|help)
+        --pipeline-image)
+            VIZ_PIPELINE_IMAGE="$2"
+            shift 2
+            ;;
+        all|train|export|play|evaluate|collect|curate|train-cnn|visualize-cnn|visualize-pipeline|install|doctor|help)
             COMMAND="$1"
             shift
             ;;
@@ -1082,7 +1119,7 @@ main() {
     fi
 
     # Validate required arguments (Isaac-dependent commands only)
-    if [[ "${COMMAND}" != "help" && "${COMMAND}" != "doctor" && "${COMMAND}" != "evaluate" && "${COMMAND}" != "collect" && "${COMMAND}" != "curate" && "${COMMAND}" != "train-cnn" && "${COMMAND}" != "visualize-cnn" ]]; then
+    if [[ "${COMMAND}" != "help" && "${COMMAND}" != "doctor" && "${COMMAND}" != "evaluate" && "${COMMAND}" != "collect" && "${COMMAND}" != "curate" && "${COMMAND}" != "train-cnn" && "${COMMAND}" != "visualize-cnn" && "${COMMAND}" != "visualize-pipeline" ]]; then
         if [[ -z "${TASK}" ]]; then
             print_error "--task is required for command: ${COMMAND:-<none>}"
             show_usage
@@ -1250,6 +1287,9 @@ main() {
             ;;
         visualize-cnn)
             visualize_cnn
+            ;;
+        visualize-pipeline)
+            visualize_pipeline
             ;;
         all)
             stage_assets

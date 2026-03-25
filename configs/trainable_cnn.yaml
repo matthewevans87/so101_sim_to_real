@@ -49,8 +49,13 @@ distractors:
     z_range: [0.01, 0.25]
 
 debug:
-  save_images: false
-  save_image_interval: 10
+  save_images:
+    pre_processing:
+      save: false
+      interval: 10
+    post_processing:
+      save: true
+      interval: 10
   enable_gripper_arrow_markers: false
   enable_tip_markers: false
   enable_camera_frame_markers: false
@@ -146,12 +151,21 @@ domain_randomization:
     feed:
       preshape_image:
         enabled: false
-      gaussian_noise_std_range: [0.01, 0.02]
-      brightness_range: [0.85, 1.15]
+      gaussian_noise:
+        enabled: false
+        std_range: [0.01, 0.02]
+      brightness:
+        enabled: false
+        range: [0.85, 1.15]
       contrast:
         enabled: false
         range: [0.8, 1.2]
-    advanced:
+      gaussian_blur:
+        enabled: false
+        kernel_size: 7
+        sigma: 2.0
+      cheap_webcam_effect:
+        enabled: false
       motion_blur:
         enabled: false
         kernel_size: 5

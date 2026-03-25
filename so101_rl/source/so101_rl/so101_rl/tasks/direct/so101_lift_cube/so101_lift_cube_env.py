@@ -20,6 +20,7 @@ from so101_utils.image_processing import (
     GaussianNoisePipelineStep,
     ImageNetNormalizationPipelineStep,
     ImagePipeline,
+    ImagePipelineStep,
     JpegCompressionPipelineStep,
     MotionBlurPipelineStep,
     ResizePipelineStep,
@@ -190,16 +191,70 @@ class So101LiftCube(DirectRLEnv):
                 }
             ),
         )
-        _image_pipeline_steps = [
-            Uint8ToFloatCHWPipelineStep(),
-            GaussianBlurPipelineStep(),
-            JpegCompressionPipelineStep(),
-            MotionBlurPipelineStep(),
-            CheapWebcamEffectPipelineStep(),
-            GaussianNoisePipelineStep(),
-            CameraBrightnessPipelineStep(),
-            CameraContrastPipelineStep(),
-        ]
+        _dr_feed = self.cfg.domain_randomization.camera.feed
+        _image_pipeline_steps: list[ImagePipelineStep] = [Uint8ToFloatCHWPipelineStep()]
+        if _dr_feed.gaussian_blur.enabled:
+            _image_pipeline_steps.append(
+                GaussianBlurPipelineStep(
+                    kernel_size=_dr_feed.gaussian_blur.kernel_size,
+                    sigma=_dr_feed.gaussian_blur.sigma,
+                )
+            )
+        if _dr_feed.jpeg_compression.enabled:
+            _image_pipeline_steps.append(
+                JpegCompressionPipelineStep(
+                    quality_range=(
+                        _dr_feed.jpeg_compression.quality_range[0],
+                        _dr_feed.jpeg_compression.quality_range[1],
+                    ),
+                    device=self.device,
+                )
+            )
+        if _dr_feed.motion_blur.enabled:
+            _image_pipeline_steps.append(
+                MotionBlurPipelineStep(
+                    motion_blur_strength_range=(
+                        _dr_feed.motion_blur.strength_range[0],
+                        _dr_feed.motion_blur.strength_range[1],
+                    ),
+                    motion_blur_kernel_size=_dr_feed.motion_blur.kernel_size,
+                    device=self.device,
+                )
+            )
+        if _dr_feed.cheap_webcam_effect.enabled:
+            _image_pipeline_steps.append(
+                CheapWebcamEffectPipelineStep(device=self.device)
+            )
+        if _dr_feed.gaussian_noise.enabled:
+            _image_pipeline_steps.append(
+                GaussianNoisePipelineStep(
+                    noise_std_range=(
+                        _dr_feed.gaussian_noise.std_range[0],
+                        _dr_feed.gaussian_noise.std_range[1],
+                    ),
+                    device=self.device,
+                )
+            )
+        if _dr_feed.brightness.enabled:
+            _image_pipeline_steps.append(
+                CameraBrightnessPipelineStep(
+                    brightness_range=(
+                        _dr_feed.brightness.range[0],
+                        _dr_feed.brightness.range[1],
+                    ),
+                    device=self.device,
+                )
+            )
+        if _dr_feed.contrast.enabled:
+            _image_pipeline_steps.append(
+                CameraContrastPipelineStep(
+                    contrast_range=(
+                        _dr_feed.contrast.range[0],
+                        _dr_feed.contrast.range[1],
+                    ),
+                    device=self.device,
+                )
+            )
         _vision_type = self.cfg.vision_encoder.type
         if _vision_type == "resnet18":
             self.vision_feature_extractor = ResNet18SpatialSoftmaxFeatureExtractor(
@@ -358,16 +413,34 @@ class So101LiftCube(DirectRLEnv):
         # Raw camera RGB: (num_envs, H, W, 3), uint8
         camera_data = self.camera.data.output["rgb"]
 
-        # Apply domain randomization (pipeline handles uint8→float CHW conversion as first step)
+        _pre_cfg = self.cfg.debug.save_images.pre_processing
+        if _pre_cfg.save and self.common_step_counter % _pre_cfg.interval == 0:
+            if self.cfg.log_dir is None:
+                raise RuntimeError(
+                    "cfg.log_dir must be set before the environment is created."
+                )
+            pre_dir = os.path.join(self.cfg.log_dir, "images", "pre_processing")
+            os.makedirs(pre_dir, exist_ok=True)
+            # camera_data is (N, H, W, 3) uint8 — convert to (3, H, W) float for save_image
+            save_image(
+                camera_data[0].permute(2, 0, 1).float() / 255.0,
+                os.path.join(pre_dir, f"camera_{self.common_step_counter:06d}.png"),
+            )
+
+        # Apply image pipeline (uint8→float CHW conversion + any enabled DR steps)
         images = self.image_pipeline.process(camera_data)
 
-        if (
-            self.cfg.debug.save_images
-            and self.common_step_counter % self.cfg.debug.save_image_interval == 0
-        ):
+        _post_cfg = self.cfg.debug.save_images.post_processing
+        if _post_cfg.save and self.common_step_counter % _post_cfg.interval == 0:
+            if self.cfg.log_dir is None:
+                raise RuntimeError(
+                    "cfg.log_dir must be set before the environment is created."
+                )
+            post_dir = os.path.join(self.cfg.log_dir, "images", "post_processing")
+            os.makedirs(post_dir, exist_ok=True)
             save_image(
                 images[0],  # (3, H, W)
-                os.path.join(f"aug_{self.common_step_counter:06d}.png"),
+                os.path.join(post_dir, f"camera_{self.common_step_counter:06d}.png"),
             )
 
         # Proprioception
@@ -566,17 +639,40 @@ class So101LiftCube(DirectRLEnv):
                         size_range=self.cfg.distractors.randomization.size_range,
                     )
 
-                # Randomize position
-                randomize_rigid_object_position(
-                    env_ids=env_ids,
-                    scene=self.scene,
-                    rigid_object=distractor,
-                    object_name=distractor_name,
-                    x_range=self.cfg.distractors.position.x_range,
-                    y_range=self.cfg.distractors.position.y_range,
-                    z_range=self.cfg.distractors.position.z_range,
-                    device=self.device,
+                # Randomize position, respecting active_probability
+                active_mask = (
+                    torch.rand(len(env_ids), device=self.device)
+                    < self.cfg.distractors.randomization.active_probability
                 )
+                env_ids_t = torch.as_tensor(env_ids, device=self.device)
+                active_env_ids = env_ids_t[active_mask]  # type: ignore[assignment]
+                inactive_env_ids = env_ids_t[~active_mask]  # type: ignore[assignment]
+
+                if len(active_env_ids) > 0:
+                    randomize_rigid_object_position(
+                        env_ids=active_env_ids,
+                        scene=self.scene,
+                        rigid_object=distractor,
+                        object_name=distractor_name,
+                        x_range=self.cfg.distractors.position.x_range,
+                        y_range=self.cfg.distractors.position.y_range,
+                        z_range=self.cfg.distractors.position.z_range,
+                        device=self.device,
+                    )
+
+                if len(inactive_env_ids) > 0:
+                    # Place inactive distractors below ground so they are invisible
+                    hidden_state = distractor.data.default_root_state[
+                        inactive_env_ids
+                    ].clone()
+                    hidden_state[:, :3] = self.scene.env_origins[inactive_env_ids]
+                    hidden_state[:, 2] -= 10.0
+                    distractor.write_root_pose_to_sim(
+                        hidden_state[:, :7], inactive_env_ids
+                    )
+                    distractor.write_root_velocity_to_sim(
+                        hidden_state[:, 7:], inactive_env_ids
+                    )
 
     def _compute_step_metrics(self) -> None:
         """Compute custom metrics at each step for logging purposes."""

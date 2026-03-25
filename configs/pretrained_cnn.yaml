@@ -3,7 +3,7 @@ episode_length_s: 10.0
 sim:
   dt: 0.008333333333333333
 scene:
-  num_envs: 16
+  num_envs: 8
   env_spacing: 2.0
   replicate_physics: true
 
@@ -51,11 +51,11 @@ distractors:
 debug:
   save_images:
     pre_processing:
-      save: true
-      interval: 100
+      save: false
+      interval: 10
     post_processing:
-      save: true
-      interval: 100
+      save: false
+      interval: 10
   enable_gripper_arrow_markers: false
   enable_tip_markers: false
   enable_camera_frame_markers: false
@@ -172,7 +172,7 @@ domain_randomization:
         strength_range: [0.1, 0.2]
       jpeg_compression:
         enabled: false
-        quality_range: [90, 95]
+        quality_range: [60, 70]
     pose:
       enabled: false
       position_noise_range: [-0.001, 0.001]
@@ -224,10 +224,13 @@ observations:
 vision_encoder:
   # 'resnet18'      — frozen pretrained ResNet18 + SpatialSoftmax (1024-D, not updated by PPO)
   # 'trainable_cnn' — conv CNN trained end-to-end within the PPO loop
-  type: resnet18
+  type: trainable_cnn
   # Image dimensions the CNN sees. For 'trainable_cnn', the env resizes to these before
   # storing observations in the rollout buffer. Smaller values reduce memory pressure.
   # For 'resnet18' these values are unused (ResNet accepts any resolution).
+  # 16:9 aspect ratio to match the physical Arducam 1080P (1920x1080) camera.
+  # 108x192 is a 10x downscale from 1080P; the ResizePipelineStep handles this at
+  # deployment, and is a no-op during sim training when the camera renders at this size.
   image_height: 108
   image_width: 192
   # CNN architecture (channels, kernel sizes, etc.) is defined in skrl_ppo_cfg.yaml
