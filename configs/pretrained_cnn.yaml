@@ -222,16 +222,19 @@ observations:
     - is_table_touched
 
 vision_encoder:
-  # 'resnet18'      — frozen pretrained ResNet18 + SpatialSoftmax (1024-D, not updated by PPO)
-  # 'trainable_cnn' — conv CNN trained end-to-end within the PPO loop
-  type: trainable_cnn
-  # Image dimensions the CNN sees. For 'trainable_cnn', the env resizes to these before
-  # storing observations in the rollout buffer. Smaller values reduce memory pressure.
-  # For 'resnet18' these values are unused (ResNet accepts any resolution).
-  # 16:9 aspect ratio to match the physical Arducam 1080P (1920x1080) camera.
-  # 108x192 is a 10x downscale from 1080P; the ResizePipelineStep handles this at
-  # deployment, and is a no-op during sim training when the camera renders at this size.
+  # 'frozen_resnet18' — frozen pretrained ResNet18 + SpatialSoftmax (1024-D)
+  # 'frozen_cnn'      — frozen pretrained CNN + SpatialSoftmax projection (output_dim-D)
+  #                     Backbone weights loaded via --cnn_backbone_checkpoint.
+  type: frozen_cnn
+  # Image dimensions passed to the CNN. The env's ResizePipelineStep resizes to these.
+  # 16:9 aspect ratio matching the physical Arducam 1080P (1920x1080) camera.
+  # 108x192 is a 10x downscale; a no-op during sim training when the camera renders at this size.
   image_height: 108
   image_width: 192
-  # CNN architecture (channels, kernel sizes, etc.) is defined in skrl_ppo_cfg.yaml
-  # under models.policy.cnn — keeping all model architecture in the agent config.
+  # CNN backbone architecture — must match the pretraining config exactly.
+  backbone:
+    channels: [32, 64, 128, 128]
+    kernel_sizes: [5, 4, 3, 3]
+    strides: [2, 2, 2, 1]
+    mlp_hidden_dims: [256]
+    output_dim: 256

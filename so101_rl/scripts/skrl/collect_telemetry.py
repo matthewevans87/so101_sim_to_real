@@ -588,12 +588,17 @@ def main(
         torch.cuda.manual_seed_all(args_cli.seed)
 
     output_dir = Path(args_cli.output_dir).resolve()
-    shards_dir = output_dir / "telemetry_shards"
+
+    collect_log_dir = output_dir
+    collect_log_dir.mkdir(parents=True, exist_ok=True)
+    env_cfg.log_dir = str(collect_log_dir)
+
+    shards_dir = collect_log_dir / "telemetry_shards"
     shards_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"[INFO] Experiment path: {experiment_path}")
     print(f"[INFO] Checkpoint path: {checkpoint_path}")
-    print(f"[INFO] Telemetry output directory: {output_dir}")
+    print(f"[INFO] Telemetry output directory: {collect_log_dir}")
     print(f"[INFO] Sampling every {args_cli.sample_every_steps} steps")
 
     env: Any = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array")
@@ -789,10 +794,10 @@ def main(
                 completed_episodes += 1
                 episode_steps[env_idx] = 0
 
-                if completed_episodes % 10 == 0:
-                    print(
-                        f"[INFO] Completed {completed_episodes}/{args_cli.num_episodes} episodes"
-                    )
+                print(
+                    f"[INFO] Completed {completed_episodes}/{args_cli.num_episodes} episodes",
+                    flush=True,
+                )
 
                 if completed_episodes >= args_cli.num_episodes:
                     break
@@ -848,7 +853,7 @@ def main(
         "argv": vars(args_cli),
     }
 
-    metadata_path = output_dir / "telemetry_metadata.json"
+    metadata_path = collect_log_dir / "telemetry_metadata.json"
     with open(metadata_path, "w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=2)
 

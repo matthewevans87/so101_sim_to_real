@@ -58,8 +58,8 @@ _project_root = Path(__file__).resolve().parent.parent.parent
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
-from cnn_trainer.data_pipeline.dataset import TelemetryDataset
-from cnn_trainer.model.model import PretrainCnn
+from so101.curate.dataset import TelemetryDataset
+from so101.model.model import MultiTaskCnn
 
 # ── Colour palette ────────────────────────────────────────────────────────────
 
@@ -163,7 +163,7 @@ class Visualizer:
     def __init__(
         self,
         dataset: TelemetryDataset,
-        model: Optional[PretrainCnn] = None,
+        model: Optional[MultiTaskCnn] = None,
         device: str = "cpu",
         start_idx: int = 0,
     ) -> None:
@@ -419,7 +419,7 @@ def _load_config(path: str | Path) -> dict:
         return yaml.safe_load(f)
 
 
-def _load_model(model_path: str | Path, cfg: dict, device: str) -> PretrainCnn:
+def _load_model(model_path: str | Path, cfg: dict, device: str) -> MultiTaskCnn:
     """Instantiate ``PretrainCnn`` from *cfg* and load weights from *model_path*.
 
     Args:
@@ -438,7 +438,7 @@ def _load_model(model_path: str | Path, cfg: dict, device: str) -> PretrainCnn:
     if heads_cfg is None:
         raise ValueError("Config is missing the 'heads' section.")
 
-    model = PretrainCnn(backbone_cfg=backbone_cfg, heads_cfg=heads_cfg)
+    model = MultiTaskCnn(backbone_cfg=backbone_cfg, heads_cfg=heads_cfg)
     state = torch.load(model_path, map_location=device, weights_only=True)
     model.load_state_dict(state)
     model.to(device)
@@ -590,7 +590,7 @@ def main(argv: Optional[list[str]] = None) -> None:
     print(f"  {len(dataset)} samples loaded.")
 
     # ─ Build model ───────────────────────────────────────────────────────────
-    model: Optional[PretrainCnn] = None
+    model: Optional[MultiTaskCnn] = None
     if args.model:
         cfg = _load_config(args.config)
         print(f"Loading model from: {args.model}")

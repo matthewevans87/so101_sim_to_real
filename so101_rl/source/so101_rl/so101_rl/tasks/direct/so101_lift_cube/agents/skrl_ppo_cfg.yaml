@@ -3,48 +3,30 @@ seed: 42
 
 # Models are instantiated using skrl's model instantiator utility
 # https://skrl.readthedocs.io/en/latest/api/utils/model_instantiators.html
-#
-# NOTE: 'network:' applies when vision_encoder.type == 'resnet18' (used by skrl's Runner).
-#       'cnn:', 'head_dims:', and 'value.hidden_dims:' apply when type == 'trainable_cnn'
-#       (used by _build_cnn_runner in train.py; ignored by Runner).
 models:
   separate: True  # Use separate networks for actor and critic
-  policy:  # Actor: vision-based only
+  policy:  # Actor: feature vector (RN18 1024-D or CNN 256-D) + joint positions
     class: GaussianMixin
     clip_actions: False
     clip_log_std: True
     min_log_std: -20.0
     max_log_std: 2.0
     initial_log_std: 0.0
-    # resnet18 path: MLP operating on 1024-D ResNet features + joint positions
     network:
       - name: net
         input: OBSERVATIONS
         layers: [256, 128, 64]
         activations: elu
     output: ACTIONS
-    # trainable_cnn path: CNN backbone architecture (ignored by resnet18 path)
-    # Layer 1: k=5,s=2 (was k=8,s=4) — finer first-layer stride preserves more
-    # spatial resolution; final SpatialSoftmax map is 14×25 vs prev 8×13,
-    # giving ~7.7 px/cell instead of ~14 px/cell for better keypoint precision.
-    cnn:
-      channels: [32, 64, 128, 128]
-      kernel_sizes: [5, 4, 3, 3]
-      strides: [2, 2, 2, 1]
-      mlp_hidden_dims: [256]  # SpatialSoftmax projection MLP hidden dims
-      output_dim: 256         # CNN feature vector dimension
-    head_dims: [256, 128, 64]  # Policy head: CNN features + joints → action means
-  value:  # Critic: privileged state information
+  value:  # Critic: same observation vector as policy
     class: DeterministicMixin
     clip_actions: False
-    # resnet18 path: MLP operating on full observations
     network:
       - name: net
         input: OBSERVATIONS
         layers: [256, 128, 64]
         activations: elu
     output: ONE
-    hidden_dims: [256, 128, 64]  # Value MLP dims (trainable_cnn path; ignored by resnet18 path)
 
 
 # Rollout memory
@@ -63,11 +45,7 @@ agent:
   mini_batches: 8
   discount_factor: 0.99
   lambda: 0.95
-  cnn_freeze_steps: -1       # Simulation timesteps to keep CNN weights frozen before unlocking.
-                            # Set > 0 to pre-train the policy head with fixed CNN features
-                            # before allowing end-to-end gradients. 0 = no freezing; -1 = always frozen.
-  cnn_learning_rate: 1.0e-06  # CNN encoder only (conv trunk + SpatialSoftmax + projection MLP)
-  learning_rate: 1.0e-04  # Lower LR for vision
+  learning_rate: 1.0e-04
   learning_rate_scheduler: KLAdaptiveLR
   learning_rate_scheduler_kwargs:
     kl_threshold: 0.008
@@ -86,9 +64,6 @@ agent:
   kl_threshold: 0.0
   rewards_shaper_scale: 0.1
   time_limit_bootstrap: False
-  # How often (in PPO update steps) to write keypoint and activation-heatmap
-  # overlay images to TensorBoard (trainable_cnn path only).
-  viz_interval: 1
   # logging and checkpoint
   experiment:
     directory: "so101_rl"

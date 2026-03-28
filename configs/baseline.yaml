@@ -222,12 +222,12 @@ observations:
     - is_table_touched
 
 vision_encoder:
-  # 'resnet18'      — frozen pretrained ResNet18 + SpatialSoftmax (1024-D, not updated by PPO)
-  # 'trainable_cnn' — conv CNN trained end-to-end within the PPO loop
-  type: resnet18
-  # Image dimensions the CNN sees. For 'trainable_cnn', the env resizes to these before
+  # 'frozen_resnet18' — frozen pretrained ResNet18 + SpatialSoftmax (1024-D, not updated by PPO)
+  # 'frozen_cnn'      — frozen pretrained CNN + SpatialSoftmax projection (output_dim-D)
+  type: frozen_resnet18
+  # Image dimensions the CNN sees. For 'frozen_cnn', the env resizes to these before
   # storing observations in the rollout buffer. Smaller values reduce memory pressure.
-  # For 'resnet18' these values are unused (ResNet accepts any resolution).
+  # For 'frozen_resnet18' these values are unused (ResNet accepts any resolution).
   image_height: 108
   image_width: 192
   # CNN architecture (channels, kernel sizes, etc.) is defined in skrl_ppo_cfg.yaml

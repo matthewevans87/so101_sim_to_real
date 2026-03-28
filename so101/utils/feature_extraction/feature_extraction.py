@@ -4,7 +4,7 @@ import torch
 from torchvision.models import resnet18, ResNet18_Weights
 import torch.nn as nn
 
-from so101_utils.feature_extraction.spatial_softmax import (
+from so101.utils.feature_extraction.spatial_softmax import (
     SpatialSoftmax,
 )
 

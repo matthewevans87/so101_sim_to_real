@@ -47,9 +47,9 @@ _project_root = Path(__file__).resolve().parent.parent
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
-from cnn_trainer.data_pipeline.dataset import TelemetryDataset
-from cnn_trainer.model.losses import compute_multitask_loss, compute_multitask_metrics
-from cnn_trainer.model.model import PretrainCnn
+from so101.curate.dataset import TelemetryDataset
+from so101.model.losses import compute_multitask_loss, compute_multitask_metrics
+from so101.model.model import MultiTaskCnn
 
 
 # ── Config loading and validation ─────────────────────────────────────────────
@@ -128,7 +128,7 @@ def _validate_config(cfg: dict) -> None:
 # ── Optimizer and scheduler construction ─────────────────────────────────────
 
 
-def _build_optimizer(model: PretrainCnn, opt_cfg: dict) -> optim.Optimizer:
+def _build_optimizer(model: MultiTaskCnn, opt_cfg: dict) -> optim.Optimizer:
     opt_type = opt_cfg["type"].lower()
     lr = float(opt_cfg["learning_rate"])
     wd = float(opt_cfg["weight_decay"])
@@ -173,7 +173,7 @@ def _build_scheduler(
 
 
 def _run_epoch(
-    model: PretrainCnn,
+    model: MultiTaskCnn,
     loader: DataLoader,
     loss_cfg: dict,
     optimizer: optim.Optimizer | None,
@@ -377,7 +377,7 @@ def main() -> None:
     )
 
     # ── Model ──
-    model = PretrainCnn(
+    model = MultiTaskCnn(
         backbone_cfg=cfg["backbone"],
         heads_cfg=cfg["heads"],
     ).to(device)
@@ -454,7 +454,6 @@ def main() -> None:
             best_val_metric = val_primary
             patience_counter = 0
             torch.save(model.state_dict(), ckpt_dir / "best_model.pt")
-            torch.save(model.backbone_state_dict(), ckpt_dir / "best_backbone.pt")
         else:
             patience_counter += 1
 
@@ -491,7 +490,6 @@ def main() -> None:
 
     # ── Final checkpoints ──
     torch.save(model.state_dict(), ckpt_dir / "final_model.pt")
-    torch.save(model.backbone_state_dict(), ckpt_dir / "final_backbone.pt")
     writer.close()
 
     finished_at = datetime.now(timezone.utc)
@@ -510,9 +508,7 @@ def main() -> None:
         "best_metric_key": best_metric_key,
         "checkpoints": {
             "best_model": str(ckpt_dir / "best_model.pt"),
-            "best_backbone": str(ckpt_dir / "best_backbone.pt"),
             "final_model": str(ckpt_dir / "final_model.pt"),
-            "final_backbone": str(ckpt_dir / "final_backbone.pt"),
         },
         "epoch_log": epoch_log,
     }
@@ -520,9 +516,9 @@ def main() -> None:
         json.dump(report, f, indent=2)
 
     print(f"[train-cnn] Training complete.")
-    print(f"[train-cnn] Report:            {output_dir / 'report.json'}")
-    print(f"[train-cnn] Best backbone:     {ckpt_dir / 'best_backbone.pt'}")
-    print(f"[train-cnn] Final backbone:    {ckpt_dir / 'final_backbone.pt'}")
+    print(f"[train-cnn] Report:      {output_dir / 'report.json'}")
+    print(f"[train-cnn] Best model:  {ckpt_dir / 'best_model.pt'}")
+    print(f"[train-cnn] Final model: {ckpt_dir / 'final_model.pt'}")
 
 
 if __name__ == "__main__":

@@ -59,19 +59,22 @@ class So101LiftCubeCfg(DirectRLEnvCfg):
     NUM_ACTIVE_JOINTS = len(_Y.joints.active)
     action_space = NUM_ACTIVE_JOINTS
 
-    if _Y.vision_encoder.type == "resnet18":
+    if _Y.vision_encoder.type == "frozen_resnet18":
         # Frozen ResNet18 + SpatialSoftmax: 2 × 512 channels = 1024-D features
         observation_space = 1024 + NUM_ACTIVE_JOINTS
-    elif _Y.vision_encoder.type == "trainable_cnn":
-        # Raw pipeline-augmented pixels (resized to configured dims) + joint positions
-        observation_space = (
-            _Y.vision_encoder.image_height * _Y.vision_encoder.image_width * 3
-            + NUM_ACTIVE_JOINTS
-        )
+    elif _Y.vision_encoder.type == "frozen_cnn":
+        # Frozen pretrained CNN + SpatialSoftmax projection → output_dim features
+        if _Y.vision_encoder.backbone is None:
+            raise ValueError(
+                "vision_encoder.backbone must be set when vision_encoder.type == "
+                "'frozen_cnn'. Add a 'backbone:' section to vision_encoder in the "
+                "env config YAML."
+            )
+        observation_space = _Y.vision_encoder.backbone.output_dim + NUM_ACTIVE_JOINTS
     else:
         raise ValueError(
             f"Unknown vision_encoder.type: {_Y.vision_encoder.type!r}. "
-            "Must be 'resnet18' or 'trainable_cnn'."
+            "Must be 'frozen_resnet18' or 'frozen_cnn'."
         )
 
     state_space = 2 * NUM_ACTIVE_JOINTS + sum(

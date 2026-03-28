@@ -97,10 +97,10 @@ parser.add_argument(
     default=None,
     help=(
         "Path to a pretrained CNN backbone checkpoint produced by "
-        "cnn_trainer/train.py (best_backbone.pt or final_backbone.pt). "
-        "Only valid when vision_encoder.type == 'trainable_cnn'. "
-        "Weights are loaded into the policy _cnn module before training "
-        "starts; freeze behaviour is still controlled by cnn_freeze_steps."
+        "train_cnn.py (best_backbone.pt or final_backbone.pt). "
+        "Only valid when vision_encoder.type == 'frozen_cnn'. "
+        "Weights are loaded into the backbone of the frozen CNN feature "
+        "extractor before training starts."
     ),
 )
 
@@ -361,6 +361,19 @@ def main(
     # set the log directory for the environment (works for all environment types)
     env_cfg.log_dir = log_dir
 
+    # Wire the CNN backbone checkpoint path into vision_encoder so the env
+    # constructor loads it via multitask_cnn_from_checkpoint at startup.
+    if args_cli.cnn_backbone_checkpoint:
+        if (
+            getattr(env_cfg, "vision_encoder", None) is None
+            or env_cfg.vision_encoder.type != "frozen_cnn"
+        ):
+            raise ValueError(
+                "--cnn_backbone_checkpoint requires vision_encoder.type == "
+                "'frozen_cnn'.  Switch to a frozen_cnn env config."
+            )
+        env_cfg.vision_encoder.backbone_checkpoint = args_cli.cnn_backbone_checkpoint
+
     # create isaac environment
     env = gym.make(
         args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None
@@ -387,34 +400,7 @@ def main(
         env, ml_framework=args_cli.ml_framework
     )  # same as: `wrap_env(env, wrapper="auto")`
 
-    # configure and instantiate the skrl runner
-    # https://skrl.readthedocs.io/en/latest/api/utils/runner.html
-    _using_trainable_cnn = (
-        getattr(env_cfg, "vision_encoder", None) is not None
-        and env_cfg.vision_encoder.type == "trainable_cnn"
-    )
-    if _using_trainable_cnn:
-        print("[INFO] Using custom runner with trainable CNN policy.")
-        runner = _build_cnn_runner(env, env_cfg, agent_cfg)
-    else:
-        runner = Runner(env, agent_cfg)
-
-    # Optionally load pretrained backbone weights (Generation 2+ runs).
-    # This must happen BEFORE loading a PPO checkpoint so that a full
-    # checkpoint restore (--checkpoint) takes precedence when both flags
-    # are supplied simultaneously.
-    if args_cli.cnn_backbone_checkpoint:
-        if not _using_trainable_cnn:
-            raise ValueError(
-                "--cnn_backbone_checkpoint requires vision_encoder.type == "
-                "'trainable_cnn'.  Switch to a trainable_cnn env config."
-            )
-        _load_backbone_checkpoint(
-            runner,
-            args_cli.cnn_backbone_checkpoint,
-            env_cfg.sim.device,
-            warn_if_also_resuming=resume_path is not None,
-        )
+    runner = Runner(env, agent_cfg)
 
     # load checkpoint (if specified)
     if resume_path:
@@ -426,273 +412,6 @@ def main(
 
     # close the simulator
     env.close()
-
-
-def _load_backbone_checkpoint(
-    runner,
-    backbone_path: str,
-    device: str,
-    warn_if_also_resuming: bool,
-) -> None:
-    """Load pretrained CNN backbone weights into the policy model's _cnn module.
-
-    Validates that all required keys are present and that tensor shapes match
-    the current model before applying the state dict.  Called only when
-    ``vision_encoder.type == 'trainable_cnn'`` (i.e. when *runner* is a
-    ``_ManualRunner``).
-
-    Args:
-        runner: The ``_ManualRunner`` returned by :func:`_build_cnn_runner`.
-        backbone_path: Absolute path to the backbone ``.pt`` file saved by
-            ``cnn_trainer/train.py`` (``best_backbone.pt`` or
-            ``final_backbone.pt``).
-        device: PyTorch device string used for ``torch.load(map_location=...)``.
-        warn_if_also_resuming: If ``True``, emit a warning that the backbone
-            weights may be overwritten by the subsequent PPO checkpoint load.
-    """
-    if warn_if_also_resuming:
-        print(
-            "[WARNING] Both --cnn_backbone_checkpoint and --checkpoint are "
-            "specified.  Backbone weights are loaded first; the subsequent "
-            "--checkpoint restore will overwrite them.  Ensure this is "
-            "intentional (e.g. resuming a run that already used a pretrained "
-            "backbone)."
-        )
-
-    resolved = retrieve_file_path(backbone_path)
-    if not os.path.isfile(resolved):
-        raise FileNotFoundError(f"CNN backbone checkpoint not found: {resolved}")
-
-    print(f"[INFO] Loading pretrained CNN backbone from: {resolved}")
-    backbone_state: dict[str, torch.Tensor] = torch.load(
-        resolved, map_location=device, weights_only=True
-    )
-
-    cnn_module = runner.agent.policy._cnn
-    model_state = cnn_module.state_dict()
-
-    missing = set(model_state.keys()) - set(backbone_state.keys())
-    unexpected = set(backbone_state.keys()) - set(model_state.keys())
-    shape_errors = {
-        k
-        for k in set(backbone_state.keys()) & set(model_state.keys())
-        if backbone_state[k].shape != model_state[k].shape
-    }
-
-    if missing:
-        raise ValueError(
-            f"Backbone checkpoint is missing keys required by the model: "
-            f"{sorted(missing)}.\n"
-            "Ensure that backbone.* in cnn_pretrain.yaml exactly matches "
-            "models.policy.cnn in skrl_ppo_cfg.yaml."
-        )
-    if shape_errors:
-        raise ValueError(
-            f"Backbone checkpoint has shape mismatches for keys: "
-            f"{sorted(shape_errors)}.\n"
-            "Ensure that backbone.* in cnn_pretrain.yaml exactly matches "
-            "models.policy.cnn in skrl_ppo_cfg.yaml."
-        )
-    if unexpected:
-        print(
-            f"[WARNING] Backbone checkpoint contains unexpected keys "
-            f"(ignored): {sorted(unexpected)}"
-        )
-
-    cnn_module.load_state_dict(backbone_state, strict=False)
-    print(
-        f"[INFO] Pretrained CNN backbone loaded successfully "
-        f"({len(model_state)} tensors)."
-    )
-
-
-def _build_cnn_runner(env, env_cfg, agent_cfg: dict):
-    """Build a PPO runner with trainable CNN policy.
-
-    Used when ``vision_encoder.type == 'trainable_cnn'``.  skrl's :class:`Runner`
-    constructs models from a YAML description and cannot inject custom ``nn.Module``
-    classes, so we assemble PPO manually here.
-
-    The returned object exposes ``.agent`` (for checkpoint loading) and ``.run()``
-    so it is a drop-in replacement for the :class:`Runner` in the caller.
-    """
-    import copy
-
-    from skrl.agents.torch.ppo import PPO_DEFAULT_CONFIG
-    from skrl.memories.torch import RandomMemory
-    from skrl.resources.preprocessors.torch import RunningStandardScaler
-    from skrl.resources.schedulers.torch import KLAdaptiveLR
-    from skrl.trainers.torch import SequentialTrainer
-
-    from so101_rl.nnmodules.cnn_skrl_models import (
-        CnnDeterministicValue,
-        CnnGaussianPolicy,
-        MonitoredCnnPPO,
-    )
-
-    device = env_cfg.sim.device
-    ve = env_cfg.vision_encoder
-    num_joints = len(env_cfg.joints.active)
-    agent_section = agent_cfg["agent"]
-
-    if "cnn_learning_rate" not in agent_section:
-        raise ValueError(
-            "agent.cnn_learning_rate must be set explicitly when "
-            "vision_encoder.type == 'trainable_cnn'."
-        )
-    if "cnn_freeze_steps" not in agent_section:
-        raise ValueError(
-            "agent.cnn_freeze_steps must be set explicitly when "
-            "vision_encoder.type == 'trainable_cnn'. "
-            "Set to 0 to disable CNN weight freezing or -1 to keep it frozen "
-            "for the full run."
-        )
-
-    # Validate CNN architecture config is present in the agent config.
-    _models_policy = agent_cfg.get("models", {}).get("policy", {})
-    _models_value = agent_cfg.get("models", {}).get("value", {})
-    if "cnn" not in _models_policy:
-        raise KeyError(
-            "agent_cfg['models']['policy']['cnn'] is required when "
-            "vision_encoder.type == 'trainable_cnn'. "
-            "Add a 'cnn:' subsection to models.policy in skrl_ppo_cfg.yaml."
-        )
-    if "head_dims" not in _models_policy:
-        raise KeyError(
-            "agent_cfg['models']['policy']['head_dims'] is required when "
-            "vision_encoder.type == 'trainable_cnn'. "
-            "Add 'head_dims:' to models.policy in skrl_ppo_cfg.yaml."
-        )
-    if "hidden_dims" not in _models_value:
-        raise KeyError(
-            "agent_cfg['models']['value']['hidden_dims'] is required when "
-            "vision_encoder.type == 'trainable_cnn'. "
-            "Add 'hidden_dims:' to models.value in skrl_ppo_cfg.yaml."
-        )
-
-    cnn_cfg = _models_policy["cnn"]
-    head_dims = _models_policy["head_dims"]
-    value_hidden_dims = _models_value["hidden_dims"]
-
-    # ── Policy (actor): trainable CNN + MLP head ───────────────────────────
-    policy_model = CnnGaussianPolicy(
-        observation_space=env.observation_space,
-        action_space=env.action_space,
-        device=device,
-        image_height=ve.image_height,
-        image_width=ve.image_width,
-        num_joints=num_joints,
-        cnn_channels=list(cnn_cfg["channels"]),
-        cnn_kernel_sizes=list(cnn_cfg["kernel_sizes"]),
-        cnn_strides=list(cnn_cfg["strides"]),
-        cnn_mlp_hidden_dims=list(cnn_cfg["mlp_hidden_dims"]),
-        cnn_output_dim=cnn_cfg["output_dim"],
-        head_hidden_dims=list(head_dims),
-    )
-
-    # ── Value (critic): MLP on joint positions (proprioceptive tail of actor obs) ─
-    # skrl's single_agent_train passes the full policy observation as `states` to
-    # the value function; it does NOT route the env's separate "critic" obs.  To
-    # keep the critic MLP tractable we slice the last num_joints dims (joint
-    # positions), which are always appended at the end of the actor observation.
-    value_model = CnnDeterministicValue(
-        observation_space=env.observation_space,
-        action_space=env.action_space,
-        device=device,
-        num_proprioception=num_joints,
-        hidden_dims=list(value_hidden_dims),
-    )
-
-    # ── Rollout memory ─────────────────────────────────────────────────────
-    rollouts = agent_section.get("rollouts", 32)
-    memory = RandomMemory(memory_size=rollouts, num_envs=env.num_envs, device=device)
-
-    # ── PPO config ─────────────────────────────────────────────────────────
-    cfg = copy.deepcopy(PPO_DEFAULT_CONFIG)
-
-    # Keys that need special handling (not a direct copy from agent YAML)
-    _special = {
-        "class",
-        "experiment",
-        "state_preprocessor",
-        "state_preprocessor_kwargs",
-        "value_preprocessor",
-        "value_preprocessor_kwargs",
-        "cnn_learning_rate",
-        "cnn_freeze_steps",
-        "learning_rate_scheduler",
-        "learning_rate_scheduler_kwargs",
-        "rewards_shaper_scale",
-        "viz_interval",  # consumed by MonitoredCnnPPO, not the PPO config dict
-    }
-    for k, v in agent_section.items():
-        if k not in _special:
-            cfg[k] = v
-
-    # Disable state preprocessor: RunningStandardScaler would corrupt pixel values.
-    cfg["state_preprocessor"] = None
-    cfg["state_preprocessor_kwargs"] = {}
-
-    # Keep value preprocessor to normalise scalar value targets.
-    cfg["value_preprocessor"] = RunningStandardScaler
-    cfg["value_preprocessor_kwargs"] = {"size": 1, "device": device}
-
-    # Rewards shaper
-    shaper_scale = agent_section.get("rewards_shaper_scale")
-    if shaper_scale is not None:
-        _scale = float(shaper_scale)  # capture in closure
-        cfg["rewards_shaper"] = lambda tensor, timestep, timesteps: tensor * _scale
-
-    # Learning rate scheduler
-    if agent_section.get("learning_rate_scheduler") == "KLAdaptiveLR":
-        cfg["learning_rate_scheduler"] = KLAdaptiveLR
-        cfg["learning_rate_scheduler_kwargs"] = agent_section.get(
-            "learning_rate_scheduler_kwargs", {"kl_threshold": 0.008}
-        )
-
-    # Experiment directories (already set by caller before env creation)
-    exp = agent_section["experiment"]
-    cfg["experiment"]["directory"] = exp["directory"]
-    cfg["experiment"]["experiment_name"] = exp["experiment_name"]
-    cfg["experiment"]["write_interval"] = exp.get("write_interval", "auto")
-    cfg["experiment"]["checkpoint_interval"] = exp.get("checkpoint_interval", "auto")
-
-    # ── Assemble PPO agent ─────────────────────────────────────────────────
-    ppo_agent = MonitoredCnnPPO(
-        cnn_module=policy_model._cnn,
-        cnn_learning_rate=float(agent_section["cnn_learning_rate"]),
-        cnn_freeze_steps=int(agent_section["cnn_freeze_steps"]),
-        viz_interval=agent_section.get("viz_interval", 500),
-        models={"policy": policy_model, "value": value_model},
-        memory=memory,
-        cfg=cfg,
-        observation_space=env.observation_space,
-        action_space=env.action_space,
-        device=device,
-    )
-
-    # ── Trainer ───────────────────────────────────────────────────────────
-    trainer_cfg = agent_cfg.get("trainer", {})
-    trainer = SequentialTrainer(
-        env=env,
-        agents=ppo_agent,
-        cfg={
-            "timesteps": trainer_cfg.get("timesteps", 1_000_000),
-            "environment_info": trainer_cfg.get("environment_info", "log"),
-        },
-    )
-
-    class _ManualRunner:
-        """Thin wrapper so callers can use `runner.agent.load()` and `runner.run()`."""
-
-        def __init__(self, agent, trainer):
-            self.agent = agent
-            self._trainer = trainer
-
-        def run(self):
-            self._trainer.train()
-
-    return _ManualRunner(ppo_agent, trainer)
 
 
 if __name__ == "__main__":

@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import types
+import typing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import get_type_hints
@@ -20,10 +22,30 @@ import yaml
 # ---------------------------------------------------------------------------
 
 
+def _optional_dataclass_type(ft: object) -> type | None:
+    """Return the inner dataclass type if *ft* is ``Optional[SomeDataclass]``.
+
+    Handles both ``X | None`` (Python 3.10+ ``types.UnionType``) and
+    ``typing.Optional[X]`` / ``typing.Union[X, None]``.
+    """
+    if isinstance(ft, types.UnionType):
+        args = ft.__args__
+    elif getattr(ft, "__origin__", None) is typing.Union:
+        args = ft.__args__
+    else:
+        return None
+    non_none = [a for a in args if a is not type(None)]
+    if len(non_none) == 1 and dataclasses.is_dataclass(non_none[0]):
+        return non_none[0]
+    return None
+
+
 def _from_dict(cls: type, data: dict) -> object:
     """Recursively construct a dataclass from a mapping.
 
-    Raises KeyError for unknown or missing keys at every level.
+    Raises KeyError for unknown keys or missing *required* keys (fields with
+    no default value or default factory).  Fields that carry a default are
+    silently omitted from ``data`` and receive their default value instead.
     """
     if not dataclasses.is_dataclass(cls):
         return data
@@ -35,17 +57,31 @@ def _from_dict(cls: type, data: dict) -> object:
     if unknown:
         raise KeyError(f"Unknown keys in {cls.__name__}: {sorted(unknown)}")
 
-    missing = known - set(data)
+    # Only flag fields that have no default as missing.
+    required = {
+        f.name
+        for f in dataclasses.fields(cls)
+        if f.default is dataclasses.MISSING
+        and f.default_factory is dataclasses.MISSING  # type: ignore[misc]
+    }
+    missing = required - set(data)
     if missing:
         raise KeyError(f"Missing required keys in {cls.__name__}: {sorted(missing)}")
 
     kwargs: dict = {}
     for f in dataclasses.fields(cls):
+        if f.name not in data:
+            # Field has a default; let the dataclass constructor use it.
+            continue
         val = data[f.name]
         ft = hints[f.name]
+        inner_dc = _optional_dataclass_type(ft)
         if dataclasses.is_dataclass(ft):
             assert isinstance(ft, type)
             kwargs[f.name] = _from_dict(ft, val)
+        elif inner_dc is not None:
+            # Optional[SomeDataclass] — recurse only when val is not None.
+            kwargs[f.name] = None if val is None else _from_dict(inner_dc, val)
         elif getattr(ft, "__origin__", None) is tuple and isinstance(val, list):
             kwargs[f.name] = tuple(val)
         else:
@@ -444,20 +480,36 @@ class ObservationsCfg:
 
 
 @dataclass
+class CnnBackboneCfg:
+    """Architecture for the CNN backbone inside :class:`~so101.model.model.MultiTaskCnn`.
+
+    Used by the ``frozen_cnn`` vision encoder type.  Must be set in the env
+    config YAML under ``vision_encoder.backbone``.
+    """
+
+    channels: list
+    kernel_sizes: list
+    strides: list
+    mlp_hidden_dims: list
+    output_dim: int
+
+
+@dataclass
 class VisionEncoderCfg:
     """Configuration for the vision feature extractor used in the actor policy.
 
     type:
-        'resnet18'      — frozen pretrained ResNet18 + SpatialSoftmax (1024-D output).
-                          The CNN is NOT updated during PPO training.
-        'trainable_cnn' — lightweight conv CNN that IS updated by PPO backpropagation.
-                          Raw pipeline-augmented pixels are passed as policy observations.
-                          CNN architecture is defined in skrl_ppo_cfg.yaml models.policy.cnn.
+        'frozen_resnet18' — frozen pretrained ResNet18 + SpatialSoftmax (1024-D output).
+        'frozen_cnn'      — frozen pretrained lightweight CNN + SpatialSoftmax.
+                            Architecture is defined in ``backbone``.  Backbone weights
+                            are loaded from ``backbone_checkpoint`` at env construction.
     """
 
     type: str
     image_height: int
     image_width: int
+    backbone: CnnBackboneCfg | None = None
+    backbone_checkpoint: str | None = None
 
 
 @dataclass

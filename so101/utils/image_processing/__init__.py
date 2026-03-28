@@ -1,18 +1,15 @@
 """
-DEPRECATED: This module has been moved to so101.utils.image_processing
+Image Processing Utilities
 
-This file is kept for backward compatibility and re-exports from the new location.
-Please update your imports to use: from so101.utils.image_processing import ...
-
-To install so101:
-    cd /path/to/so101_sim_to_real
-    pip install -e .
+Provides image augmentation and distortion pipeline for domain randomization
+and sim-to-real transfer.
 """
 
-# Re-export everything from the new location
-from so101.utils.image_processing import (
+from .image_pipeline import (
     ImagePipeline,
     ImagePipelineStep,
+    Uint8ToFloatCHWPipelineStep,
+    ResizePipelineStep,
     JpegCompressionPipelineStep,
     MotionBlurPipelineStep,
     GaussianBlurPipelineStep,
@@ -20,11 +17,15 @@ from so101.utils.image_processing import (
     CheapWebcamEffectPipelineStep,
     CameraBrightnessPipelineStep,
     CameraContrastPipelineStep,
+    ImageNetNormalizationPipelineStep,
+    ClampPipelineStep,
 )
 
 __all__ = [
     "ImagePipeline",
     "ImagePipelineStep",
+    "Uint8ToFloatCHWPipelineStep",
+    "ResizePipelineStep",
     "JpegCompressionPipelineStep",
     "MotionBlurPipelineStep",
     "GaussianBlurPipelineStep",
@@ -32,4 +33,6 @@ __all__ = [
     "CheapWebcamEffectPipelineStep",
     "CameraBrightnessPipelineStep",
     "CameraContrastPipelineStep",
+    "ImageNetNormalizationPipelineStep",
+    "ClampPipelineStep",
 ]

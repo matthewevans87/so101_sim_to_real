@@ -8,10 +8,12 @@ from __future__ import annotations
 import math
 import os
 
-from so101_utils.feature_extraction.feature_extraction import (
+from so101.utils.feature_extraction.feature_extraction import (
+    CnnSpatialSoftmaxFeatureExtractor,
     ResNet18SpatialSoftmaxFeatureExtractor,
 )
-from so101_utils.image_processing import (
+from so101.model.model import MultiTaskCnn, multitask_cnn_from_checkpoint
+from so101.utils.image_processing import (
     CameraBrightnessPipelineStep,
     CameraContrastPipelineStep,
     CheapWebcamEffectPipelineStep,
@@ -256,7 +258,7 @@ class So101LiftCube(DirectRLEnv):
                 )
             )
         _vision_type = self.cfg.vision_encoder.type
-        if _vision_type == "resnet18":
+        if _vision_type == "frozen_resnet18":
             self.vision_feature_extractor = ResNet18SpatialSoftmaxFeatureExtractor(
                 device=self.device
             )
@@ -265,22 +267,40 @@ class So101LiftCube(DirectRLEnv):
                 _image_pipeline_steps.insert(1, ResizePipelineStep((224, 224)))
             _image_pipeline_steps.append(ImageNetNormalizationPipelineStep())
             _image_pipeline_steps.append(ClampPipelineStep())
-        elif _vision_type == "trainable_cnn":
-            # Always resize to the configured resolution so that the flat image obs
-            # dimensions match vision_encoder.image_height × image_width exactly.
+        elif _vision_type == "frozen_cnn":
+            ve = self.cfg.vision_encoder
+            if ve.backbone is None:
+                raise ValueError(
+                    "vision_encoder.backbone must be set when "
+                    "vision_encoder.type == 'frozen_cnn'."
+                )
             _image_pipeline_steps.insert(
                 1,
-                ResizePipelineStep(
-                    (
-                        self.cfg.vision_encoder.image_height,
-                        self.cfg.vision_encoder.image_width,
-                    )
-                ),
+                ResizePipelineStep((ve.image_height, ve.image_width)),
+            )
+            backbone_cfg = {
+                "in_channels": 3,
+                "channels": list(ve.backbone.channels),
+                "kernel_sizes": list(ve.backbone.kernel_sizes),
+                "strides": list(ve.backbone.strides),
+                "mlp_hidden_dims": list(ve.backbone.mlp_hidden_dims),
+                "output_dim": ve.backbone.output_dim,
+            }
+            if ve.backbone_checkpoint is not None:
+                _model = multitask_cnn_from_checkpoint(
+                    path=ve.backbone_checkpoint,
+                    backbone_cfg=backbone_cfg,
+                    device=self.device,
+                )
+            else:
+                _model = MultiTaskCnn(backbone_cfg=backbone_cfg, heads_cfg=None)
+            self.vision_feature_extractor = CnnSpatialSoftmaxFeatureExtractor(
+                model=_model, device=self.device
             )
         else:
             raise ValueError(
                 f"Unknown vision_encoder.type: {_vision_type!r}. "
-                "Must be 'resnet18' or 'trainable_cnn'."
+                "Must be 'frozen_resnet18' or 'frozen_cnn'."
             )
         self.image_pipeline = ImagePipeline(_image_pipeline_steps)
 
@@ -408,7 +428,7 @@ class So101LiftCube(DirectRLEnv):
         self.robot.set_joint_position_target(self._target_pos, joint_ids=self._dof_idx)
 
     def _get_observations(self) -> dict:
-        """Return visual features (ResNet18) + joint positions."""
+        """Return visual features + joint positions."""
 
         # Raw camera RGB: (num_envs, H, W, 3), uint8
         camera_data = self.camera.data.output["rgb"]
@@ -419,7 +439,7 @@ class So101LiftCube(DirectRLEnv):
                 raise RuntimeError(
                     "cfg.log_dir must be set before the environment is created."
                 )
-            pre_dir = os.path.join(self.cfg.log_dir, "images", "pre_processing")
+            pre_dir = os.path.join(self.cfg.log_dir, "debug_images", "pre_processing")
             os.makedirs(pre_dir, exist_ok=True)
             # camera_data is (N, H, W, 3) uint8 — convert to (3, H, W) float for save_image
             save_image(
@@ -436,7 +456,7 @@ class So101LiftCube(DirectRLEnv):
                 raise RuntimeError(
                     "cfg.log_dir must be set before the environment is created."
                 )
-            post_dir = os.path.join(self.cfg.log_dir, "images", "post_processing")
+            post_dir = os.path.join(self.cfg.log_dir, "debug_images", "post_processing")
             os.makedirs(post_dir, exist_ok=True)
             save_image(
                 images[0],  # (3, H, W)
@@ -447,20 +467,11 @@ class So101LiftCube(DirectRLEnv):
         q = self.joint_pos[:, self._dof_idx]  # (N, num_joints)
         dq = self.joint_vel[:, self._dof_idx]  # (N, num_joints) - Joint velocities
 
-        # Actor observations: strategy depends on vision_encoder.type
-        if self.cfg.vision_encoder.type == "resnet18":
-            # Frozen ResNet18 + SpatialSoftmax produces 1024-D features
-            visual_features = self.vision_feature_extractor.extract(images)  # (N, 1024)
-            actor_obs = torch.cat(
-                [visual_features, q], dim=-1
-            )  # (N, 1024 + num_joints)
-        else:
-            # Trainable CNN lives inside the skrl policy model; pass pipeline-augmented
-            # pixels as flat observations so PPO can backprop through the CNN.
-            N = images.shape[0]
-            actor_obs = torch.cat(
-                [images.reshape(N, -1), q], dim=-1
-            )  # (N, H*W*3 + num_joints)
+        # Actor observations: frozen feature extractor (RN18 or CNN) + joint positions
+        visual_features = self.vision_feature_extractor.extract(
+            images
+        )  # (N, feature_dim)
+        actor_obs = torch.cat([visual_features, q], dim=-1)
 
         # Compute on first observation call (when _get_observations is called from elf._env.reset())
         if self.step_metrics is None:
