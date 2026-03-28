@@ -92,15 +92,14 @@ parser.add_argument(
     help="Root artifacts directory for this run (e.g. /path/to/artifacts/2026-03-11_10-20-38).",
 )
 parser.add_argument(
-    "--cnn_backbone_checkpoint",
+    "--cnn_checkpoint",
     type=str,
     default=None,
     help=(
-        "Path to a pretrained CNN backbone checkpoint produced by "
-        "train_cnn.py (best_backbone.pt or final_backbone.pt). "
+        "Path to a pretrained MultiTaskCnn checkpoint produced by "
+        "train_cnn.py (best_model.pt or final_model.pt). "
         "Only valid when vision_encoder.type == 'frozen_cnn'. "
-        "Weights are loaded into the backbone of the frozen CNN feature "
-        "extractor before training starts."
+        "Weights are loaded into the frozen CNN feature extractor before training starts."
     ),
 )
 
@@ -361,18 +360,18 @@ def main(
     # set the log directory for the environment (works for all environment types)
     env_cfg.log_dir = log_dir
 
-    # Wire the CNN backbone checkpoint path into vision_encoder so the env
+    # Wire the CNN checkpoint path into vision_encoder so the env
     # constructor loads it via multitask_cnn_from_checkpoint at startup.
-    if args_cli.cnn_backbone_checkpoint:
+    if args_cli.cnn_checkpoint:
         if (
             getattr(env_cfg, "vision_encoder", None) is None
             or env_cfg.vision_encoder.type != "frozen_cnn"
         ):
             raise ValueError(
-                "--cnn_backbone_checkpoint requires vision_encoder.type == "
+                "--cnn_checkpoint requires vision_encoder.type == "
                 "'frozen_cnn'.  Switch to a frozen_cnn env config."
             )
-        env_cfg.vision_encoder.backbone_checkpoint = args_cli.cnn_backbone_checkpoint
+        env_cfg.vision_encoder.cnn_checkpoint = args_cli.cnn_checkpoint
 
     # create isaac environment
     env = gym.make(

@@ -247,9 +247,7 @@ class MultiTaskCnn(nn.Module):
             model = MultiTaskCnn(backbone_cfg=..., heads_cfg=None)
             model.backbone.load_state_dict(pretrain_model.backbone_state_dict())
 
-        This is used by ``train_cnn.py`` to save ``best_backbone.pt`` /
-        ``final_backbone.pt`` and by the RL training script when
-        ``--cnn_backbone_checkpoint`` is specified.
+        This is used by the RL training script when ``--cnn_checkpoint`` is specified.
         """
         prefix = "backbone."
         return {

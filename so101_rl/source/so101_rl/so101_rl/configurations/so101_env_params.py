@@ -502,14 +502,14 @@ class VisionEncoderCfg:
         'frozen_resnet18' — frozen pretrained ResNet18 + SpatialSoftmax (1024-D output).
         'frozen_cnn'      — frozen pretrained lightweight CNN + SpatialSoftmax.
                             Architecture is defined in ``backbone``.  Backbone weights
-                            are loaded from ``backbone_checkpoint`` at env construction.
+                            are loaded from ``cnn_checkpoint`` at env construction.
     """
 
     type: str
     image_height: int
     image_width: int
     backbone: CnnBackboneCfg | None = None
-    backbone_checkpoint: str | None = None
+    cnn_checkpoint: str | None = None
 
 
 @dataclass

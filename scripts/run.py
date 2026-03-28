@@ -364,8 +364,8 @@ def cmd_train(args) -> None:
         cmd += ["--max_iterations", str(args.iters)]
     if args.checkpoint:
         cmd += ["--checkpoint", str(args.checkpoint)]
-    if args.backbone:
-        cmd += ["--cnn_backbone_checkpoint", str(args.backbone)]
+    if args.cnn_checkpoint:
+        cmd += ["--cnn_checkpoint", str(args.cnn_checkpoint)]
     if args.seed is not None:
         cmd += ["--seed", str(args.seed)]
 
@@ -843,7 +843,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--iters", type=int, metavar="N", help="Override max training iterations"
     )
     p.add_argument("--checkpoint", metavar="PATH", help="Resume from checkpoint")
-    p.add_argument("--backbone", metavar="PATH", help="Pretrained CNN backbone .pt")
+    p.add_argument(
+        "--cnn-checkpoint",
+        metavar="PATH",
+        help="Pretrained MultiTaskCnn checkpoint (.pt)",
+    )
     p.add_argument("--seed", type=int, metavar="N", help="RNG seed")
     p.add_argument("--display", type=int, metavar="N", help="X display socket number")
     p.add_argument(

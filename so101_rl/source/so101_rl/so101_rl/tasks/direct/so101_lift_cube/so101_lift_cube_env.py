@@ -286,9 +286,9 @@ class So101LiftCube(DirectRLEnv):
                 "mlp_hidden_dims": list(ve.backbone.mlp_hidden_dims),
                 "output_dim": ve.backbone.output_dim,
             }
-            if ve.backbone_checkpoint is not None:
+            if ve.cnn_checkpoint is not None:
                 _model = multitask_cnn_from_checkpoint(
-                    path=ve.backbone_checkpoint,
+                    path=ve.cnn_checkpoint,
                     backbone_cfg=backbone_cfg,
                     device=self.device,
                 )

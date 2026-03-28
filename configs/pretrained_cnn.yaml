@@ -224,7 +224,7 @@ observations:
 vision_encoder:
   # 'frozen_resnet18' — frozen pretrained ResNet18 + SpatialSoftmax (1024-D)
   # 'frozen_cnn'      — frozen pretrained CNN + SpatialSoftmax projection (output_dim-D)
-  #                     Backbone weights loaded via --cnn_backbone_checkpoint.
+  #                     Model weights loaded via --cnn_checkpoint.
   type: frozen_cnn
   # Image dimensions passed to the CNN. The env's ResizePipelineStep resizes to these.
   # 16:9 aspect ratio matching the physical Arducam 1080P (1920x1080) camera.
