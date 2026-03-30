@@ -59,6 +59,21 @@ debug:
   enable_gripper_arrow_markers: false
   enable_tip_markers: false
   enable_camera_frame_markers: false
+  vision_debug:
+    enabled: false
+    interval: 500
+    num_envs_logged: 1
+    raw_image:
+      enabled: true
+    pipelined_image:
+      enabled: true
+    conv_layer_maps:
+      enabled: true
+      max_channels: 16
+    activation_heatmap:
+      enabled: true
+    keypoints:
+      enabled: true
 
 behavior:
   binary_gripper_action:
@@ -223,7 +238,7 @@ observations:
 
 vision_encoder:
   # 'frozen_resnet18' — frozen pretrained ResNet18 + SpatialSoftmax (1024-D, not updated by PPO)
-  # 'frozen_cnn'      — frozen pretrained CNN + SpatialSoftmax projection (output_dim-D)
+  # 'frozen_cnn'      — frozen pretrained CNN + SpatialSoftmax (2×channels[-1]-D)
   type: frozen_resnet18
   # Image dimensions the CNN sees. For 'frozen_cnn', the env resizes to these before
   # storing observations in the rollout buffer. Smaller values reduce memory pressure.

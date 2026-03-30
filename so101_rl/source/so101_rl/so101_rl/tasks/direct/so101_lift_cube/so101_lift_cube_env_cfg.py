@@ -63,14 +63,18 @@ class So101LiftCubeCfg(DirectRLEnvCfg):
         # Frozen ResNet18 + SpatialSoftmax: 2 × 512 channels = 1024-D features
         observation_space = 1024 + NUM_ACTIVE_JOINTS
     elif _Y.vision_encoder.type == "frozen_cnn":
-        # Frozen pretrained CNN + SpatialSoftmax projection → output_dim features
+        # CnnSpatialSoftmaxFeatureExtractor bypasses the backbone MLP and feeds the
+        # final conv layer output through a fresh SpatialSoftmax, producing
+        # 2 * channels[-1] features — NOT backbone.output_dim.
         if _Y.vision_encoder.backbone is None:
             raise ValueError(
                 "vision_encoder.backbone must be set when vision_encoder.type == "
                 "'frozen_cnn'. Add a 'backbone:' section to vision_encoder in the "
                 "env config YAML."
             )
-        observation_space = _Y.vision_encoder.backbone.output_dim + NUM_ACTIVE_JOINTS
+        observation_space = (
+            2 * _Y.vision_encoder.backbone.channels[-1] + NUM_ACTIVE_JOINTS
+        )
     else:
         raise ValueError(
             f"Unknown vision_encoder.type: {_Y.vision_encoder.type!r}. "

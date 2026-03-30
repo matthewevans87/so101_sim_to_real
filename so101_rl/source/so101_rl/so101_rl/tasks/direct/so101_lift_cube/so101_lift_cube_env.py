@@ -57,6 +57,7 @@ from so101_rl.helpers.variations import (
     randomize_env_lights,
 )
 from .so101_lift_cube_env_cfg import So101LiftCubeCfg
+from so101_rl.viz.vision_debug import VisionDebugLogger
 from so101_rl.env_pipeline import (
     StepContext,
     MetricPipeline,
@@ -297,12 +298,26 @@ class So101LiftCube(DirectRLEnv):
             self.vision_feature_extractor = CnnSpatialSoftmaxFeatureExtractor(
                 model=_model, device=self.device
             )
+            _image_pipeline_steps.append(ClampPipelineStep())
         else:
             raise ValueError(
                 f"Unknown vision_encoder.type: {_vision_type!r}. "
                 "Must be 'frozen_resnet18' or 'frozen_cnn'."
             )
         self.image_pipeline = ImagePipeline(_image_pipeline_steps)
+
+        _vd_cfg = self.cfg.debug.vision_debug
+        if _vd_cfg.enabled:
+            if self.cfg.log_dir is None:
+                raise ValueError(
+                    "cfg.log_dir must be set before the environment is created "
+                    "when debug.vision_debug.enabled is True."
+                )
+        self._vision_debug_logger = VisionDebugLogger(
+            extractor=self.vision_feature_extractor,
+            log_dir=self.cfg.log_dir or "",
+            cfg=_vd_cfg,
+        )
 
     # Called by super class to setup the scene
     def _setup_scene(self):
@@ -471,6 +486,10 @@ class So101LiftCube(DirectRLEnv):
         visual_features = self.vision_feature_extractor.extract(
             images
         )  # (N, feature_dim)
+
+        # Log vision debug visualisations to TensorBoard (no-op when disabled)
+        self._vision_debug_logger.log(camera_data, images, self.common_step_counter)
+
         actor_obs = torch.cat([visual_features, q], dim=-1)
 
         # Compute on first observation call (when _get_observations is called from elf._env.reset())

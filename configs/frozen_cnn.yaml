@@ -59,6 +59,21 @@ debug:
   enable_gripper_arrow_markers: false
   enable_tip_markers: false
   enable_camera_frame_markers: false
+  vision_debug:
+    enabled: true
+    interval: 500
+    num_envs_logged: 1
+    raw_image:
+      enabled: true
+    pipelined_image:
+      enabled: true
+    conv_layer_maps:
+      enabled: true
+      max_channels: 16
+    activation_heatmap:
+      enabled: true
+    keypoints:
+      enabled: true
 
 behavior:
   binary_gripper_action:
@@ -223,7 +238,7 @@ observations:
 
 vision_encoder:
   # 'frozen_resnet18' — frozen pretrained ResNet18 + SpatialSoftmax (1024-D)
-  # 'frozen_cnn'      — frozen pretrained CNN + SpatialSoftmax projection (output_dim-D)
+  # 'frozen_cnn'      — frozen pretrained CNN + SpatialSoftmax (2×channels[-1]-D = 1024-D)
   #                     Model weights loaded via --cnn_checkpoint.
   type: frozen_cnn
   # Image dimensions passed to the CNN. The env's ResizePipelineStep resizes to these.
@@ -233,8 +248,8 @@ vision_encoder:
   image_width: 192
   # CNN backbone architecture — must match the pretraining config exactly.
   backbone:
-    channels: [32, 64, 128, 128]
+    channels: [64, 128, 256, 512]
     kernel_sizes: [5, 4, 3, 3]
     strides: [2, 2, 2, 1]
-    mlp_hidden_dims: [256]
+    mlp_hidden_dims: [512]
     output_dim: 256

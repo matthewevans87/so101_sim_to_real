@@ -45,7 +45,7 @@ collect:
   sample_interval: 8
 
   # [required] Stop collection after N complete episodes across all envs.
-  episodes: 1000
+  episodes: 10000
 
   # Number of samples to buffer before flushing an NPZ shard to disk.
   # null uses the collect_telemetry.py default (2048).

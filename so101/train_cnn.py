@@ -47,7 +47,7 @@ _project_root = Path(__file__).resolve().parent.parent
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
-from so101.curate.dataset import TelemetryDataset
+from so101.curate.dataset import TelemetryDataset, ShardSequentialSampler
 from so101.model.losses import compute_multitask_loss, compute_multitask_metrics
 from so101.model.model import MultiTaskCnn
 
@@ -344,8 +344,15 @@ def main() -> None:
                 f"Manifest not found: {p}. " "Run 'curate' before 'train-cnn'."
             )
 
+    max_cached_shards = train_cfg.get("max_cached_shards")  # None = unbounded
+    if max_cached_shards is not None:
+        max_cached_shards = int(max_cached_shards)
+
     train_ds = TelemetryDataset(
-        train_manifest, image_mean=image_mean, image_std=image_std
+        train_manifest,
+        image_mean=image_mean,
+        image_std=image_std,
+        max_cached_shards=max_cached_shards,
     )
     val_ds = TelemetryDataset(val_manifest, image_mean=image_mean, image_std=image_std)
     print(f"[train-cnn] Dataset sizes — train: {len(train_ds)}, val: {len(val_ds)}")
@@ -361,12 +368,11 @@ def main() -> None:
     train_loader = DataLoader(
         train_ds,
         batch_size=int(train_cfg["batch_size"]),
-        shuffle=True,
+        sampler=ShardSequentialSampler(train_ds, generator=g),
         num_workers=int(train_cfg["num_workers"]),
         pin_memory=bool(train_cfg["pin_memory"]),
         drop_last=False,
         worker_init_fn=_seed_worker,
-        generator=g,
     )
     val_loader = DataLoader(
         val_ds,

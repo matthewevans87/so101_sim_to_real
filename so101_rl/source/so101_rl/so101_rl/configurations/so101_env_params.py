@@ -208,11 +208,35 @@ class SaveImagesCfg:
 
 
 @dataclass
+class VisionDebugItemCfg:
+    enabled: bool
+
+
+@dataclass
+class ConvLayerMapsCfg:
+    enabled: bool
+    max_channels: int  # max feature channels to tile per layer
+
+
+@dataclass
+class VisionDebugCfg:
+    enabled: bool
+    interval: int  # log every N environment steps
+    num_envs_logged: int  # number of envs visualised (taken from env 0..N)
+    raw_image: VisionDebugItemCfg
+    pipelined_image: VisionDebugItemCfg
+    conv_layer_maps: ConvLayerMapsCfg
+    activation_heatmap: VisionDebugItemCfg
+    keypoints: VisionDebugItemCfg
+
+
+@dataclass
 class DebugCfg:
     save_images: SaveImagesCfg
     enable_gripper_arrow_markers: bool
     enable_tip_markers: bool
     enable_camera_frame_markers: bool
+    vision_debug: VisionDebugCfg
 
 
 @dataclass

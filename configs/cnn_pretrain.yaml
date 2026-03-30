@@ -59,10 +59,10 @@ image_normalization: null  # set to {mean: [...], std: [...]} to enable
 # These values MUST match models.policy.cnn in skrl_ppo_cfg.yaml.
 backbone:
   in_channels: 3
-  channels:       [32, 64, 128, 128]
+  channels:       [64, 128, 256, 512]
   kernel_sizes:   [5,  4,  3,   3]
   strides:        [2,  2,  2,   1]
-  mlp_hidden_dims: [256]
+  mlp_hidden_dims: [512]
   output_dim: 256
 
 # ── Prediction heads ──────────────────────────────────────────────────────────
@@ -111,8 +111,13 @@ training:
     T_max_epochs: 100        # Must equal num_epochs for a full cosine cycle
     eta_min: 1.0e-5
 
-  # DataLoader settings
+  # DataLoader settings.
+  # ShardSequentialSampler (used by train_cnn.py) groups consecutive batches by
+  # shard, so only O(num_workers * prefetch_factor) shards are live at once.
+  # max_cached_shards bounds the per-worker LRU shard cache; 16 is generous for
+  # 4 workers with default prefetch_factor=2 (needs ~8 shards live at a time).
   num_workers: 4
+  max_cached_shards: 16
   pin_memory: true
 
   # Metric used to select the best checkpoint.

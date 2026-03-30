@@ -10,20 +10,24 @@ Reads telemetry shards referenced in a curated manifest produced by
   - ``cube_quat_gripzone_wxyz``  — ``float32 (4,)`` unit quaternion.
   - ``cube_in_camera_frame``     — ``float32`` scalar, 0 or 1.
 
-Shards are loaded lazily on first access and cached in memory for the
-lifetime of the dataset object.  For typical telemetry shard sizes
-(~2 048 samples × 108×192 uint8) this fits comfortably in RAM.
+Shards are loaded lazily on first access and held in an LRU cache bounded
+by ``max_cached_shards``.  When the limit is reached the least-recently-used
+shard is evicted.  Pair with :class:`ShardSequentialSampler` so that
+consecutive batches draw from the same shard — this keeps the number of
+shards live across all DataLoader workers to
+``O(num_workers × prefetch_factor)`` regardless of dataset size.
 """
 
 from __future__ import annotations
 
 import json
+from collections import OrderedDict
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Sampler
 
 
 class TelemetryDataset(Dataset):
@@ -37,6 +41,10 @@ class TelemetryDataset(Dataset):
             normalisation.
         image_std: Optional per-channel stds for normalisation, shape ``(3,)``.
             Must be provided if *image_mean* is provided.
+        max_cached_shards: Maximum number of shards to hold in the LRU cache at
+            once.  ``None`` disables eviction (unbounded).  When using
+            :class:`ShardSequentialSampler` a value of
+            ``2 * num_workers * prefetch_factor`` is sufficient (typically 16).
     """
 
     def __init__(
@@ -44,6 +52,7 @@ class TelemetryDataset(Dataset):
         manifest_path: str | Path,
         image_mean: Optional[list[float]] = None,
         image_std: Optional[list[float]] = None,
+        max_cached_shards: Optional[int] = None,
     ) -> None:
         manifest_path = Path(manifest_path)
         if not manifest_path.exists():
@@ -77,10 +86,12 @@ class TelemetryDataset(Dataset):
             for row in shard_entry["rows"]:
                 self._index.append((shard_path, int(row)))
 
-        # Shard cache: loaded on demand.  Only the four label arrays plus
-        # the RGB array are loaded; other columns (joint_pos, global_step,
-        # sim_time_s, …) are not read to keep memory usage minimal.
-        self._shard_cache: dict[Path, dict[str, np.ndarray]] = {}
+        # LRU shard cache: keyed by resolved shard path, ordered by recency.
+        # Only the four label arrays plus the RGB array are stored; other
+        # columns (joint_pos, global_step, …) are not read.
+        # Eviction occurs in _load_shard when len > max_cached_shards.
+        self._max_cached_shards = max_cached_shards
+        self._shard_cache: OrderedDict[Path, dict[str, np.ndarray]] = OrderedDict()
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
@@ -112,16 +123,21 @@ class TelemetryDataset(Dataset):
         )
 
     def _load_shard(self, shard_path: Path) -> dict[str, np.ndarray]:
-        if shard_path not in self._shard_cache:
-            if not shard_path.exists():
-                raise FileNotFoundError(f"Shard not found: {shard_path}")
-            data = np.load(shard_path, allow_pickle=False)
-            self._shard_cache[shard_path] = {
-                "rgb": data["rgb"],
-                "is_cube_in_grip_position": data["is_cube_in_grip_position"],
-                "cube_quat_gripzone_wxyz": data["cube_quat_gripzone_wxyz"],
-                "cube_in_camera_frame": data["cube_in_camera_frame"],
-            }
+        if shard_path in self._shard_cache:
+            self._shard_cache.move_to_end(shard_path)  # mark as most-recently-used
+            return self._shard_cache[shard_path]
+        if not shard_path.exists():
+            raise FileNotFoundError(f"Shard not found: {shard_path}")
+        data = np.load(shard_path, allow_pickle=False)
+        self._shard_cache[shard_path] = {
+            "rgb": data["rgb"],
+            "is_cube_in_grip_position": data["is_cube_in_grip_position"],
+            "cube_quat_gripzone_wxyz": data["cube_quat_gripzone_wxyz"],
+            "cube_in_camera_frame": data["cube_in_camera_frame"],
+        }
+        if self._max_cached_shards is not None:
+            while len(self._shard_cache) > self._max_cached_shards:
+                self._shard_cache.popitem(last=False)  # evict least-recently-used
         return self._shard_cache[shard_path]
 
     # ── Dataset interface ─────────────────────────────────────────────────────
@@ -156,3 +172,56 @@ class TelemetryDataset(Dataset):
             ),
         }
         return img, targets
+
+
+class ShardSequentialSampler(Sampler):
+    """Yields sample indices grouped by shard, with both shard order and
+    within-shard order shuffled each epoch.
+
+    With this sampler, consecutive batches draw from the same shard.  Paired
+    with :class:`TelemetryDataset`'s LRU cache this limits live shard memory
+    to roughly ``num_workers × prefetch_factor`` shards at any one time,
+    regardless of how many shards exist in the dataset.
+
+    Compared to fully random shuffling, the i.i.d. property holds within each
+    shard but not across shard boundaries.  In practice this is not a
+    meaningful difference for SGD convergence.
+
+    Args:
+        dataset: The :class:`TelemetryDataset` to sample from.
+        generator: Optional :class:`torch.Generator` for reproducibility.
+    """
+
+    def __init__(
+        self,
+        dataset: TelemetryDataset,
+        generator: Optional[torch.Generator] = None,
+    ) -> None:
+        self._dataset = dataset
+        self._generator = generator
+
+    def __len__(self) -> int:
+        return len(self._dataset)
+
+    def __iter__(self):
+        # Group flat index positions by shard.
+        shard_to_positions: dict[Path, list[int]] = {}
+        for i, (shard_path, _) in enumerate(self._dataset._index):
+            shard_to_positions.setdefault(shard_path, []).append(i)
+
+        shards = list(shard_to_positions.keys())
+
+        # Shuffle shard order.
+        shard_perm = torch.randperm(len(shards), generator=self._generator).tolist()
+        shards = [shards[i] for i in shard_perm]
+
+        # Within each shard, shuffle sample positions and emit them.
+        indices: list[int] = []
+        for shard in shards:
+            positions = shard_to_positions[shard]
+            row_perm = torch.randperm(
+                len(positions), generator=self._generator
+            ).tolist()
+            indices.extend(positions[p] for p in row_perm)
+
+        return iter(indices)
