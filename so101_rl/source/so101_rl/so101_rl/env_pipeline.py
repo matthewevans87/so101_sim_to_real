@@ -11,7 +11,10 @@ import torch
 from isaaclab.utils.math import matrix_from_quat, quat_apply, quat_unique
 import isaaclab.utils.math as math_utils
 
-from so101_rl.configurations.camera import CAMERA_ROTATION_QUAT_WXYZ, CAMERA_TRANSLATE_VEC
+from so101_rl.configurations.camera import (
+    CAMERA_ROTATION_QUAT_WXYZ,
+    CAMERA_TRANSLATE_VEC,
+)
 from so101_rl.configurations.cube import CUBE_RESTING_HEIGHT
 from so101_rl.helpers.utils import assert_tensor
 
@@ -23,6 +26,7 @@ if TYPE_CHECKING:
 # Context
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class StepContext:
     """Shared context passed through both pipelines each step.
@@ -30,6 +34,7 @@ class StepContext:
     ``env`` provides access to all Isaac Lab scene objects and cfg.
     ``metrics`` accumulates outputs from MetricSteps and is then read by RewardSteps.
     """
+
     env: So101LiftCube
     metrics: dict[str, torch.Tensor] = field(default_factory=dict)
 
@@ -37,6 +42,7 @@ class StepContext:
 # ---------------------------------------------------------------------------
 # Base classes
 # ---------------------------------------------------------------------------
+
 
 class MetricStep(ABC):
     """Computes one or more step-level metrics, writing results into ``ctx.metrics``.
@@ -58,8 +64,7 @@ class MetricStep(ABC):
     Scalars-per-env should set 1; vectors of length K should set K."""
 
     @abstractmethod
-    def compute(self, ctx: StepContext) -> None:
-        ...
+    def compute(self, ctx: StepContext) -> None: ...
 
 
 class MetricPipeline:
@@ -99,7 +104,9 @@ class MetricPipeline:
 
         # Build adjacency list: predecessor_step -> {dependent_steps}
         # and in-degree counts for Kahn's algorithm.
-        dependents: dict[int, set[int]] = defaultdict(set)  # id(step) -> set of id(step)
+        dependents: dict[int, set[int]] = defaultdict(
+            set
+        )  # id(step) -> set of id(step)
         in_degree: dict[int, int] = {id(s): 0 for s in steps}
         step_by_id: dict[int, MetricStep] = {id(s): s for s in steps}
 
@@ -111,9 +118,7 @@ class MetricPipeline:
                     in_degree[id(step)] += 1
 
         # Kahn's algorithm
-        queue: deque[int] = deque(
-            sid for sid, deg in in_degree.items() if deg == 0
-        )
+        queue: deque[int] = deque(sid for sid, deg in in_degree.items() if deg == 0)
         sorted_ids: list[int] = []
         while queue:
             sid = queue.popleft()
@@ -188,6 +193,7 @@ class RewardPipeline:
 # ---------------------------------------------------------------------------
 # Metric steps
 # ---------------------------------------------------------------------------
+
 
 class GripperContactForceMagnitudeMetricStep(MetricStep):
     produces = frozenset({"gripper_cube_contact_force_magnitude"})
@@ -342,7 +348,9 @@ class GripZoneCubeDistanceMetricStep(MetricStep):
 
     def compute(self, ctx: StepContext) -> None:
         env = ctx.env
-        val = ctx.metrics["v_grip_zone_to_cube_ee"].norm(dim=-1, keepdim=True).squeeze(-1)
+        val = (
+            ctx.metrics["v_grip_zone_to_cube_ee"].norm(dim=-1, keepdim=True).squeeze(-1)
+        )
         assert_tensor(val, (env.num_envs,), torch.float32)
         ctx.metrics["grip_zone_cube_distance"] = val
 
@@ -366,7 +374,10 @@ class CubeLiftFractionMetricStep(MetricStep):
 
     def compute(self, ctx: StepContext) -> None:
         env = ctx.env
-        val = ctx.metrics["cube_height_w"] / env.cfg.rewards.success_lift_fraction_terminal.height_threshold
+        val = (
+            ctx.metrics["cube_height_w"]
+            / env.cfg.rewards.success_lift_fraction_terminal.height_threshold
+        )
         assert_tensor(val, (env.num_envs,), torch.float32)
         ctx.metrics["cube_lift_fraction"] = val
 
@@ -424,7 +435,9 @@ class IsCubeInGripPositionMetricStep(MetricStep):
 
 class IsCubeGrippedMetricStep(MetricStep):
     produces = frozenset({"is_cube_gripped"})
-    depends_on = frozenset({"is_cube_in_grip_position", "gripper_cube_contact_force_magnitude"})
+    depends_on = frozenset(
+        {"is_cube_in_grip_position", "gripper_cube_contact_force_magnitude"}
+    )
     obs_dim = 1
 
     def compute(self, ctx: StepContext) -> None:
@@ -444,6 +457,7 @@ class IsCubeGrippedMetricStep(MetricStep):
 # Reward steps — Primary
 # ---------------------------------------------------------------------------
 
+
 class DistanceRewardStep(RewardStep):
     name = "rew_distance"
     requires_metrics = frozenset({"grip_zone_cube_distance"})
@@ -455,7 +469,9 @@ class DistanceRewardStep(RewardStep):
 
 class GripCubeRewardStep(RewardStep):
     name = "rew_grip_cube"
-    requires_metrics = frozenset({"is_cube_in_grip_position", "gripper_cube_contact_force_magnitude"})
+    requires_metrics = frozenset(
+        {"is_cube_in_grip_position", "gripper_cube_contact_force_magnitude"}
+    )
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
         env = ctx.env
@@ -478,6 +494,7 @@ class LiftCubeRewardStep(RewardStep):
 # ---------------------------------------------------------------------------
 # Reward steps — Shaping
 # ---------------------------------------------------------------------------
+
 
 class GripperCubeAlignmentRewardStep(RewardStep):
     name = "rew_gripper_cube_alignment"
@@ -513,7 +530,9 @@ class GripperLookAtCubeRewardStep(RewardStep):
         camera_pos_w = gripper_pos + quat_apply(gripper_quat, camera_offset)
 
         camera_rot_offset = (
-            torch.tensor(CAMERA_ROTATION_QUAT_WXYZ, device=env.device, dtype=torch.float32)
+            torch.tensor(
+                CAMERA_ROTATION_QUAT_WXYZ, device=env.device, dtype=torch.float32
+            )
             .unsqueeze(0)
             .expand(env.num_envs, 4)
         )
@@ -529,10 +548,16 @@ class GripperLookAtCubeRewardStep(RewardStep):
         cube_pos_w = env.gripper_tf.data.target_pos_w[:, 0, :]
         vec_to_cube = cube_pos_w - camera_pos_w
 
-        cam_forward_norm = cam_forward_w / (torch.linalg.norm(cam_forward_w, dim=-1, keepdim=True) + eps)
-        vec_to_cube_norm = vec_to_cube / (torch.linalg.norm(vec_to_cube, dim=-1, keepdim=True) + eps)
+        cam_forward_norm = cam_forward_w / (
+            torch.linalg.norm(cam_forward_w, dim=-1, keepdim=True) + eps
+        )
+        vec_to_cube_norm = vec_to_cube / (
+            torch.linalg.norm(vec_to_cube, dim=-1, keepdim=True) + eps
+        )
 
-        lookat_factor = torch.clamp((cam_forward_norm * vec_to_cube_norm).sum(dim=-1), min=0.0, max=1.0)
+        lookat_factor = torch.clamp(
+            (cam_forward_norm * vec_to_cube_norm).sum(dim=-1), min=0.0, max=1.0
+        )
         lookat_factor = torch.maximum(lookat_factor, ctx.metrics["is_cube_gripped"])
 
         return env.cfg.rewards.gripper_look_at_cube.scale * lookat_factor
@@ -560,10 +585,12 @@ class CloseGripperRewardStep(RewardStep):
     def compute(self, ctx: StepContext) -> torch.Tensor:
         env = ctx.env
         gripper_pos = env.joint_pos[:, env._ee_body_idx]
-        gripper_close_error = torch.abs(gripper_pos - env.cfg.rewards.close_gripper.close_target)
-        fraction_to_target = (
-            1.0 - (gripper_close_error / env.cfg.rewards.close_gripper.max_open).squeeze(-1)
+        gripper_close_error = torch.abs(
+            gripper_pos - env.cfg.rewards.close_gripper.close_target
         )
+        fraction_to_target = 1.0 - (
+            gripper_close_error / env.cfg.rewards.close_gripper.max_open
+        ).squeeze(-1)
         return (
             ctx.metrics["is_cube_in_grip_position"]
             * fraction_to_target
@@ -573,13 +600,20 @@ class CloseGripperRewardStep(RewardStep):
 
 class GripperForceRewardStep(RewardStep):
     name = "rew_gripper_force"
-    requires_metrics = frozenset({"gripper_cube_contact_force_magnitude", "is_cube_in_grip_position"})
+    requires_metrics = frozenset(
+        {"gripper_cube_contact_force_magnitude", "is_cube_in_grip_position"}
+    )
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
         env = ctx.env
         target = env.cfg.rewards.gripper_force.force_target
-        force_error = torch.abs(ctx.metrics["gripper_cube_contact_force_magnitude"] - target)
-        rew = torch.exp(-force_error / (target + 1e-6)) * env.cfg.rewards.gripper_force.scale
+        force_error = torch.abs(
+            ctx.metrics["gripper_cube_contact_force_magnitude"] - target
+        )
+        rew = (
+            torch.exp(-force_error / (target + 1e-6))
+            * env.cfg.rewards.gripper_force.scale
+        )
         return rew * ctx.metrics["is_cube_in_grip_position"].float()
 
 
@@ -592,7 +626,8 @@ class VantageRewardStep(RewardStep):
         cfg = env.cfg.rewards.vantage
 
         cube_gripper_dist = torch.linalg.norm(
-            env.gripper_tf.data.source_pos_w - env.gripper_tf.data.target_pos_w[:, 0, :],
+            env.gripper_tf.data.source_pos_w
+            - env.gripper_tf.data.target_pos_w[:, 0, :],
             dim=-1,
         )
         is_far = cube_gripper_dist > cfg.far_distance_threshold
@@ -602,7 +637,7 @@ class VantageRewardStep(RewardStep):
         far_enough = d > cfg.min_distance_threshold
 
         dist_reward = torch.exp(
-            -((d - cfg.ideal_distance) ** 2) / (2 * cfg.ideal_distance_sigma ** 2)
+            -((d - cfg.ideal_distance) ** 2) / (2 * cfg.ideal_distance_sigma**2)
         )
 
         h_above_cube = (
@@ -611,14 +646,17 @@ class VantageRewardStep(RewardStep):
         )
         height_reward = torch.where(
             h_above_cube >= 0,
-            torch.exp(-((h_above_cube - cfg.ideal_height) ** 2) / (2 * cfg.ideal_height_sigma ** 2)),
-            torch.exp(-((h_above_cube) ** 2) / (2 * (cfg.ideal_height_sigma / 2) ** 2)) * 0.3,
+            torch.exp(
+                -((h_above_cube - cfg.ideal_height) ** 2)
+                / (2 * cfg.ideal_height_sigma**2)
+            ),
+            torch.exp(-((h_above_cube) ** 2) / (2 * (cfg.ideal_height_sigma / 2) ** 2))
+            * 0.3,
         )
 
-        gripper_roll_error = (
-            torch.abs(env.robot.data.joint_pos[:, env._wrist_roll_idx] - math.radians(-90.0))
-            / math.radians(-90.0)
-        )
+        gripper_roll_error = torch.abs(
+            env.robot.data.joint_pos[:, env._wrist_roll_idx] - math.radians(-90.0)
+        ) / math.radians(-90.0)
 
         raw = torch.where(
             is_far & far_enough,
@@ -649,6 +687,7 @@ class KeepCameraUprightRewardStep(RewardStep):
 # Reward steps — Smoothing
 # ---------------------------------------------------------------------------
 
+
 class ActionRewardStep(RewardStep):
     name = "rew_action"
     requires_metrics = frozenset()
@@ -670,7 +709,7 @@ class EELinearSpeedRewardStep(RewardStep):
         speed = torch.linalg.norm(ee_lin_vel_w, dim=-1)
         v_safe = env.cfg.rewards.ee_linear_speed.safe_speed
         v_excess = torch.clamp(speed - v_safe, min=0.0)
-        return env.cfg.rewards.ee_linear_speed.scale * (v_excess + v_excess ** 2)
+        return env.cfg.rewards.ee_linear_speed.scale * (v_excess + v_excess**2)
 
 
 class JointSpeedRewardStep(RewardStep):
@@ -680,7 +719,7 @@ class JointSpeedRewardStep(RewardStep):
     def compute(self, ctx: StepContext) -> torch.Tensor:
         env = ctx.env
         joint_speed = torch.abs(env.joint_vel[:, env._dof_idx])
-        return env.cfg.rewards.joint_speed.scale * torch.sum(joint_speed ** 2, dim=-1)
+        return env.cfg.rewards.joint_speed.scale * torch.sum(joint_speed**2, dim=-1)
 
 
 class EEHeightSafetyRewardStep(RewardStep):
@@ -701,6 +740,7 @@ class EEHeightSafetyRewardStep(RewardStep):
 # ---------------------------------------------------------------------------
 # Reward steps — Terminal
 # ---------------------------------------------------------------------------
+
 
 class SuccessTouchTerminalRewardStep(RewardStep):
     name = "rew_success_touch_terminal"
@@ -725,7 +765,9 @@ class SuccessLiftFractionTerminalRewardStep(RewardStep):
         flag = ctx.metrics["is_success_lift_fraction_terminal"]
         return torch.where(
             flag >= 1.0,
-            torch.full_like(flag.float(), env.cfg.rewards.success_lift_fraction_terminal.scale),
+            torch.full_like(
+                flag.float(), env.cfg.rewards.success_lift_fraction_terminal.scale
+            ),
             torch.zeros(env.num_envs, device=env.device),
         )
 
@@ -739,7 +781,9 @@ class SuccessPointAtCubeTerminalRewardStep(RewardStep):
         flag = ctx.metrics["is_success_point_at_cube_terminal"]
         return torch.where(
             flag >= 1.0,
-            torch.full_like(flag.float(), env.cfg.rewards.success_point_at_cube_terminal.scale),
+            torch.full_like(
+                flag.float(), env.cfg.rewards.success_point_at_cube_terminal.scale
+            ),
             torch.zeros(env.num_envs, device=env.device),
         )
 
@@ -752,7 +796,11 @@ class SafetyTouchTableTerminalRewardStep(RewardStep):
         env = ctx.env
         return torch.where(
             ctx.metrics["is_table_touched"],
-            torch.tensor(env.cfg.rewards.safety_touch_table_terminal.scale, device=env.device, dtype=torch.float32),
+            torch.tensor(
+                env.cfg.rewards.safety_touch_table_terminal.scale,
+                device=env.device,
+                dtype=torch.float32,
+            ),
             torch.tensor(0.0, device=env.device, dtype=torch.float32),
         )
 
@@ -765,8 +813,40 @@ class SafetyTouchTableRewardStep(RewardStep):
         env = ctx.env
         return torch.where(
             ctx.metrics["is_table_touched"],
-            torch.tensor(env.cfg.rewards.safety_touch_table.scale, device=env.device, dtype=torch.float32),
+            torch.tensor(
+                env.cfg.rewards.safety_touch_table.scale,
+                device=env.device,
+                dtype=torch.float32,
+            ),
             torch.tensor(0.0, device=env.device, dtype=torch.float32),
+        )
+
+
+# ---------------------------------------------------------------------------
+# (Novel) Reward: Approach Phase
+# ---------------------------------------------------------------------------
+
+
+class ApproachPhaseRewardStep(RewardStep):
+    name = "rew_approach_phase"
+    requires_metrics = frozenset({"grip_zone_cube_distance"})
+
+    def compute(self, ctx: StepContext) -> torch.Tensor:
+        env = ctx.env
+        grip_zone_dist = 1.0 / torch.exp(ctx.metrics["grip_zone_cube_distance"])
+
+        gripper_pos = env.joint_pos[:, env._ee_body_idx]
+        gripper_close_error = 1.0 / torch.exp(
+            torch.abs(gripper_pos - env.cfg.rewards.close_gripper.max_open)
+        ).squeeze(-1)
+
+        alignment = ctx.metrics["gripper_cube_alignment"]
+
+        return (
+            grip_zone_dist
+            * gripper_close_error
+            * alignment
+            * env.cfg.rewards.approach_phase.scale
         )
 
 
@@ -807,6 +887,7 @@ KEY_OBS_DIMS: dict[str, int] = {
 # ---------------------------------------------------------------------------
 # Factory helpers
 # ---------------------------------------------------------------------------
+
 
 def build_metric_pipeline(
     reward_pipeline: RewardPipeline,
@@ -910,5 +991,9 @@ def build_reward_pipeline(cfg) -> RewardPipeline:
         steps.append(SafetyTouchTableTerminalRewardStep())
     if r.safety_touch_table.enabled:
         steps.append(SafetyTouchTableRewardStep())
+
+    # Phase-specific
+    if r.approach_phase.enabled:
+        steps.append(ApproachPhaseRewardStep())
 
     return RewardPipeline(steps)

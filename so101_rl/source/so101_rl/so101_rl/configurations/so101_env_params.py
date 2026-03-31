@@ -316,6 +316,12 @@ class VantageRewardCfg:
 
 
 @dataclass
+class ApproachPhaseRewardCfg:
+    enabled: bool
+    scale: float
+
+
+@dataclass
 class RewardsCfg:
     distance: RewardCfg
     grip_cube: GripCubeRewardCfg
@@ -336,6 +342,7 @@ class RewardsCfg:
     safety_touch_table_terminal: RewardCfg
     vantage: VantageRewardCfg
     keep_camera_upright: RewardCfg
+    approach_phase: ApproachPhaseRewardCfg
 
 
 # ---------------------------------------------------------------------------

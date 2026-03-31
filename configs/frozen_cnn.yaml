@@ -54,14 +54,14 @@ debug:
       save: false
       interval: 10
     post_processing:
-      save: true
+      save: false
       interval: 10
   enable_gripper_arrow_markers: false
   enable_tip_markers: false
   enable_camera_frame_markers: false
   vision_debug:
-    enabled: true
-    interval: 500
+    enabled: false
+    interval: 100
     num_envs_logged: 1
     raw_image:
       enabled: true
@@ -80,32 +80,37 @@ behavior:
     enabled: false
 
 rewards:
+# Phased approach:
+  approach_phase:
+    enabled: true
+    scale: 1.0
+
 # baseline reward components
 
 # distance from gripper to cube (meters)
   distance:
-    enabled: true
+    enabled: false
     scale: -5.0
 # binary reward for touching a properly positioned cube with the gripper
   grip_cube:
-    enabled: true
+    enabled: false
     scale: 2.0
     distance_threshold: 0.02
 # fraction lifted (to threshold)
   lift_cube:
-    enabled: true
+    enabled: false
     scale: 5.0
 # sum of actions
   action:
-    enabled: true
+    enabled: false
     scale: -0.001
 # binary penalty for touching the table
   safety_touch_table:
-    enabled: true
+    enabled: false
     scale: -1.0
 # terminal reward for successfully lifting the cube above the height threshold (meters)
   success_lift_fraction_terminal:
-    enabled: true
+    enabled: false
     scale: 100.0
     height_threshold: 0.10
 
