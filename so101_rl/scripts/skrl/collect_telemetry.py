@@ -185,22 +185,10 @@ def _ensure_positive(name: str, value: int) -> None:
 
 
 def _find_checkpoint_and_task(experiment_path: Path) -> tuple[Path, str]:
-    skrl_dir = experiment_path / "skrl"
-    if not skrl_dir.exists():
-        raise FileNotFoundError(f"No skrl directory found in {experiment_path}")
-
-    task_dirs = [d for d in skrl_dir.iterdir() if d.is_dir()]
-    if not task_dirs:
-        raise FileNotFoundError(f"No task directory found in {skrl_dir}")
-    if len(task_dirs) > 1:
-        raise ValueError(f"Multiple task directories found in {skrl_dir}: {task_dirs}")
-
-    task_dir = task_dirs[0]
-    checkpoint_path = task_dir / "checkpoints" / "best_agent.pt"
+    checkpoint_path = experiment_path / "skrl" / "checkpoints" / "best_agent.pt"
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Checkpoint not found at {checkpoint_path}")
-
-    return checkpoint_path, task_dir.name
+    return checkpoint_path, ""
 
 
 def _to_numpy(value: torch.Tensor | np.ndarray | float | bool | int, dtype=None):

@@ -45,23 +45,15 @@ from so101_rl.configurations.camera import (
     CAMERA_ROTATION_QUAT_WXYZ,
     CAMERA_TRANSLATE_VEC,
 )
-from so101_rl.helpers.variations import (
-    # create_ground_materials,
-    randomize_camera_pose,
-    randomize_rigid_object_color,
-    randomize_rigid_object_position,
-    randomize_rigid_object_position_polar,
-    randomize_rigid_object_size,
-    randomize_ground_material,
-    randomize_world_light,
-    randomize_env_lights,
-)
 from .so101_lift_cube_env_cfg import So101LiftCubeCfg
 from so101_rl.viz.vision_debug import VisionDebugLogger
 from so101_rl.env_pipeline import (
+    DRContext,
+    DRPipeline,
     StepContext,
     MetricPipeline,
     RewardPipeline,
+    build_dr_pipeline,
     build_metric_pipeline,
     build_reward_pipeline,
     KEY_OBS_DIMS,
@@ -194,6 +186,7 @@ class So101LiftCube(DirectRLEnv):
                 }
             ),
         )
+        self.dr_pipeline: DRPipeline = build_dr_pipeline(self.cfg)
         _dr_feed = self.cfg.domain_randomization.camera.feed
         _image_pipeline_steps: list[ImagePipelineStep] = [Uint8ToFloatCHWPipelineStep()]
         if _dr_feed.gaussian_blur.enabled:
@@ -594,115 +587,7 @@ class So101LiftCube(DirectRLEnv):
         self.robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
 
         # Domain Randomization
-        if self.cfg.domain_randomization.cube.color_randomization_enabled:
-            randomize_rigid_object_color(env_ids, object_name="Object")
-
-        if self.cfg.domain_randomization.cube.size_randomization_enabled:
-            randomize_rigid_object_size(
-                env_ids,
-                object_name="Object",
-                size_range=self.cfg.domain_randomization.cube.size_range,
-            )
-
-        if self.cfg.domain_randomization.cube.position_randomization.enabled:
-            randomize_rigid_object_position_polar(
-                env_ids=env_ids,
-                scene=self.scene,
-                rigid_object=self.cube,
-                object_name="Object",
-                radius_range=self.cfg.domain_randomization.cube.position_randomization.radius_range,
-                angle_range=self.cfg.domain_randomization.cube.position_randomization.angle_range,
-                z_range=self.cfg.domain_randomization.cube.position_randomization.z_range,
-                device=self.device,
-            )
-
-        if self.cfg.domain_randomization.camera.pose.enabled:
-            randomize_camera_pose(
-                env_ids,
-                self.cfg.domain_randomization.camera.pose.position_noise_range,
-                self.cfg.domain_randomization.camera.pose.rotation_noise_deg_range,
-            )
-
-        if 0 in env_ids and self.cfg.domain_randomization.world_lighting.enabled:
-            randomize_world_light(
-                self.cfg.domain_randomization.world_lighting.intensity_range,
-                self.cfg.domain_randomization.world_lighting.color_variation,
-            )
-
-        if self.cfg.domain_randomization.env_lighting.enabled:
-            randomize_env_lights(
-                env_ids,
-                self.cfg.domain_randomization.env_lighting.height_range,
-                self.cfg.domain_randomization.env_lighting.intensity_range,
-                self.cfg.domain_randomization.env_lighting.color_variation,
-                self.cfg.domain_randomization.env_lighting.specular_range,
-            )
-
-        if 0 in env_ids and self.cfg.domain_randomization.ground.enabled:
-            randomize_ground_material()
-
-        if self.cfg.distractors.randomization.enabled:
-            # Randomize each distractor object
-            for i, distractor in enumerate(self._distractors):
-                distractor_name = f"distractor_{i}"
-
-                # Reset distractor to default state first
-                distractor_default_root_state = distractor.data.default_root_state[
-                    env_ids
-                ].clone()
-                distractor_default_root_state[:, :3] += self.scene.env_origins[env_ids]
-                distractor.write_root_pose_to_sim(
-                    distractor_default_root_state[:, :7], env_ids
-                )
-                distractor.write_root_velocity_to_sim(
-                    distractor_default_root_state[:, 7:], env_ids
-                )
-
-                # Randomize color
-                randomize_rigid_object_color(env_ids, object_name=distractor_name)
-
-                # Randomize size
-                if self.cfg.distractors.randomization.size_randomization_enabled:
-                    randomize_rigid_object_size(
-                        env_ids,
-                        object_name=distractor_name + "/geometry/mesh",
-                        size_range=self.cfg.distractors.randomization.size_range,
-                    )
-
-                # Randomize position, respecting active_probability
-                active_mask = (
-                    torch.rand(len(env_ids), device=self.device)
-                    < self.cfg.distractors.randomization.active_probability
-                )
-                env_ids_t = torch.as_tensor(env_ids, device=self.device)
-                active_env_ids = env_ids_t[active_mask]  # type: ignore[assignment]
-                inactive_env_ids = env_ids_t[~active_mask]  # type: ignore[assignment]
-
-                if len(active_env_ids) > 0:
-                    randomize_rigid_object_position(
-                        env_ids=active_env_ids,
-                        scene=self.scene,
-                        rigid_object=distractor,
-                        object_name=distractor_name,
-                        x_range=self.cfg.distractors.position.x_range,
-                        y_range=self.cfg.distractors.position.y_range,
-                        z_range=self.cfg.distractors.position.z_range,
-                        device=self.device,
-                    )
-
-                if len(inactive_env_ids) > 0:
-                    # Place inactive distractors below ground so they are invisible
-                    hidden_state = distractor.data.default_root_state[
-                        inactive_env_ids
-                    ].clone()
-                    hidden_state[:, :3] = self.scene.env_origins[inactive_env_ids]
-                    hidden_state[:, 2] -= 10.0
-                    distractor.write_root_pose_to_sim(
-                        hidden_state[:, :7], inactive_env_ids
-                    )
-                    distractor.write_root_velocity_to_sim(
-                        hidden_state[:, 7:], inactive_env_ids
-                    )
+        self.dr_pipeline.apply(DRContext(env=self, env_ids=env_ids))
 
     def _compute_step_metrics(self) -> None:
         """Compute custom metrics at each step for logging purposes."""

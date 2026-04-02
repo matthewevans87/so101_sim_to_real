@@ -5,6 +5,7 @@
 
 import os
 
+from so101_rl.configurations.debug import FRAME_CFG
 from so101_rl.configurations.so101 import (
     SO101_CFG,
     GRIPPER_CONTACT_SENSOR_CFG,
@@ -27,6 +28,7 @@ from isaaclab.utils import configclass
 from isaaclab.sensors.camera import CameraCfg, TiledCameraCfg
 from isaaclab.sensors import FrameTransformerCfg
 from isaaclab.sensors.frame_transformer.frame_transformer_cfg import OffsetCfg
+
 
 from so101_rl.configurations.so101_env_params import So101EnvParams
 from so101_rl.env_pipeline import KEY_OBS_DIMS
@@ -148,6 +150,7 @@ class So101LiftCubeCfg(DirectRLEnvCfg):
             )
         ],
         debug_vis=_Y.sensors.grip_zone_transform.debug_vis,
+        visualizer_cfg=FRAME_CFG,
     )
 
     # ── Distractor rigid object configs ─────────────────────────────────────

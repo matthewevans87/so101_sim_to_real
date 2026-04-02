@@ -162,30 +162,11 @@ else:
 
 
 def find_checkpoint_and_task(experiment_path: Path) -> tuple[Path, str]:
-    """Find the checkpoint file and task name from experiment directory."""
-    # Look for checkpoint in skrl subdirectory
-    skrl_dir = experiment_path / "skrl"
-    if not skrl_dir.exists():
-        raise FileNotFoundError(f"No skrl directory found in {experiment_path}")
-    
-    # Find task directory (should be only one subdirectory)
-    task_dirs = [d for d in skrl_dir.iterdir() if d.is_dir()]
-    if not task_dirs:
-        raise FileNotFoundError(f"No task directory found in {skrl_dir}")
-    if len(task_dirs) > 1:
-        raise ValueError(f"Multiple task directories found: {task_dirs}")
-    
-    task_dir = task_dirs[0]
-    task_name = task_dir.name
-    
-    # Look for best_agent.pt checkpoint
-    checkpoint_dir = task_dir / "checkpoints"
-    checkpoint_path = checkpoint_dir / "best_agent.pt"
-    
+    """Find the checkpoint file from the experiment directory."""
+    checkpoint_path = experiment_path / "skrl" / "checkpoints" / "best_agent.pt"
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Checkpoint not found at {checkpoint_path}")
-    
-    return checkpoint_path, task_name
+    return checkpoint_path, ""
 
 
 def _first_step_index(values: list[float], predicate) -> int | None:
@@ -235,7 +216,9 @@ def _summary_for_values(values: list[float]) -> dict:
     }
 
 
-def _global_summary_for_key(flat_values: list[float], per_episode_summaries: list[dict]) -> dict:
+def _global_summary_for_key(
+    flat_values: list[float], per_episode_summaries: list[dict]
+) -> dict:
     """Compute global summary: statistics over all steps of all episodes, mean steps_till across episodes."""
     if not flat_values:
         return {
@@ -286,22 +269,26 @@ def main(
     experiment_cfg: dict,
 ):
     """Evaluate skrl agent."""
-    
+
     # Parse experiment path
     experiment_path = Path(args_cli.experiment_path).resolve()
     if not experiment_path.exists():
         raise FileNotFoundError(f"Experiment path not found: {experiment_path}")
-    
+
     print(f"[INFO] Loading experiment from: {experiment_path}")
-    
+
     # Find checkpoint and task name
-    checkpoint_path, task_name_from_checkpoint = find_checkpoint_and_task(experiment_path)
+    checkpoint_path, task_name_from_checkpoint = find_checkpoint_and_task(
+        experiment_path
+    )
     print(f"[INFO] Found checkpoint: {checkpoint_path}")
     print(f"[INFO] Task name from checkpoint: {task_name_from_checkpoint}")
-    
+
     # Ensure task name matches if provided
-    task_name = args_cli.task.split(":")[-1] if args_cli.task else task_name_from_checkpoint
-    
+    task_name = (
+        args_cli.task.split(":")[-1] if args_cli.task else task_name_from_checkpoint
+    )
+
     # Load env_config.yaml if it exists
     env_config_path = experiment_path / "env_config.yaml"
     if env_config_path.exists():
@@ -310,47 +297,53 @@ def main(
         os.environ["SO101_ENV_CONFIG"] = str(env_config_path)
     else:
         print(f"[WARNING] No env_config.yaml found at {env_config_path}")
-    
+
     # Override configurations for evaluation
     env_cfg.scene.num_envs = (
         args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
     )
-    env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
-    
+    env_cfg.sim.device = (
+        args_cli.device if args_cli.device is not None else env_cfg.sim.device
+    )
+
     # Configure the ML framework
     if args_cli.ml_framework.startswith("jax"):
         skrl.config.jax.backend = "jax" if args_cli.ml_framework == "jax" else "numpy"
-    
+
     # Set seed
     experiment_cfg["seed"] = args_cli.seed
     env_cfg.seed = experiment_cfg["seed"]
-    
+
     # Create evaluation output directory
     eval_dir = experiment_path / "evaluation"
     eval_dir.mkdir(parents=True, exist_ok=True)
     print(f"[INFO] Evaluation results will be saved to: {eval_dir}")
-    
+
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array")
-    
+
     # convert to single-agent instance if required by the RL algorithm
     if isinstance(env.unwrapped, DirectMARLEnv) and algorithm in ["ppo"]:
         env = multi_agent_to_single_agent(env)
-    
+
     # wrap around environment for skrl
     env = SkrlVecEnvWrapper(env, ml_framework=args_cli.ml_framework)
-    
+
     # configure and instantiate the skrl runner
     experiment_cfg["trainer"]["close_environment_at_exit"] = False
-    experiment_cfg["agent"]["experiment"]["write_interval"] = 0  # don't log to TensorBoard
-    experiment_cfg["agent"]["experiment"]["checkpoint_interval"] = 0  # don't generate checkpoints
+    experiment_cfg["agent"]["experiment"][
+        "write_interval"
+    ] = 0  # don't log to TensorBoard
+    experiment_cfg["agent"]["experiment"][
+        "checkpoint_interval"
+    ] = 0  # don't generate checkpoints
     runner = Runner(env, experiment_cfg)
-    
+
     print(f"[INFO] Loading model checkpoint from: {checkpoint_path}")
     runner.agent.load(str(checkpoint_path))
     # set agent to evaluation mode
     runner.agent.set_running_mode("eval")
-    
+
     # Evaluation parameters
     NUM_EPISODES = args_cli.num_episodes
     NUM_VIDEO_EPISODES = args_cli.num_videos
@@ -458,10 +451,14 @@ def main(
                 and episode_steps[env_idx] == 0
                 and not record_active[env_idx]
             ):
-                available_slots = NUM_VIDEO_EPISODES - recorded_episodes - active_record_count
+                available_slots = (
+                    NUM_VIDEO_EPISODES - recorded_episodes - active_record_count
+                )
                 if available_slots > 0:
                     if not hasattr(env.unwrapped, "scene"):
-                        raise RuntimeError("Scene sensors are unavailable for video recording.")
+                        raise RuntimeError(
+                            "Scene sensors are unavailable for video recording."
+                        )
 
                     gripper_cam = env.unwrapped.scene.sensors.get("gripper_camera")
                     overhead_cam = env.unwrapped.scene.sensors.get("overhead_camera")
@@ -476,7 +473,9 @@ def main(
                         )
 
                     gripper_rgb = gripper_cam.data.output["rgb"][env_idx].cpu().numpy()
-                    overhead_rgb = overhead_cam.data.output["rgb"][env_idx].cpu().numpy()
+                    overhead_rgb = (
+                        overhead_cam.data.output["rgb"][env_idx].cpu().numpy()
+                    )
 
                     wrist_h, wrist_w = gripper_rgb.shape[:2]
                     overhead_h, overhead_w = overhead_rgb.shape[:2]
@@ -508,13 +507,19 @@ def main(
                     and "rgb" in gripper_cam.data.output
                     and "rgb" in overhead_cam.data.output
                 ):
-                    gripper_frame = gripper_cam.data.output["rgb"][env_idx].cpu().numpy()
-                    overhead_frame = overhead_cam.data.output["rgb"][env_idx].cpu().numpy()
+                    gripper_frame = (
+                        gripper_cam.data.output["rgb"][env_idx].cpu().numpy()
+                    )
+                    overhead_frame = (
+                        overhead_cam.data.output["rgb"][env_idx].cpu().numpy()
+                    )
 
                     wrist_writer = wrist_writers.get(env_idx)
                     overhead_writer = overhead_writers.get(env_idx)
                     if wrist_writer is not None:
-                        wrist_writer.write(cv2.cvtColor(gripper_frame, cv2.COLOR_RGB2BGR))
+                        wrist_writer.write(
+                            cv2.cvtColor(gripper_frame, cv2.COLOR_RGB2BGR)
+                        )
                     if overhead_writer is not None:
                         overhead_writer.write(
                             cv2.cvtColor(overhead_frame, cv2.COLOR_RGB2BGR)
@@ -529,7 +534,9 @@ def main(
                 done_flag = bool(done_flag)
 
             if done_flag:
-                current_episode_metrics[env_idx]["episode_length"] = episode_steps[env_idx]
+                current_episode_metrics[env_idx]["episode_length"] = episode_steps[
+                    env_idx
+                ]
                 episode_entry = current_episode_metrics[env_idx].copy()
 
                 step_values: dict[str, list[float]] = {}
@@ -604,11 +611,11 @@ def main(
 
     progress.close()
     print(f"[INFO] Evaluation complete: {completed_episodes} episodes")
-    
+
     # Compute summary statistics
     episode_rewards = [ep["total_reward"] for ep in all_episode_data]
     episode_lengths = [ep["episode_length"] for ep in all_episode_data]
-    
+
     summary = {
         "num_envs": num_envs,
         "num_episodes": len(all_episode_data),
@@ -635,17 +642,21 @@ def main(
         },
         "episodes": all_episode_data,
     }
-    
+
     # Save results to JSON
     results_path = eval_dir / "results.json"
     with open(results_path, "w") as f:
         json.dump(summary, f, indent=2)
-    
+
     print(f"[INFO] Results saved to: {results_path}")
     print(f"[INFO] Summary statistics:")
-    print(f"  Mean reward: {summary['summary_statistics']['mean_reward']:.3f} ± {summary['summary_statistics']['std_reward']:.3f}")
-    print(f"  Mean episode length: {summary['summary_statistics']['mean_episode_length']:.1f} ± {summary['summary_statistics']['std_episode_length']:.1f}")
-    
+    print(
+        f"  Mean reward: {summary['summary_statistics']['mean_reward']:.3f} ± {summary['summary_statistics']['std_reward']:.3f}"
+    )
+    print(
+        f"  Mean episode length: {summary['summary_statistics']['mean_episode_length']:.1f} ± {summary['summary_statistics']['std_episode_length']:.1f}"
+    )
+
     # close the simulator
     env.close()
 

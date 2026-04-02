@@ -27,7 +27,7 @@ gripper:
   ee_link_name: "gripper"
   grip_zone_rot: [1.0, 0.0, 0.0, 0.0]
   tip_offset: [0.015, 0.0, -0.1]
-  grip_zone_offset: [0.01, 0.0, -0.09]
+  grip_zone_offset: [0.0, 0.0, -0.10]
   open_target: 0.8
   closed_target: 0.15
 
@@ -56,7 +56,7 @@ debug:
     post_processing:
       save: false
       interval: 10
-  enable_gripper_arrow_markers: false
+  enable_gripper_arrow_markers: true
   enable_tip_markers: false
   enable_camera_frame_markers: false
   vision_debug:
@@ -83,13 +83,13 @@ rewards:
 # Phased approach:
   approach_phase:
     enabled: true
-    scale: 1.0
+    scale: 5.0
 
 # baseline reward components
 
 # distance from gripper to cube (meters)
   distance:
-    enabled: false
+    enabled: true
     scale: -5.0
 # binary reward for touching a properly positioned cube with the gripper
   grip_cube:
@@ -102,11 +102,11 @@ rewards:
     scale: 5.0
 # sum of actions
   action:
-    enabled: false
+    enabled: true
     scale: -0.001
 # binary penalty for touching the table
   safety_touch_table:
-    enabled: false
+    enabled: true
     scale: -1.0
 # terminal reward for successfully lifting the cube above the height threshold (meters)
   success_lift_fraction_terminal:
@@ -231,7 +231,7 @@ sensors:
   gripper_transform:
     debug_vis: false
   grip_zone_transform:
-    debug_vis: false
+    debug_vis: true
 
 observations:
   critic_obs_metrics:

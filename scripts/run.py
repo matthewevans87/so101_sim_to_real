@@ -520,20 +520,7 @@ def cmd_eval(args) -> None:
         error(f"Experiment directory not found: {experiment}")
         sys.exit(1)
 
-    # Auto-detect task name if not provided
     task = args.task
-    if not task:
-        skrl_dir = experiment / "skrl"
-        if not skrl_dir.is_dir():
-            error(f"No skrl/ directory in {experiment} and --task not provided")
-            sys.exit(1)
-        task_dirs = [d for d in skrl_dir.iterdir() if d.is_dir()]
-        if not task_dirs:
-            error(f"No task directory in {skrl_dir}")
-            sys.exit(1)
-        task = task_dirs[0].name
-        info(f"Auto-detected task: {task}")
-
     staged_cfg = None
     env_cfg = experiment / "env_config.yaml"
     if env_cfg.is_file():
@@ -573,17 +560,42 @@ def cmd_eval(args) -> None:
 def cmd_play(args) -> None:
     isaac_lab_path = require_isaac_lab()
 
-    checkpoint = Path(args.checkpoint).resolve()
+    if not args.experiment and not args.checkpoint:
+        error("Either --experiment or --checkpoint must be provided.")
+        sys.exit(1)
+
+    staged_cfg = None
+
+    if args.experiment:
+        experiment_dir = Path(args.experiment).resolve()
+        if not experiment_dir.is_dir():
+            error(f"Experiment directory not found: {experiment_dir}")
+            sys.exit(1)
+        env_cfg_path = experiment_dir / "env_config.yaml"
+        if env_cfg_path.is_file():
+            staged_cfg = stage_env_config(str(env_cfg_path), isaac_lab_path, args.task)
+        else:
+            warn(f"No env_config.yaml found in {experiment_dir}")
+        if args.checkpoint:
+            checkpoint = Path(args.checkpoint).resolve()
+        else:
+            checkpoint = experiment_dir / "skrl" / "checkpoints" / "best_agent.pt"
+            info(f"Derived checkpoint: {checkpoint}")
+        ckpt_root = experiment_dir
+    else:
+        # --checkpoint only: --config is required
+        if not args.config:
+            error("--config is required when --experiment is not provided.")
+            sys.exit(1)
+        checkpoint = Path(args.checkpoint).resolve()
+        ckpt_root = (
+            checkpoint.parent.parent
+        )  # <task_dir>/checkpoints/<file> → <task_dir>
+        staged_cfg = stage_env_config(args.config, isaac_lab_path, args.task)
+
     if not checkpoint.is_file():
         error(f"Checkpoint not found: {checkpoint}")
         sys.exit(1)
-
-    # checkpoint → checkpoints/ → task_dir/ → experiment/
-    ckpt_root = checkpoint.parent.parent.parent
-    staged_cfg = None
-    env_cfg = ckpt_root / "env_config.yaml"
-    if env_cfg.is_file():
-        staged_cfg = stage_env_config(str(env_cfg), isaac_lab_path, args.task)
 
     check_gpu()
     stage_assets(isaac_lab_path, args.task)
@@ -609,6 +621,8 @@ def cmd_play(args) -> None:
         cmd += ["--video"]
     if args.video_len:
         cmd += ["--video_length", str(args.video_len)]
+    if args.cnn_checkpoint:
+        cmd += ["--cnn_checkpoint", str(args.cnn_checkpoint)]
 
     resolve_x11(getattr(args, "display", None))
     env = get_gui_env(Path(isaac_lab_path) / "workspace" / args.task, staged_cfg)
@@ -956,8 +970,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--task",
+        required=True,
         metavar="TASK",
-        help="Task name (auto-detected from experiment dir if omitted)",
+        help="Task name",
     )
     p.add_argument("--episodes", type=int, metavar="N")
     p.add_argument("--videos", type=int, metavar="N")
@@ -970,12 +985,31 @@ def build_parser() -> argparse.ArgumentParser:
     # ── play ──────────────────────────────────────────────────────────────────
     p = sub.add_parser("play", help="Play back a trained agent")
     p.add_argument("--task", required=True, metavar="TASK")
-    p.add_argument("--checkpoint", required=True, metavar="PATH")
+    p.add_argument(
+        "--experiment",
+        metavar="PATH",
+        help="RL experiment directory; supplies env_config.yaml and default checkpoint",
+    )
+    p.add_argument(
+        "--checkpoint",
+        metavar="PATH",
+        help="Override checkpoint path (default: <experiment>/skrl/<task>/checkpoints/best_agent.pt)",
+    )
+    p.add_argument(
+        "--config",
+        metavar="PATH",
+        help="Env config YAML (required when --experiment is not provided)",
+    )
     p.add_argument("--headless", action="store_true")
     p.add_argument("--cameras", action="store_true")
     p.add_argument("--envs", type=int, metavar="N")
     p.add_argument("--video", action="store_true")
     p.add_argument("--video-len", type=int, metavar="N", dest="video_len")
+    p.add_argument(
+        "--cnn-checkpoint",
+        metavar="PATH",
+        help="Pretrained MultiTaskCnn checkpoint (.pt)",
+    )
     p.add_argument("--display", type=int, metavar="N")
     p.set_defaults(func=cmd_play)
 
