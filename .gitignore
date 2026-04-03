@@ -3,5 +3,3 @@ logs
 artifacts
 __pycache__/
 *.egg-info/
-notes
-*.png
