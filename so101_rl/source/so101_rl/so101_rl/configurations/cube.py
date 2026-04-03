@@ -3,6 +3,7 @@ import isaaclab.sim as sim_utils
 from isaaclab.assets import RigidObjectCfg
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
+CUBE_DEFAULT_DIMS = (0.03, 0.03, 0.03)  # 3cm cube
 WORKSPACE_PATH = os.environ.get("ISAAC_LAB_WORKSPACE_PATH", "/workspace")
 CUBE_WIDTH = 0.03  # 3cm cube
 CUBE_RESTING_HEIGHT = CUBE_WIDTH / 2  # half the cube height (0.03m cube)

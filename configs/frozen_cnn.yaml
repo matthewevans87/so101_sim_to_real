@@ -57,8 +57,8 @@ debug:
       save: false
       interval: 10
   enable_gripper_arrow_markers: true
-  enable_tip_markers: false
   enable_camera_frame_markers: false
+  enable_grip_zone_markers: true
   vision_debug:
     enabled: false
     interval: 100
@@ -230,8 +230,6 @@ sensors:
     debug_vis: false
   gripper_transform:
     debug_vis: false
-  grip_zone_transform:
-    debug_vis: true
 
 observations:
   critic_obs_metrics:

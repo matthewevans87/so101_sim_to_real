@@ -234,8 +234,8 @@ class VisionDebugCfg:
 class DebugCfg:
     save_images: SaveImagesCfg
     enable_gripper_arrow_markers: bool
-    enable_tip_markers: bool
     enable_camera_frame_markers: bool
+    enable_grip_zone_markers: bool
     vision_debug: VisionDebugCfg
 
 
@@ -497,7 +497,6 @@ class SensorsCfg:
     gripper_contact: DebugVisCfg
     table_contact: TableContactSensorCfg
     gripper_transform: DebugVisCfg
-    grip_zone_transform: DebugVisCfg
 
 
 # ---------------------------------------------------------------------------

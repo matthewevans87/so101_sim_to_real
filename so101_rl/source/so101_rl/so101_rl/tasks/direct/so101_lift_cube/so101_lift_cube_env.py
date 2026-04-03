@@ -31,11 +31,11 @@ from so101.utils.image_processing import (
 from torch import zeros_like
 
 from so101_rl.helpers.visual_markers import (
+    define_grip_zone_markers,
     define_gripper_arrow_markers,
-    define_tip_markers,
     define_camera_frame_markers,
+    visualize_grip_zone_markers,
     visualize_gripper_arrow,
-    visualize_tip_markers,
     visualize_camera_frame_markers,
 )
 from so101_rl.helpers.utils import set_material
@@ -50,10 +50,12 @@ from so101_rl.viz.vision_debug import VisionDebugLogger
 from so101_rl.env_pipeline import (
     DRContext,
     DRPipeline,
+    EnvMetricPipeline,
     StepContext,
     MetricPipeline,
     RewardPipeline,
     build_dr_pipeline,
+    build_env_metric_pipeline,
     build_metric_pipeline,
     build_reward_pipeline,
     KEY_OBS_DIMS,
@@ -98,11 +100,6 @@ class So101LiftCube(DirectRLEnv):
         self._dof_idx, _ = self.robot.find_joints(self.cfg.joints.active)
         self._all_joint_idx, _ = self.robot.find_joints(self.cfg.joints.all)
         self._ee_body_idx, _ = self.robot.find_bodies(self.cfg.gripper.ee_link_name)
-        self._grip_zone_offset = torch.tensor(
-            self.cfg.gripper.grip_zone_offset,
-            device=self.device,
-            dtype=torch.float32,
-        ).view(1, 3)
 
         # tip offset as tensor
         self._tip_offset = torch.tensor(
@@ -167,9 +164,13 @@ class So101LiftCube(DirectRLEnv):
         )  # type: ignore
 
         self.step_metrics: dict[str, torch.Tensor] = None  # type: ignore
+        self.env_metrics: dict[str, torch.Tensor] = {}
 
         self._step_ctx = StepContext(env=self)
         self.reward_pipeline: RewardPipeline = build_reward_pipeline(self.cfg)
+        self.env_metric_pipeline: EnvMetricPipeline = build_env_metric_pipeline(
+            self.cfg
+        )
         self.metric_pipeline: MetricPipeline = build_metric_pipeline(
             self.reward_pipeline,
             extra_keys=frozenset(
@@ -181,10 +182,9 @@ class So101LiftCube(DirectRLEnv):
                     "is_table_touched",
                     # consumed by _get_observations (critic features)
                     *self.cfg.observations.critic_obs_metrics,
-                    # consumed by _pre_physics_step (arrow markers)
-                    "v_grip_zone_to_cube_ee",
                 }
             ),
+            env_metric_pipeline=self.env_metric_pipeline,
         )
         self.dr_pipeline: DRPipeline = build_dr_pipeline(self.cfg)
         _dr_feed = self.cfg.domain_randomization.camera.feed
@@ -328,7 +328,6 @@ class So101LiftCube(DirectRLEnv):
         self.gripper_contact_sensor = ContactSensor(self.cfg.gripper_contact_sensor_cfg)
         self.table_contact_sensor = ContactSensor(self.cfg.table_contact_sensor_cfg)
         self.gripper_tf = FrameTransformer(self.cfg.gripper_transforms_cfg)
-        self.grip_zone_tf = FrameTransformer(self.cfg.grip_zone_transformer_cfg)
 
         self._distractors: list[RigidObject] = []
         for i in range(self.cfg.distractors.count):
@@ -346,7 +345,6 @@ class So101LiftCube(DirectRLEnv):
         self.scene.sensors["gripper_contact_sensor"] = self.gripper_contact_sensor
         self.scene.sensors["table_contact_sensor"] = self.table_contact_sensor
         self.scene.sensors["gripper_tf"] = self.gripper_tf
-        self.scene.sensors["grip_zone_tf"] = self.grip_zone_tf
 
         # # 3) Ground plane
         # spawn_ground_plane(
@@ -367,14 +365,14 @@ class So101LiftCube(DirectRLEnv):
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
 
-        if self.cfg.debug.enable_tip_markers:
-            self.tip_markers = define_tip_markers()
-
         if self.cfg.debug.enable_camera_frame_markers:
             self.camera_frame_markers = define_camera_frame_markers()
 
         if self.cfg.debug.enable_gripper_arrow_markers:
             self.gripper_arrow_markers = define_gripper_arrow_markers()
+
+        if self.cfg.debug.enable_grip_zone_markers:
+            self.grip_zone_markers = define_grip_zone_markers()
 
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
         """Called before stepping the physics; store and scale actions."""
@@ -396,13 +394,6 @@ class So101LiftCube(DirectRLEnv):
         target_pos = self._joint_lower + t * (self._joint_upper - self._joint_lower)
         self._target_pos = target_pos
 
-        if self.cfg.debug.enable_tip_markers:
-            visualize_tip_markers(
-                self.tip_markers,
-                self._compute_ee_pos_w(self._grip_zone_offset),
-                self.device,
-            )
-
         if self.cfg.debug.enable_camera_frame_markers:
             ee_pos = self.robot.data.body_pos_w[:, self._ee_body_idx[0], :]
             ee_quat = self.robot.data.body_quat_w[:, self._ee_body_idx[0], :]
@@ -416,19 +407,19 @@ class So101LiftCube(DirectRLEnv):
                 self.camera_frame_markers, cam_pos_w, cam_quat_w, self.device
             )
 
-        v_ee = self.step_metrics["v_grip_zone_to_cube_ee"]
-        if self.cfg.debug.enable_gripper_arrow_markers and v_ee is not None:
+        if (
+            self.cfg.debug.enable_grip_zone_markers
+            and self.env_metrics.get("grip_zone_offset") is not None
+        ):
             src_pos = self.gripper_tf.data.source_pos_w
             src_quat = self.gripper_tf.data.source_quat_w
             gripper_pos_w = src_pos[:, 0, :] if src_pos.ndim == 3 else src_pos
             gripper_quat_w = src_quat[:, 0, :] if src_quat.ndim == 3 else src_quat
-            visualize_gripper_arrow(
-                self.gripper_arrow_markers,
-                gripper_pos_w,
-                gripper_quat_w,
-                v_ee,
-                self.cfg.gripper.grip_zone_offset,
-                self.device,
+            gz_pos_w = gripper_pos_w + math_utils.quat_apply(
+                gripper_quat_w, self.env_metrics["grip_zone_offset"]
+            )
+            visualize_grip_zone_markers(
+                self.grip_zone_markers, gz_pos_w, gripper_quat_w, self.device
             )
 
     def _apply_action(self) -> None:
@@ -585,6 +576,10 @@ class So101LiftCube(DirectRLEnv):
         self.robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
         self.robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
         self.robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
+
+        # Env metrics (per-episode values derived from reset state, e.g. DR cube scale)
+        # Must run BEFORE DR so DR steps can consume env metrics (e.g. dr_cube_scale).
+        self.env_metric_pipeline.apply(DRContext(env=self, env_ids=env_ids))
 
         # Domain Randomization
         self.dr_pipeline.apply(DRContext(env=self, env_ids=env_ids))

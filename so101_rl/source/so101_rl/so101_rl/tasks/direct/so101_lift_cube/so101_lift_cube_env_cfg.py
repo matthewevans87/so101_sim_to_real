@@ -5,7 +5,6 @@
 
 import os
 
-from so101_rl.configurations.debug import FRAME_CFG
 from so101_rl.configurations.so101 import (
     SO101_CFG,
     GRIPPER_CONTACT_SENSOR_CFG,
@@ -136,21 +135,6 @@ class So101LiftCubeCfg(DirectRLEnvCfg):
             )
         ],
         debug_vis=_Y.sensors.gripper_transform.debug_vis,
-    )
-
-    grip_zone_transformer_cfg = FrameTransformerCfg(
-        prim_path="/World/envs/env_.*/Robot/gripper",
-        source_frame_offset=OffsetCfg(
-            pos=_Y.gripper.grip_zone_offset,
-            rot=_Y.gripper.grip_zone_rot,
-        ),
-        target_frames=[
-            FrameTransformerCfg.FrameCfg(
-                prim_path="/World/envs/env_.*/Object", name="cube"
-            )
-        ],
-        debug_vis=_Y.sensors.grip_zone_transform.debug_vis,
-        visualizer_cfg=FRAME_CFG,
     )
 
     # ── Distractor rigid object configs ─────────────────────────────────────

@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import omni.usd  # type: ignore
+from so101_rl.configurations.so101 import X_DIST_TO_GRIPPER_TOOTH
 import torch
 from pxr import Gf, UsdGeom, UsdLux, UsdShade  # type: ignore
 
@@ -24,11 +25,11 @@ from so101_rl.configurations.camera import (
     CAMERA_ROTATION_QUAT_WXYZ,
     CAMERA_TRANSLATE_VEC,
 )
-from so101_rl.configurations.cube import CUBE_RESTING_HEIGHT
+from so101_rl.configurations.cube import CUBE_DEFAULT_DIMS, CUBE_RESTING_HEIGHT
 from so101_rl.helpers.utils import assert_tensor
 
 if TYPE_CHECKING:
-    from .so101_lift_cube_env import So101LiftCube
+    from so101_rl.tasks.direct.so101_lift_cube.so101_lift_cube_env import So101LiftCube
 
 
 # ---------------------------------------------------------------------------
@@ -46,6 +47,11 @@ class StepContext:
 
     env: So101LiftCube
     metrics: dict[str, torch.Tensor] = field(default_factory=dict)
+
+    @property
+    def env_metrics(self) -> dict[str, torch.Tensor]:
+        """Per-episode env values computed by :class:`EnvMetricPipeline` at reset."""
+        return self.env.env_metrics
 
 
 @dataclass
@@ -82,6 +88,12 @@ class MetricStep(ABC):
     depends_on: frozenset[str] = frozenset()
     """Metric keys that must be present in ``ctx.metrics`` before this step runs."""
 
+    depends_on_env_metrics: frozenset[str] = frozenset()
+    """Keys from ``env.env_metrics`` (produced by :class:`EnvMetricStep`) that
+    this step reads during :meth:`compute`.  Validated at pipeline construction
+    time against the set of keys provided by the active
+    :class:`EnvMetricPipeline`."""
+
     obs_dim: int = 0
     """Number of columns this step contributes when included in an observation vector.
     0 means the step is not intended for direct use in observations.
@@ -101,11 +113,15 @@ class MetricPipeline:
             is a dependency cycle among the steps.
     """
 
-    def __init__(self, steps: list[MetricStep]) -> None:
-        self.steps = self._toposort(steps)
+    def __init__(
+        self, steps: list[MetricStep], known_env_keys: frozenset[str] = frozenset()
+    ) -> None:
+        self.steps = self._toposort(steps, known_env_keys)
 
     @staticmethod
-    def _toposort(steps: list[MetricStep]) -> list[MetricStep]:
+    def _toposort(
+        steps: list[MetricStep], known_env_keys: frozenset[str] = frozenset()
+    ) -> list[MetricStep]:
         # Map each produced key to the step that produces it.
         key_to_step: dict[str, MetricStep] = {}
         for step in steps:
@@ -118,12 +134,21 @@ class MetricPipeline:
                 key_to_step[key] = step
 
         # Validate: every depends_on key must be produced by some step.
+        # Keys in known_env_keys are satisfied by EnvMetricPipeline — skip them.
         for step in steps:
             for key in step.depends_on:
-                if key not in key_to_step:
+                if key not in key_to_step and key not in known_env_keys:
                     raise ValueError(
                         f"{type(step).__name__} depends on metric key '{key}', "
                         f"but no step produces it."
+                    )
+            # Validate depends_on_env_metrics keys are available from EnvMetricPipeline.
+            for key in step.depends_on_env_metrics:
+                if key not in known_env_keys:
+                    raise ValueError(
+                        f"{type(step).__name__} depends on env-metric key '{key}' "
+                        f"via depends_on_env_metrics, but it is not provided by the "
+                        f"EnvMetricPipeline (known_env_keys={known_env_keys!r})."
                     )
 
         # Build adjacency list: predecessor_step -> {dependent_steps}
@@ -136,6 +161,9 @@ class MetricPipeline:
 
         for step in steps:
             for key in step.depends_on:
+                if key in known_env_keys:
+                    # satisfied by EnvMetricPipeline — no predecessor step in this graph
+                    continue
                 predecessor = key_to_step[key]
                 if id(predecessor) != id(step):
                     dependents[id(predecessor)].add(id(step))
@@ -175,6 +203,10 @@ class RewardStep(ABC):
     requires_metrics: frozenset[str] = frozenset()
     """Metric keys from ``ctx.metrics`` that this step reads during ``compute``.
     Used by ``build_metric_pipeline`` to determine which metric steps to include."""
+
+    requires_env_metrics: frozenset[str] = frozenset()
+    """Keys from ``env.env_metrics`` (produced by :class:`EnvMetricStep`) that
+    this step reads during :meth:`compute`."""
 
     @abstractmethod
     def compute(self, ctx: StepContext) -> torch.Tensor:
@@ -327,26 +359,15 @@ class CameraCubeAlignmentMetricStep(MetricStep):
         ctx.metrics["camera_cube_alignment"] = val
 
 
-class VGripZoneToCubeEEMetricStep(MetricStep):
-    produces = frozenset({"v_grip_zone_to_cube_ee"})
-    depends_on = frozenset({"cube_pos_ee"})
-    obs_dim = 3
-
-    def compute(self, ctx: StepContext) -> None:
-        env = ctx.env
-        val = ctx.metrics["cube_pos_ee"] - env._grip_zone_offset
-        assert_tensor(val, (env.num_envs, 3), torch.float32)
-        ctx.metrics["v_grip_zone_to_cube_ee"] = val
-
-
 class CubePosGZMetricStep(MetricStep):
     produces = frozenset({"cube_pos_gz"})
-    depends_on = frozenset()
+    depends_on = frozenset({"cube_pos_ee"})
+    depends_on_env_metrics = frozenset({"grip_zone_offset"})
     obs_dim = 3
 
     def compute(self, ctx: StepContext) -> None:
         env = ctx.env
-        val = env.grip_zone_tf.data.target_pos_source[:, 0, :]
+        val = ctx.metrics["cube_pos_ee"] - ctx.env_metrics["grip_zone_offset"]
         assert_tensor(val, (env.num_envs, 3), torch.float32)
         ctx.metrics["cube_pos_gz"] = val
 
@@ -358,7 +379,7 @@ class CubeRot6DGZMetricStep(MetricStep):
 
     def compute(self, ctx: StepContext) -> None:
         env = ctx.env
-        q_gz = quat_unique(env.grip_zone_tf.data.target_quat_source[:, 0, :])
+        q_gz = quat_unique(env.gripper_tf.data.target_quat_source[:, 0, :])
         R = matrix_from_quat(q_gz)
         val = torch.cat([R[..., :, 0], R[..., :, 1]], dim=-1)
         assert_tensor(val, (env.num_envs, 6), torch.float32)
@@ -367,14 +388,12 @@ class CubeRot6DGZMetricStep(MetricStep):
 
 class GripZoneCubeDistanceMetricStep(MetricStep):
     produces = frozenset({"grip_zone_cube_distance"})
-    depends_on = frozenset({"v_grip_zone_to_cube_ee"})
+    depends_on = frozenset({"cube_pos_gz"})
     obs_dim = 1
 
     def compute(self, ctx: StepContext) -> None:
         env = ctx.env
-        val = (
-            ctx.metrics["v_grip_zone_to_cube_ee"].norm(dim=-1, keepdim=True).squeeze(-1)
-        )
+        val = ctx.metrics["cube_pos_gz"].norm(dim=-1, keepdim=True).squeeze(-1)
         assert_tensor(val, (env.num_envs,), torch.float32)
         ctx.metrics["grip_zone_cube_distance"] = val
 
@@ -475,36 +494,6 @@ class IsCubeGrippedMetricStep(MetricStep):
         ).bool()
         assert_tensor(val, (env.num_envs,), torch.bool)
         ctx.metrics["is_cube_gripped"] = val
-
-
-class GripZoneOffsetMetricStep(MetricStep):
-    produces = frozenset({"grip_zone_offset"})
-    depends_on = frozenset({"cube_dims"})
-    obs_dim = 3
-
-    def compute(self, ctx: StepContext) -> None:
-        env = ctx.env
-        val = ctx.metrics["cube_pos_ee"] - env._grip_zone_offset
-        assert_tensor(val, (env.num_envs, 3), torch.float32)
-        ctx.metrics["v_grip_zone_to_cube_ee"] = val
-
-
-class CubeDimsMetricStep(MetricStep):
-    produces = frozenset({"cube_dims"})
-    depends_on = frozenset({})
-    obs_dim = 3
-
-    def compute(self, ctx: StepContext) -> None:
-        env = ctx.env
-        default_cube_width = 0.03
-        cube_scale = (
-            env.cube.spawn.scale
-            if env.cube.spawn and env.cube.spawn.scale is not None
-            else 1.0
-        )
-        val = ctx.metrics["cube_pos_ee"] - env._grip_zone_offset
-        assert_tensor(val, (env.num_envs, 3), torch.float32)
-        ctx.metrics["v_grip_zone_to_cube_ee"] = val
 
 
 # ---------------------------------------------------------------------------
@@ -916,7 +905,6 @@ ALL_METRIC_STEPS: list[type[MetricStep]] = [
     CubePosEEMetricStep,
     GripperCubeAlignmentMetricStep,
     CameraCubeAlignmentMetricStep,
-    VGripZoneToCubeEEMetricStep,
     CubePosGZMetricStep,
     CubeRot6DGZMetricStep,
     GripZoneCubeDistanceMetricStep,
@@ -947,6 +935,7 @@ KEY_OBS_DIMS: dict[str, int] = {
 def build_metric_pipeline(
     reward_pipeline: RewardPipeline,
     extra_keys: frozenset[str] = frozenset(),
+    env_metric_pipeline: EnvMetricPipeline | None = None,
 ) -> MetricPipeline:
     """Build a :class:`MetricPipeline` containing only the steps needed by
     ``reward_pipeline`` (via ``RewardStep.requires_metrics``) plus any
@@ -964,7 +953,16 @@ def build_metric_pipeline(
         extra_keys: Additional metric keys to force-include (e.g. keys
             consumed by observations or ``_pre_physics_step`` rather than
             rewards).
+        env_metric_pipeline: The active :class:`EnvMetricPipeline`, used to
+            validate ``depends_on_env_metrics`` declarations and avoid chasing
+            env-metric keys through the MetricStep catalog.
     """
+    known_env_keys: frozenset[str] = (
+        env_metric_pipeline.provided_keys
+        if env_metric_pipeline is not None
+        else frozenset()
+    )
+
     # Build a key → step-class map from the full catalog.
     key_to_cls: dict[str, type[MetricStep]] = {}
     for cls in ALL_METRIC_STEPS:
@@ -977,19 +975,22 @@ def build_metric_pipeline(
     while frontier:
         key = frontier.pop()
         if key not in key_to_cls:
-            # Will be caught as an unsatisfied dependency by MetricPipeline._toposort.
+            # Either an env-metric key (satisfied by EnvMetricPipeline) or will be
+            # caught as an unsatisfied dependency by MetricPipeline._toposort.
             continue
-        for dep_key in key_to_cls[key].depends_on:
-            if dep_key not in needed_keys:
+        cls = key_to_cls[key]
+        for dep_key in cls.depends_on:
+            if dep_key not in needed_keys and dep_key not in known_env_keys:
                 needed_keys.add(dep_key)
                 frontier.add(dep_key)
+        # depends_on_env_metrics keys are satisfied externally — don't chase them.
 
     # Collect the unique step classes required.
     needed_cls: set[type[MetricStep]] = {
         key_to_cls[k] for k in needed_keys if k in key_to_cls
     }
 
-    return MetricPipeline([cls() for cls in needed_cls])
+    return MetricPipeline([cls() for cls in needed_cls], known_env_keys=known_env_keys)
 
 
 def build_reward_pipeline(cfg) -> RewardPipeline:
@@ -1071,8 +1072,11 @@ class DRStep(ABC):
     """
 
     requires_metrics: frozenset[str] = frozenset()
-    """Metric keys from ``ctx.metrics`` that this step reads during :meth:`apply`.
-    Reserved for future use; currently empty for all concrete steps."""
+    """Metric keys from ``ctx.metrics`` that this step reads during :meth:`apply`."""
+
+    requires_env_metrics: frozenset[str] = frozenset()
+    """Keys from ``env.env_metrics`` (produced by :class:`EnvMetricPipeline`) that
+    this step reads during :meth:`apply`."""
 
     @abstractmethod
     def apply(self, ctx: DRContext) -> None: ...
@@ -1088,6 +1092,109 @@ class DRPipeline:
 
     def __init__(self, steps: list[DRStep]) -> None:
         self.steps = steps
+
+    def apply(self, ctx: DRContext) -> None:
+        for step in self.steps:
+            step.apply(ctx)
+
+
+# ---------------------------------------------------------------------------
+# EnvMetricStep base classes
+# ---------------------------------------------------------------------------
+
+
+class EnvMetricStep(ABC):
+    """Computes one or more per-episode, per-environment values and stores them in
+    ``env.env_metrics`` during episode reset.
+
+    Unlike :class:`MetricStep` (which is recomputed every physics step), an
+    ``EnvMetricStep`` runs once per reset inside :class:`EnvMetricPipeline`.
+    Results persist on ``env.env_metrics`` across the entire episode and are
+    accessible to :class:`MetricStep`s via ``ctx.env_metrics``.
+
+    Subclasses must declare ``produces`` and ``depends_on`` for toposorting,
+    and implement :meth:`apply`.  Values must be written as full tensors of
+    shape ``(num_envs, ...)``, initialised on first call (if absent) and
+    updated in-place for ``ctx.env_ids`` only.
+    """
+
+    produces: frozenset[str] = frozenset()
+    """Keys this step writes into ``env.env_metrics``."""
+
+    depends_on: frozenset[str] = frozenset()
+    """Other ``env.env_metrics`` keys that must be populated before this step runs."""
+
+    @abstractmethod
+    def apply(self, ctx: DRContext) -> None:
+        """Write values for ``ctx.env_ids`` into ``ctx.env.env_metrics``."""
+        ...
+
+
+class EnvMetricPipeline:
+    """Runs a topologically-sorted sequence of :class:`EnvMetricStep` objects
+    at episode reset, populating ``env.env_metrics``.
+
+    Raises:
+        ValueError: On duplicate ``produces`` keys, unsatisfied dependencies,
+            or dependency cycles.
+    """
+
+    def __init__(self, steps: list[EnvMetricStep]) -> None:
+        self.steps = self._toposort(steps)
+
+    @property
+    def provided_keys(self) -> frozenset[str]:
+        """Union of all ``produces`` sets across all steps in this pipeline."""
+        return frozenset().union(*(s.produces for s in self.steps))
+
+    @staticmethod
+    def _toposort(steps: list[EnvMetricStep]) -> list[EnvMetricStep]:
+        key_to_step: dict[str, EnvMetricStep] = {}
+        for step in steps:
+            for key in step.produces:
+                if key in key_to_step:
+                    raise ValueError(
+                        f"Env-metric key '{key}' is produced by more than one step: "
+                        f"{type(key_to_step[key]).__name__} and {type(step).__name__}"
+                    )
+                key_to_step[key] = step
+
+        for step in steps:
+            for key in step.depends_on:
+                if key not in key_to_step:
+                    raise ValueError(
+                        f"{type(step).__name__} depends on env-metric key '{key}', "
+                        f"but no step produces it."
+                    )
+
+        dependents: dict[int, set[int]] = defaultdict(set)
+        in_degree: dict[int, int] = {id(s): 0 for s in steps}
+        step_by_id: dict[int, EnvMetricStep] = {id(s): s for s in steps}
+
+        for step in steps:
+            for key in step.depends_on:
+                predecessor = key_to_step[key]
+                if id(predecessor) != id(step):
+                    dependents[id(predecessor)].add(id(step))
+                    in_degree[id(step)] += 1
+
+        queue: deque[int] = deque(sid for sid, deg in in_degree.items() if deg == 0)
+        sorted_ids: list[int] = []
+        while queue:
+            sid = queue.popleft()
+            sorted_ids.append(sid)
+            for dep_id in dependents[sid]:
+                in_degree[dep_id] -= 1
+                if in_degree[dep_id] == 0:
+                    queue.append(dep_id)
+
+        if len(sorted_ids) != len(steps):
+            raise ValueError(
+                "Cycle detected among env-metric steps. Check the 'produces' and "
+                "'depends_on' declarations for a circular dependency."
+            )
+
+        return [step_by_id[sid] for sid in sorted_ids]
 
     def apply(self, ctx: DRContext) -> None:
         for step in self.steps:
@@ -1141,21 +1248,20 @@ class CubeColorDRStep(DRStep):
 
 
 class CubeSizeDRStep(DRStep):
-    """Randomise the cube uniform scale for each resetting environment."""
+    """Apply the per-env cube scale that was sampled by :class:`CubeDimsEnvMetricStep`.
 
-    requires_metrics: frozenset[str] = frozenset()
+    Reads ``env.env_metrics["dr_cube_scale"]`` (shape ``(num_envs, 3)``) and sets the
+    ``XformOp.TypeScale`` on the cube prim for each resetting environment.
+    """
+
+    requires_env_metrics: frozenset[str] = frozenset({"dr_cube_scale"})
 
     def apply(self, ctx: DRContext) -> None:
         env = ctx.env
-        size_range = env.cfg.domain_randomization.cube.size_range
         stage = omni.usd.get_context().get_stage()
-        num_envs = len(ctx.env_ids)
-        size_factors = (
-            torch.rand(num_envs, device="cuda") * (size_range[1] - size_range[0])
-            + size_range[0]
-        )
-        for i, env_id in enumerate(ctx.env_ids):
-            size_factor = size_factors[i].item()
+        for env_id in ctx.env_ids:
+            scale_xyz = env.env_metrics["dr_cube_scale"][env_id]  # (3,)
+            sx, sy, sz = float(scale_xyz[0]), float(scale_xyz[1]), float(scale_xyz[2])
             object_prim_path = f"/World/envs/env_{env_id}/Object"
             try:
                 object_prim = stage.GetPrimAtPath(object_prim_path)
@@ -1174,7 +1280,7 @@ class CubeSizeDRStep(DRStep):
                         break
                 if scale_op is None:
                     scale_op = xformable.AddScaleOp()
-                scale_op.Set(Gf.Vec3f(size_factor, size_factor, size_factor))
+                scale_op.Set(Gf.Vec3f(sx, sy, sz))
             except Exception as e:
                 print(f"[CubeSizeDRStep] Error setting scale: {e}")
 
@@ -1601,6 +1707,109 @@ class DistractorsDRStep(DRStep):
 
 
 # ---------------------------------------------------------------------------
+# EnvMetric steps
+# ---------------------------------------------------------------------------
+
+
+class CubeDimsEnvMetricStep(EnvMetricStep):
+    """Samples a per-env, per-episode (X, Y, Z) scale for the cube.
+
+    Produces ``env.env_metrics["dr_cube_scale"]`` of shape ``(num_envs, 3)``.
+    Scales are drawn i.i.d. uniformly from
+    ``cfg.domain_randomization.cube.size_range`` and stored as isotropic
+    (X = Y = Z) vectors; independent per-axis non-isotropic scaling can be
+    added later by extending this step.
+
+    This step runs **before** :class:`CubeSizeDRStep` so that DR steps can
+    consume the sampled values directly without re-sampling.
+    """
+
+    produces = frozenset({"dr_cube_scale"})
+    depends_on = frozenset()
+
+    def apply(self, ctx: DRContext) -> None:
+        env = ctx.env
+        n = len(ctx.env_ids)
+        env_ids_t = torch.as_tensor(list(ctx.env_ids), device=env.device)
+
+        # Initialise full tensor on first call (all-ones = no scale change).
+        if "dr_cube_scale" not in env.env_metrics:
+            env.env_metrics["dr_cube_scale"] = torch.ones(
+                env.num_envs, 3, device=env.device, dtype=torch.float32
+            )
+
+        size_range = env.cfg.domain_randomization.cube.size_range
+        scalar_scales = (
+            torch.rand(n, device=env.device) * (size_range[1] - size_range[0])
+            + size_range[0]
+        )  # (n,) — isotropic
+        # Store as (n, 3) so downstream steps can handle per-axis scales uniformly.
+        env.env_metrics["dr_cube_scale"][env_ids_t] = scalar_scales.unsqueeze(
+            -1
+        ).expand(-1, 3)
+
+
+class GripZoneOffsetEnvMetricStep(EnvMetricStep):
+    """Computes the grip-zone offset vector for each env, scaled by the
+    per-episode DR cube scale sampled by :class:`CubeDimsEnvMetricStep`.
+
+    Produces ``env.env_metrics["grip_zone_offset"]`` of shape ``(num_envs, 3)``.
+    This is an :class:`EnvMetricStep` (not a :class:`MetricStep`) because the
+    grip-zone offset only changes at episode reset (when the cube scale is
+    re-sampled), not on every physics step.
+
+    Reads ``env.env_metrics["dr_cube_scale"]`` (shape ``(num_envs, 3)``) and
+    multiplies the static ``env._grip_zone_offset`` element-wise.  When size DR
+    is disabled the scale is all-ones and the result equals the static config
+    value.
+    """
+
+    produces = frozenset({"grip_zone_offset"})
+    depends_on = frozenset({"dr_cube_scale"})
+
+    def apply(self, ctx: DRContext) -> None:
+        env = ctx.env
+        env_ids_t = torch.as_tensor(list(ctx.env_ids), device=env.device)
+
+        _grip_zone_offset = torch.tensor(
+            ctx.env.cfg.gripper.grip_zone_offset,
+            device=ctx.env.device,
+            dtype=torch.float32,
+        ).view(1, 3)
+
+        # Initialise full tensor on first call.
+        if "grip_zone_offset" not in env.env_metrics:
+            env.env_metrics["grip_zone_offset"] = _grip_zone_offset.expand(
+                env.num_envs, -1
+            ).clone()
+
+        cube_scale = env.env_metrics["dr_cube_scale"][env_ids_t]  # (len, 3)
+
+        # Body diagonal of the scaled cube, shape (len,).
+        cube_dims = torch.tensor(
+            CUBE_DEFAULT_DIMS, device=env.device, dtype=torch.float32
+        )
+        d = torch.norm(cube_dims * cube_scale, dim=-1)  # (len,)
+
+        val = _grip_zone_offset.expand(len(env_ids_t), -1).clone()  # (len, 3)
+        val[:, 0] = val[:, 0] - X_DIST_TO_GRIPPER_TOOTH + d
+        env.env_metrics["grip_zone_offset"][env_ids_t] = val
+
+        print(f"[GripZoneOffsetEnvMetricStep] cube_dims (base): {cube_dims.tolist()}")
+        print(
+            f"[GripZoneOffsetEnvMetricStep] cube_scale[0]:    {cube_scale[0].tolist()}"
+        )
+        print(f"[GripZoneOffsetEnvMetricStep] d[0]:             {d[0].item():.6f}")
+        print(f"[GripZoneOffsetEnvMetricStep] grip_zone_offset[0]: {val[0].tolist()}")
+
+
+ALL_ENV_METRIC_STEPS: list[type[EnvMetricStep]] = [
+    CubeDimsEnvMetricStep,
+    GripZoneOffsetEnvMetricStep,
+]
+
+
+# ---------------------------------------------------------------------------
 # DR pipeline factory
 # ---------------------------------------------------------------------------
 
@@ -1641,3 +1850,25 @@ def build_dr_pipeline(cfg) -> DRPipeline:
         steps.append(DistractorsDRStep())
 
     return DRPipeline(steps)
+
+
+# ---------------------------------------------------------------------------
+# EnvMetric pipeline factory
+# ---------------------------------------------------------------------------
+
+
+def build_env_metric_pipeline(cfg) -> EnvMetricPipeline:
+    """Construct the :class:`EnvMetricPipeline` for the given config.
+
+    Currently always includes :class:`CubeDimsEnvMetricStep` so that
+    ``env.env_metrics["dr_cube_scale"]`` is always available (defaulting to
+    ``1.0`` when size DR is disabled).
+
+    Args:
+        cfg: The ``So101LiftCubeCfg`` instance (``env.cfg``).
+    """
+    steps: list[EnvMetricStep] = [
+        CubeDimsEnvMetricStep(),
+        GripZoneOffsetEnvMetricStep(),
+    ]
+    return EnvMetricPipeline(steps)

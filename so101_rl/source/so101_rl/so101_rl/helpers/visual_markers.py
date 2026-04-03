@@ -85,7 +85,9 @@ def visualize_tip_markers(
     orientations = torch.zeros((N, 4), device=device)
     orientations[:, 0] = 1.0  # w=1 identity quaternion (wxyz)
     marker_indices = torch.zeros(N, dtype=torch.long, device=device)
-    markers.visualize(translations=tip_pos, orientations=orientations, marker_indices=marker_indices)
+    markers.visualize(
+        translations=tip_pos, orientations=orientations, marker_indices=marker_indices
+    )
 
 
 def visualize_camera_frame_markers(
@@ -128,22 +130,56 @@ def visualize_camera_frame_markers(
         axis = torch.where(axis_n > eps, axis / (axis_n + eps), fallback)
         return math_utils.quat_from_angle_axis(angle, axis)
 
-    all_pos = torch.cat([x_pos, y_pos, z_pos], dim=0)   # (3N, 3)
-    all_quat = torch.cat([_rot_y_to_dir(x_world), _rot_y_to_dir(y_world), _rot_y_to_dir(z_world)], dim=0)
-    marker_indices = torch.cat([
-        torch.zeros(N, dtype=torch.long, device=device),
-        torch.ones(N, dtype=torch.long, device=device),
-        torch.full((N,), 2, dtype=torch.long, device=device),
-    ])
+    all_pos = torch.cat([x_pos, y_pos, z_pos], dim=0)  # (3N, 3)
+    all_quat = torch.cat(
+        [_rot_y_to_dir(x_world), _rot_y_to_dir(y_world), _rot_y_to_dir(z_world)], dim=0
+    )
+    marker_indices = torch.cat(
+        [
+            torch.zeros(N, dtype=torch.long, device=device),
+            torch.ones(N, dtype=torch.long, device=device),
+            torch.full((N,), 2, dtype=torch.long, device=device),
+        ]
+    )
     markers.visualize(all_pos, all_quat, marker_indices=marker_indices)
+
+
+def define_grip_zone_markers() -> VisualizationMarkers:
+    """A frame prim marker at the grip zone origin for each environment."""
+    marker_cfg = VisualizationMarkersCfg(
+        prim_path="/Visuals/GripZoneMarkers",
+        markers={
+            "frame": sim_utils.UsdFileCfg(
+                usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/UIElements/frame_prim.usd",
+                scale=(0.05, 0.05, 0.05),
+            ),
+        },
+    )
+    return VisualizationMarkers(cfg=marker_cfg)
+
+
+def visualize_grip_zone_markers(
+    markers: VisualizationMarkers,
+    gz_pos_w: torch.Tensor,  # (N, 3) grip zone world positions
+    gz_quat_w: torch.Tensor,  # (N, 4) wxyz — same orientation as gripper
+    device: str,
+) -> None:
+    """Draw a frame prim marker at each environment's grip zone origin."""
+    N = gz_pos_w.shape[0]
+    marker_indices = torch.zeros(N, dtype=torch.long, device=device)
+    markers.visualize(
+        translations=gz_pos_w, orientations=gz_quat_w, marker_indices=marker_indices
+    )
 
 
 def visualize_gripper_arrow(
     markers: VisualizationMarkers,
     gripper_pos_w: torch.Tensor,  # (N, 3)
     gripper_quat_w: torch.Tensor,  # (N, 4) wxyz
-    v_ee: torch.Tensor,            # (N, 3) direction vector in EE frame
-    grip_zone_offset: tuple[float, float, float],        # [x, y, z] offset for arrow placement
+    v_ee: torch.Tensor,  # (N, 3) direction vector in EE frame
+    grip_zone_offset: tuple[
+        float, float, float
+    ],  # [x, y, z] offset for arrow placement
     device: str,
 ) -> None:
     """Draw an arrow at the gripper pointing along v_ee (expressed in EE frame)."""
