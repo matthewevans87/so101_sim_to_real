@@ -53,6 +53,16 @@ parser.add_argument(
     "--checkpoint", type=str, default=None, help="Path to model checkpoint."
 )
 parser.add_argument(
+    "--cnn_checkpoint",
+    type=str,
+    default=None,
+    help=(
+        "Path to a pretrained MultiTaskCnn checkpoint produced by "
+        "train_cnn.py (best_model.pt or final_model.pt). "
+        "Loaded into vision_encoder.cnn_checkpoint before the environment is constructed."
+    ),
+)
+parser.add_argument(
     "--seed", type=int, default=None, help="Seed used for the environment"
 )
 parser.add_argument(
@@ -139,6 +149,7 @@ from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
 import so101_rl.tasks  # noqa: F401
+from so101_rl.configurations.camera import OVERHEAD_CAMERA_CFG
 
 # config shortcuts
 if args_cli.agent is None:
@@ -212,6 +223,25 @@ def main(
 
     # set the log directory for the environment (works for all environment types)
     env_cfg.log_dir = log_dir
+
+    # Wire the CNN checkpoint path into vision_encoder so the env
+    # constructor loads it via multitask_cnn_from_checkpoint at startup.
+    if args_cli.cnn_checkpoint:
+        if (
+            getattr(env_cfg, "vision_encoder", None) is None
+            or env_cfg.vision_encoder.type != "frozen_cnn"
+        ):
+            raise ValueError(
+                "--cnn_checkpoint requires vision_encoder.type == "
+                "'frozen_cnn'.  Switch to a frozen_cnn env config."
+            )
+        env_cfg.vision_encoder.cnn_checkpoint = args_cli.cnn_checkpoint
+
+    # Enable overhead camera when recording video so camera_povs/ gets an overhead track
+    if args_cli.video and getattr(env_cfg, "overhead_camera_cfg", None) is None:
+        env_cfg.overhead_camera_cfg = OVERHEAD_CAMERA_CFG.replace(
+            prim_path="/World/envs/env_.*/overhead_camera"
+        )
 
     # create isaac environment
     env = gym.make(
@@ -306,9 +336,13 @@ def main(
             if args_cli.video and hasattr(env.unwrapped, "scene"):
                 try:
                     # Access gripper camera (SO101 tasks) or generic 'camera'
-                    gripper_cam = env.unwrapped.scene.sensors.get("gripper_camera") or env.unwrapped.scene.sensors.get("camera")
+                    gripper_cam = env.unwrapped.scene.sensors.get(
+                        "gripper_camera"
+                    ) or env.unwrapped.scene.sensors.get("camera")
                     if gripper_cam is not None and "rgb" in gripper_cam.data.output:
-                        gripper_rgb = gripper_cam.data.output["rgb"]  # (num_envs, H, W, 3) uint8
+                        gripper_rgb = gripper_cam.data.output[
+                            "rgb"
+                        ]  # (num_envs, H, W, 3) uint8
 
                         # Save frames for each environment
                         for env_idx in range(gripper_rgb.shape[0]):
@@ -318,9 +352,13 @@ def main(
                             if env_idx not in camera_video_writers:
                                 h, w = frame.shape[:2]
                                 fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-                                video_path = str(camera_video_dir / f"gripper_env_{env_idx:03d}.mp4")
+                                video_path = str(
+                                    camera_video_dir / f"gripper_env_{env_idx:03d}.mp4"
+                                )
                                 fps = 30  # 30 FPS
-                                camera_video_writers[env_idx] = cv2.VideoWriter(video_path, fourcc, fps, (w, h))
+                                camera_video_writers[env_idx] = cv2.VideoWriter(
+                                    video_path, fourcc, fps, (w, h)
+                                )
 
                             # Convert RGB to BGR for OpenCV and write frame
                             frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
@@ -329,7 +367,9 @@ def main(
                     # Access overhead camera if available
                     overhead_cam = env.unwrapped.scene.sensors.get("overhead_camera")
                     if overhead_cam is not None and "rgb" in overhead_cam.data.output:
-                        overhead_rgb = overhead_cam.data.output["rgb"]  # (num_envs, H, W, 3) uint8
+                        overhead_rgb = overhead_cam.data.output[
+                            "rgb"
+                        ]  # (num_envs, H, W, 3) uint8
 
                         for env_idx in range(overhead_rgb.shape[0]):
                             frame = overhead_rgb[env_idx].cpu().numpy()
@@ -337,9 +377,13 @@ def main(
                             if env_idx not in overhead_video_writers:
                                 h, w = frame.shape[:2]
                                 fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-                                video_path = str(camera_video_dir / f"overhead_env_{env_idx:03d}.mp4")
+                                video_path = str(
+                                    camera_video_dir / f"overhead_env_{env_idx:03d}.mp4"
+                                )
                                 fps = 30
-                                overhead_video_writers[env_idx] = cv2.VideoWriter(video_path, fourcc, fps, (w, h))
+                                overhead_video_writers[env_idx] = cv2.VideoWriter(
+                                    video_path, fourcc, fps, (w, h)
+                                )
 
                             frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
                             overhead_video_writers[env_idx].write(frame_bgr)
@@ -366,7 +410,9 @@ def main(
         if overhead_video_writers:
             for env_idx, writer in overhead_video_writers.items():
                 writer.release()
-        total = (len(camera_video_writers) if camera_video_writers else 0) + (len(overhead_video_writers) if overhead_video_writers else 0)
+        total = (len(camera_video_writers) if camera_video_writers else 0) + (
+            len(overhead_video_writers) if overhead_video_writers else 0
+        )
         print(f"[INFO] Saved {total} camera POV videos to: {camera_video_dir}")
 
     # close the simulator

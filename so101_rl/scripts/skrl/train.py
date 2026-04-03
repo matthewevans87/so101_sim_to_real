@@ -91,6 +91,17 @@ parser.add_argument(
     default=None,
     help="Root artifacts directory for this run (e.g. /path/to/artifacts/2026-03-11_10-20-38).",
 )
+parser.add_argument(
+    "--cnn_checkpoint",
+    type=str,
+    default=None,
+    help=(
+        "Path to a pretrained MultiTaskCnn checkpoint produced by "
+        "train_cnn.py (best_model.pt or final_model.pt). "
+        "Only valid when vision_encoder.type == 'frozen_cnn'. "
+        "Weights are loaded into the frozen CNN feature extractor before training starts."
+    ),
+)
 
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
@@ -150,6 +161,96 @@ import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
 import so101_rl.tasks  # noqa: F401
+
+
+def _flatten_for_hparams(obj, prefix: str = "") -> dict:
+    """Recursively flatten a nested dict/object into a flat dict for TensorBoard add_hparams.
+
+    Keys are joined with '/' (e.g. ``"env/rewards/distance/scale"``).  Values are
+    coerced to types accepted by PyTorch's SummaryWriter.add_hparams:
+    int, float, str, bool; everything else is stringified.
+    """
+    result: dict[str, int | float | str | bool] = {}
+    if isinstance(obj, dict):
+        items = obj.items()
+    elif hasattr(obj, "__dict__"):
+        items = vars(obj).items()
+    else:
+        # Scalar leaf — shouldn't normally be called directly with a scalar
+        key = prefix or "value"
+        if isinstance(obj, (int, float, bool)):
+            return {key: obj}
+        return {key: str(obj) if obj is not None else "null"}
+
+    for k, v in items:
+        full_key = f"{prefix}/{k}" if prefix else k
+        if isinstance(v, dict) or hasattr(v, "__dict__"):
+            result.update(_flatten_for_hparams(v, full_key))
+        elif isinstance(v, (int, float, bool)):
+            result[full_key] = v
+        elif v is None:
+            result[full_key] = "null"
+        else:
+            # lists, tuples, and any other type → human-readable string
+            result[full_key] = str(v)
+    return result
+
+
+def _log_configs_to_tensorboard(
+    log_dir: str, env_yaml_path: str, agent_yaml_path: str
+) -> None:
+    """Write env and agent configs to TensorBoard as both TEXT and HPARAMS entries.
+
+    TEXT entries (``config/env``, ``config/agent``) show the raw YAML in the TEXT tab
+    for quick human inspection.  The HPARAMS entry writes a single row to the HPARAMS
+    tab so that multiple runs can be compared side-by-side.
+
+    Both config YAML files are expected to already exist on disk (written by
+    ``dump_yaml`` earlier in ``main()``).
+    """
+    import yaml
+    from torch.utils.tensorboard import SummaryWriter
+
+    # Isaac Lab's dump_yaml serialises Python tuples as !!python/tuple tags.
+    # yaml.safe_load refuses these, so we add a single targeted constructor that
+    # coerces tuples to lists — safe because these files are machine-generated
+    # by our own code and contain no arbitrary Python objects.
+    class _Loader(yaml.SafeLoader):
+        pass
+
+    _Loader.add_constructor(
+        "tag:yaml.org,2002:python/tuple",
+        lambda loader, node: list(loader.construct_sequence(node)),
+    )
+
+    with open(env_yaml_path, "r") as f:
+        env_yaml_text = f.read()
+    with open(agent_yaml_path, "r") as f:
+        agent_yaml_text = f.read()
+
+    env_cfg_dict = (
+        yaml.load(env_yaml_text, Loader=_Loader) or {}
+    )  # noqa: S506 (controlled input)
+    agent_cfg_dict = yaml.load(agent_yaml_text, Loader=_Loader) or {}  # noqa: S506
+
+    # Write to the run's log_dir directly; SKRL writes its own events into
+    # log_dir/runs/{uuid}/ — TensorBoard discovers all event files recursively.
+    writer = SummaryWriter(log_dir=log_dir)
+    try:
+        writer.add_text("config/env", f"```yaml\n{env_yaml_text}\n```", global_step=0)
+        writer.add_text(
+            "config/agent", f"```yaml\n{agent_yaml_text}\n```", global_step=0
+        )
+
+        flat: dict[str, int | float | str | bool] = {
+            **_flatten_for_hparams(env_cfg_dict, "env"),
+            **_flatten_for_hparams(agent_cfg_dict, "agent"),
+        }
+        # add_hparams requires at least one metric; use a dummy placeholder.
+        writer.add_hparams(flat, {"_placeholder": 0.0})
+    finally:
+        writer.close()
+
 
 # config shortcuts
 if args_cli.agent is None:
@@ -223,16 +324,23 @@ def main(
     # specify directory for logging experiments
     log_root_path = os.path.abspath(os.path.join(args_cli.artifacts_dir, "skrl"))
     print(f"[INFO] Logging experiment in directory: {log_root_path}")
-    # set directory into agent config (experiment_name kept from YAML config)
+    # Write directly into log_root_path — no experiment_name subdir
     agent_cfg["agent"]["experiment"]["directory"] = log_root_path
+    agent_cfg["agent"]["experiment"]["experiment_name"] = ""
     agent_cfg["agent"]["experiment"]["write_interval"] = 100
 
-    # log_dir is the full path including the experiment name sub-dir
-    log_dir = os.path.join(log_root_path, agent_cfg["agent"]["experiment"]["experiment_name"])
+    log_dir = log_root_path
 
     # dump the configuration into log-directory
     dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
     dump_yaml(os.path.join(log_dir, "params", "agent.yaml"), agent_cfg)
+
+    # log configs to TensorBoard (TEXT tab + HPARAMS comparison tab)
+    _log_configs_to_tensorboard(
+        log_dir=log_dir,
+        env_yaml_path=os.path.join(log_dir, "params", "env.yaml"),
+        agent_yaml_path=os.path.join(log_dir, "params", "agent.yaml"),
+    )
 
     # get checkpoint path (to resume training)
     resume_path = (
@@ -249,6 +357,19 @@ def main(
 
     # set the log directory for the environment (works for all environment types)
     env_cfg.log_dir = log_dir
+
+    # Wire the CNN checkpoint path into vision_encoder so the env
+    # constructor loads it via multitask_cnn_from_checkpoint at startup.
+    if args_cli.cnn_checkpoint:
+        if (
+            getattr(env_cfg, "vision_encoder", None) is None
+            or env_cfg.vision_encoder.type != "frozen_cnn"
+        ):
+            raise ValueError(
+                "--cnn_checkpoint requires vision_encoder.type == "
+                "'frozen_cnn'.  Switch to a frozen_cnn env config."
+            )
+        env_cfg.vision_encoder.cnn_checkpoint = args_cli.cnn_checkpoint
 
     # create isaac environment
     env = gym.make(
@@ -276,8 +397,6 @@ def main(
         env, ml_framework=args_cli.ml_framework
     )  # same as: `wrap_env(env, wrapper="auto")`
 
-    # configure and instantiate the skrl runner
-    # https://skrl.readthedocs.io/en/latest/api/utils/runner.html
     runner = Runner(env, agent_cfg)
 
     # load checkpoint (if specified)

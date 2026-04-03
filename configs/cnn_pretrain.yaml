@@ -1,0 +1,131 @@
+# CNN Backbone Pretraining Configuration
+#
+# Used by:
+#   cnn_trainer/data_pipeline/curate.py  — dataset curation stage
+#   cnn_trainer/train.py                 — supervised training stage
+#
+# Iterative workflow:
+#   1. Run `collect` to gather raw telemetry from a trained policy.
+#   2. Run `curate` with this config to produce balanced train/val/test manifests.
+#   3. Run `train-cnn` with this config to train the multi-task backbone.
+#   4. Pass the resulting best_backbone.pt to `train` via --cnn-backbone-checkpoint.
+#
+# Architecture note: backbone.{channels,kernel_sizes,strides,mlp_hidden_dims,output_dim}
+# MUST match models.policy.cnn in skrl_ppo_cfg.yaml so that pretrained weights load
+# cleanly into the RL actor's _cnn module.
+
+# RNG seed for all stochastic processes (curation sampling, training).
+# Set this exclusively here; curate.py and train.py both read it.
+seed: 42
+
+# ── Curation settings ─────────────────────────────────────────────────────────
+curation:
+  # Width (in episode_step units) of each histogram bin for step-bias rebalancing.
+  # Bins with too many samples are downsampled to the computed cap.
+  step_bin_width: 50
+
+  # Cap multiplier applied to the median non-empty bin count.
+  # cap = floor(median_count * bin_cap_factor).
+  # Values > 1 keep some natural variation; set to 1.0 for strict uniformity.
+  bin_cap_factor: 1.5
+
+  # Hard cap on samples per (env_id, episode_id) pair, applied before step-bin
+  # rebalancing.  Limits within-episode correlation.
+  # Set to null to disable the per-episode cap.
+  max_samples_per_episode: 30
+
+  # Fraction of episodes assigned to the validation split.
+  # Splits are done at the episode level to prevent data leakage.
+  val_fraction: 0.1
+
+  # Fraction of episodes assigned to the test split.
+  test_fraction: 0.1
+
+  # Seed used specifically for the train/val/test episode assignment shuffle.
+  # Isolated from the main seed so that changing `seed` above does not
+  # change which episodes go into which split.
+  split_seed: 0
+
+# ── Image preprocessing ───────────────────────────────────────────────────────
+# Applied to RGB images (H, W, C) uint8 inside TelemetryDataset.__getitem__.
+# Step 1 (uint8_to_float_chw) is always applied; normalisation is optional.
+#
+# To disable normalisation, set image_normalization to null.
+# Do NOT use ImageNet statistics here — the backbone is trained from scratch
+# on simulation data, not fine-tuned from an ImageNet-pretrained model.
+image_normalization: null  # set to {mean: [...], std: [...]} to enable
+
+# ── CNN backbone architecture ─────────────────────────────────────────────────
+# These values MUST match models.policy.cnn in skrl_ppo_cfg.yaml.
+backbone:
+  in_channels: 3
+  channels:       [64, 128, 256, 512]
+  kernel_sizes:   [5,  4,  3,   3]
+  strides:        [2,  2,  2,   1]
+  mlp_hidden_dims: [512]
+  output_dim: 256
+
+# ── Prediction heads ──────────────────────────────────────────────────────────
+# Each head is an MLP on top of the shared backbone latent.
+# hidden_dims controls layers between the backbone output and the head's output.
+# An empty list produces a single direct linear layer.
+heads:
+  # Head A: binary grip-position prediction (is_cube_in_grip_position).
+  # Output: single logit; trained with BCE loss.
+  grip_position:
+    hidden_dims: [128]
+
+  # Head B: quaternion orientation prediction (cube_quat_gripzone_wxyz).
+  # Output: 4-D raw quaternion; L2-normalised before MSE loss.
+  orientation:
+    hidden_dims: [128]
+
+  # Head C: cube visibility prediction (cube_in_camera_frame).
+  # Output: single logit; trained with BCE loss.
+  visibility:
+    hidden_dims: []
+
+# ── Multi-task loss ────────────────────────────────────────────────────────────
+loss:
+  # Per-head loss weights (must be set explicitly; no defaults).
+  weight_grip_position: 1.0
+  weight_orientation: 1.0
+  weight_visibility: 1.0
+
+  # Normalise predicted quaternion to unit length before computing MSE.
+  # Should be true to match the unit-quaternion target convention.
+  orientation_normalization: true
+
+# ── Training ──────────────────────────────────────────────────────────────────
+training:
+  batch_size: 256
+  num_epochs: 100
+
+  optimizer:
+    type: adam          # Options: adam, adamw, sgd
+    learning_rate: 1.0e-3
+    weight_decay: 1.0e-4
+
+  lr_scheduler:
+    type: cosine_annealing   # Options: cosine_annealing, step, none
+    T_max_epochs: 100        # Must equal num_epochs for a full cosine cycle
+    eta_min: 1.0e-5
+
+  # DataLoader settings.
+  # ShardSequentialSampler (used by train_cnn.py) groups consecutive batches by
+  # shard, so only O(num_workers * prefetch_factor) shards are live at once.
+  # max_cached_shards bounds the per-worker LRU shard cache; 16 is generous for
+  # 4 workers with default prefetch_factor=2 (needs ~8 shards live at a time).
+  num_workers: 4
+  max_cached_shards: 16
+  pin_memory: true
+
+  # Metric used to select the best checkpoint.
+  # Must be a key in the val metrics dict: loss_total, loss_grip_position,
+  # loss_orientation, loss_visibility, grip_position_acc, visibility_acc,
+  # orientation_mse.
+  best_metric: loss_total
+
+  # Stop training if the best_metric does not improve for this many epochs.
+  # Set to null to disable early stopping.
+  early_stopping_patience: 20

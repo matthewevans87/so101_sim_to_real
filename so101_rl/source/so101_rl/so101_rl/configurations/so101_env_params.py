@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import types
+import typing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import get_type_hints
@@ -19,10 +21,31 @@ import yaml
 # Helpers
 # ---------------------------------------------------------------------------
 
+
+def _optional_dataclass_type(ft: object) -> type | None:
+    """Return the inner dataclass type if *ft* is ``Optional[SomeDataclass]``.
+
+    Handles both ``X | None`` (Python 3.10+ ``types.UnionType``) and
+    ``typing.Optional[X]`` / ``typing.Union[X, None]``.
+    """
+    if isinstance(ft, types.UnionType):
+        args = ft.__args__
+    elif getattr(ft, "__origin__", None) is typing.Union:
+        args = ft.__args__
+    else:
+        return None
+    non_none = [a for a in args if a is not type(None)]
+    if len(non_none) == 1 and dataclasses.is_dataclass(non_none[0]):
+        return non_none[0]
+    return None
+
+
 def _from_dict(cls: type, data: dict) -> object:
     """Recursively construct a dataclass from a mapping.
 
-    Raises KeyError for unknown or missing keys at every level.
+    Raises KeyError for unknown keys or missing *required* keys (fields with
+    no default value or default factory).  Fields that carry a default are
+    silently omitted from ``data`` and receive their default value instead.
     """
     if not dataclasses.is_dataclass(cls):
         return data
@@ -34,17 +57,31 @@ def _from_dict(cls: type, data: dict) -> object:
     if unknown:
         raise KeyError(f"Unknown keys in {cls.__name__}: {sorted(unknown)}")
 
-    missing = known - set(data)
+    # Only flag fields that have no default as missing.
+    required = {
+        f.name
+        for f in dataclasses.fields(cls)
+        if f.default is dataclasses.MISSING
+        and f.default_factory is dataclasses.MISSING  # type: ignore[misc]
+    }
+    missing = required - set(data)
     if missing:
         raise KeyError(f"Missing required keys in {cls.__name__}: {sorted(missing)}")
 
     kwargs: dict = {}
     for f in dataclasses.fields(cls):
+        if f.name not in data:
+            # Field has a default; let the dataclass constructor use it.
+            continue
         val = data[f.name]
         ft = hints[f.name]
+        inner_dc = _optional_dataclass_type(ft)
         if dataclasses.is_dataclass(ft):
             assert isinstance(ft, type)
             kwargs[f.name] = _from_dict(ft, val)
+        elif inner_dc is not None:
+            # Optional[SomeDataclass] — recurse only when val is not None.
+            kwargs[f.name] = None if val is None else _from_dict(inner_dc, val)
         elif getattr(ft, "__origin__", None) is tuple and isinstance(val, list):
             kwargs[f.name] = tuple(val)
         else:
@@ -56,6 +93,7 @@ def _from_dict(cls: type, data: dict) -> object:
 # ---------------------------------------------------------------------------
 # Sim / scene
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class SimCfg:
@@ -72,6 +110,7 @@ class SceneCfg:
 # ---------------------------------------------------------------------------
 # Joints / control / safety
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 @dataclass
@@ -104,6 +143,7 @@ class SafetyCfg:
 # Gripper
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class GripperCfg:
     ee_link_name: str
@@ -117,6 +157,7 @@ class GripperCfg:
 # ---------------------------------------------------------------------------
 # Distractors
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class DistractorGeometryCfg:
@@ -153,13 +194,49 @@ class DistractorsCfg:
 # Debug / behavior
 # ---------------------------------------------------------------------------
 
+
+@dataclass
+class SaveImageStageCfg:
+    save: bool
+    interval: int
+
+
+@dataclass
+class SaveImagesCfg:
+    pre_processing: SaveImageStageCfg
+    post_processing: SaveImageStageCfg
+
+
+@dataclass
+class VisionDebugItemCfg:
+    enabled: bool
+
+
+@dataclass
+class ConvLayerMapsCfg:
+    enabled: bool
+    max_channels: int  # max feature channels to tile per layer
+
+
+@dataclass
+class VisionDebugCfg:
+    enabled: bool
+    interval: int  # log every N environment steps
+    num_envs_logged: int  # number of envs visualised (taken from env 0..N)
+    raw_image: VisionDebugItemCfg
+    pipelined_image: VisionDebugItemCfg
+    conv_layer_maps: ConvLayerMapsCfg
+    activation_heatmap: VisionDebugItemCfg
+    keypoints: VisionDebugItemCfg
+
+
 @dataclass
 class DebugCfg:
-    save_images: bool
-    save_image_interval: int
+    save_images: SaveImagesCfg
     enable_gripper_arrow_markers: bool
-    enable_tip_markers: bool
     enable_camera_frame_markers: bool
+    enable_grip_zone_markers: bool
+    vision_debug: VisionDebugCfg
 
 
 @dataclass
@@ -175,6 +252,7 @@ class BehaviorCfg:
 # ---------------------------------------------------------------------------
 # Rewards
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class RewardCfg:
@@ -238,6 +316,12 @@ class VantageRewardCfg:
 
 
 @dataclass
+class ApproachPhaseRewardCfg:
+    enabled: bool
+    scale: float
+
+
+@dataclass
 class RewardsCfg:
     distance: RewardCfg
     grip_cube: GripCubeRewardCfg
@@ -258,15 +342,29 @@ class RewardsCfg:
     safety_touch_table_terminal: RewardCfg
     vantage: VantageRewardCfg
     keep_camera_upright: RewardCfg
+    approach_phase: ApproachPhaseRewardCfg
 
 
 # ---------------------------------------------------------------------------
 # Domain randomization
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class PreshapeImageCfg:
     enabled: bool
+
+
+@dataclass
+class GaussianNoiseCfg:
+    enabled: bool
+    std_range: list[float]
+
+
+@dataclass
+class BrightnessCfg:
+    enabled: bool
+    range: list[float]
 
 
 @dataclass
@@ -278,9 +376,25 @@ class ContrastCfg:
 @dataclass
 class CameraFeedCfg:
     preshape_image: PreshapeImageCfg
-    gaussian_noise_std_range: list[float]
-    brightness_range: list[float]
+    gaussian_noise: GaussianNoiseCfg
+    brightness: BrightnessCfg
     contrast: ContrastCfg
+    gaussian_blur: GaussianBlurCfg
+    cheap_webcam_effect: CheapWebcamEffectCfg
+    motion_blur: MotionBlurCfg
+    jpeg_compression: JpegCompressionCfg
+
+
+@dataclass
+class GaussianBlurCfg:
+    enabled: bool
+    kernel_size: int
+    sigma: float
+
+
+@dataclass
+class CheapWebcamEffectCfg:
+    enabled: bool
 
 
 @dataclass
@@ -297,12 +411,6 @@ class JpegCompressionCfg:
 
 
 @dataclass
-class CameraAdvancedCfg:
-    motion_blur: MotionBlurCfg
-    jpeg_compression: JpegCompressionCfg
-
-
-@dataclass
 class CameraPoseCfg:
     enabled: bool
     position_noise_range: tuple[float, float]
@@ -312,7 +420,6 @@ class CameraPoseCfg:
 @dataclass
 class DRCameraCfg:
     feed: CameraFeedCfg
-    advanced: CameraAdvancedCfg
     pose: CameraPoseCfg
 
 
@@ -366,6 +473,7 @@ class DomainRandomizationCfg:
 # Sensors
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class CameraSensorCfg:
     height: int
@@ -389,16 +497,49 @@ class SensorsCfg:
     gripper_contact: DebugVisCfg
     table_contact: TableContactSensorCfg
     gripper_transform: DebugVisCfg
-    grip_zone_transform: DebugVisCfg
 
 
 # ---------------------------------------------------------------------------
 # Root
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class ObservationsCfg:
     critic_obs_metrics: list[str]
+
+
+@dataclass
+class CnnBackboneCfg:
+    """Architecture for the CNN backbone inside :class:`~so101.model.model.MultiTaskCnn`.
+
+    Used by the ``frozen_cnn`` vision encoder type.  Must be set in the env
+    config YAML under ``vision_encoder.backbone``.
+    """
+
+    channels: list
+    kernel_sizes: list
+    strides: list
+    mlp_hidden_dims: list
+    output_dim: int
+
+
+@dataclass
+class VisionEncoderCfg:
+    """Configuration for the vision feature extractor used in the actor policy.
+
+    type:
+        'frozen_resnet18' — frozen pretrained ResNet18 + SpatialSoftmax (1024-D output).
+        'frozen_cnn'      — frozen pretrained lightweight CNN + SpatialSoftmax.
+                            Architecture is defined in ``backbone``.  Backbone weights
+                            are loaded from ``cnn_checkpoint`` at env construction.
+    """
+
+    type: str
+    image_height: int
+    image_width: int
+    backbone: CnnBackboneCfg | None = None
+    cnn_checkpoint: str | None = None
 
 
 @dataclass
@@ -418,14 +559,13 @@ class So101EnvParams:
     domain_randomization: DomainRandomizationCfg
     sensors: SensorsCfg
     observations: ObservationsCfg
+    vision_encoder: VisionEncoderCfg
 
     @classmethod
     def load(cls, path: str | Path) -> "So101EnvParams":
         config_path = Path(path).expanduser().resolve()
         if not config_path.exists():
-            raise FileNotFoundError(
-                f"SO101 env config not found at '{config_path}'."
-            )
+            raise FileNotFoundError(f"SO101 env config not found at '{config_path}'.")
         with config_path.open("r", encoding="utf-8") as fh:
             data = yaml.safe_load(fh) or {}
         if not isinstance(data, dict):

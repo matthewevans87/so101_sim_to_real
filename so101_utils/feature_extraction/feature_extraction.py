@@ -1,14 +1,13 @@
-
-
 from abc import ABC, abstractmethod, abstractmethod
 
 import torch
 from torchvision.models import resnet18, ResNet18_Weights
 import torch.nn as nn
 
-from so101_rl.nnmodules.spatial_softmax import (
+from so101_utils.feature_extraction.spatial_softmax import (
     SpatialSoftmax,
 )
+
 
 class VisionFeatureExtractor(ABC):
     def __init__(self):
@@ -25,6 +24,7 @@ class VisionFeatureExtractor(ABC):
         :rtype: torch.Tensor
         """
         pass
+
 
 class ResNet18SpatialSoftmaxFeatureExtractor(VisionFeatureExtractor):
     def __init__(self, device: str = "cuda"):
@@ -46,7 +46,6 @@ class ResNet18SpatialSoftmaxFeatureExtractor(VisionFeatureExtractor):
 
         self._spatial_softmax = SpatialSoftmax().to(self.device)
 
-
     def extract(self, images: torch.Tensor) -> torch.Tensor:
         # Extract features with frozen ResNet
         with torch.inference_mode():
@@ -56,3 +55,45 @@ class ResNet18SpatialSoftmaxFeatureExtractor(VisionFeatureExtractor):
             )  # (N, 2C), C=512 → 1024-D
 
         return visual_features
+
+
+class CnnSpatialSoftmaxFeatureExtractor(VisionFeatureExtractor):
+    """Frozen pretrained CNN feature extractor.
+
+    Drop-in replacement for :class:`ResNet18SpatialSoftmaxFeatureExtractor` that
+    loads a :class:`~so101.model.model.MultiTaskCnn`, truncates the projection
+    MLP and prediction heads, and feeds the final conv layer output through a
+    fresh SpatialSoftmax.  The conv trunk is frozen for the lifetime of this
+    object: all parameters are set to ``requires_grad=False`` and the module is
+    kept in eval mode.
+
+    Args:
+        model: A :class:`~so101.model.model.MultiTaskCnn` instance (weights
+            already loaded or to be loaded via :attr:`_backbone`).
+        device: PyTorch device string (e.g. ``"cuda:0"``).
+    """
+
+    def __init__(self, model: "MultiTaskCnn", device: str = "cuda"):
+        from so101.model.model import (
+            MultiTaskCnn,
+        )  # noqa: F811 (deferred to avoid circular import)
+
+        super().__init__()
+        self.device = device
+
+        # Keep a reference to the full backbone for checkpoint loading.
+        self._backbone = model.backbone.to(self.device)
+        self._backbone.eval()
+        for p in self._backbone.parameters():
+            p.requires_grad = False
+
+        # Only the conv trunk feeds into a fresh SpatialSoftmax.
+        # self._vision_backbone is a live reference to _backbone._conv_trunk, so
+        # loading weights into _backbone also updates _vision_backbone.
+        self._vision_backbone = self._backbone._conv_trunk
+        self._spatial_softmax = SpatialSoftmax().to(self.device)
+
+    def extract(self, images: torch.Tensor) -> torch.Tensor:
+        with torch.inference_mode():
+            conv_feats = self._vision_backbone(images)  # (N, channels[-1], Hc, Wc)
+            return self._spatial_softmax(conv_feats)  # (N, 2*channels[-1])

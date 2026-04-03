@@ -10,7 +10,11 @@ from so101_rl.configurations.so101 import (
     GRIPPER_CONTACT_SENSOR_CFG,
 )
 from so101_rl.configurations.cube import DEX_CUBE_CFG
-from so101_rl.configurations.camera import CAMERA_CFG, OVERHEAD_CAMERA_CFG
+from so101_rl.configurations.camera import (
+    CAMERA_CFG,
+    OVERHEAD_CAMERA_CFG,
+    TILED_CAMERA_CFG,
+)
 from so101_rl.configurations.table import TABLE_CFG, TABLE_CONTACT_SENSOR_CFG
 
 from isaaclab.assets import RigidObjectCfg
@@ -20,15 +24,18 @@ from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import SimulationCfg
 import isaaclab.sim as sim_utils
 from isaaclab.utils import configclass
-from isaaclab.sensors.camera import CameraCfg
+from isaaclab.sensors.camera import CameraCfg, TiledCameraCfg
 from isaaclab.sensors import FrameTransformerCfg
 from isaaclab.sensors.frame_transformer.frame_transformer_cfg import OffsetCfg
+
 
 from so101_rl.configurations.so101_env_params import So101EnvParams
 from so101_rl.env_pipeline import KEY_OBS_DIMS
 
 _Y: So101EnvParams = So101EnvParams.load(os.environ["SO101_ENV_CONFIG"])
-_ENABLE_OVERHEAD_CAMERA = os.environ.get("SO101_ENABLE_OVERHEAD_CAMERA", "0").lower() in (
+_ENABLE_OVERHEAD_CAMERA = os.environ.get(
+    "SO101_ENABLE_OVERHEAD_CAMERA", "0"
+).lower() in (
     "1",
     "true",
     "yes",
@@ -49,15 +56,34 @@ class So101LiftCubeCfg(DirectRLEnvCfg):
         replicate_physics=_Y.scene.replicate_physics,
     )
 
-    # ── Observation / action space (architecture-dependent, hardcoded) ──────
+    # ── Observation / action space (architecture-dependent) ──────────────────────
     NUM_ACTIVE_JOINTS = len(_Y.joints.active)
     action_space = NUM_ACTIVE_JOINTS
 
-    SPATIAL_SOFTMAX_FEATURES = 1024
-    observation_space = SPATIAL_SOFTMAX_FEATURES + NUM_ACTIVE_JOINTS
-    state_space = (
-        2 * NUM_ACTIVE_JOINTS
-        + sum(KEY_OBS_DIMS[k] for k in _Y.observations.critic_obs_metrics)
+    if _Y.vision_encoder.type == "frozen_resnet18":
+        # Frozen ResNet18 + SpatialSoftmax: 2 × 512 channels = 1024-D features
+        observation_space = 1024 + NUM_ACTIVE_JOINTS
+    elif _Y.vision_encoder.type == "frozen_cnn":
+        # CnnSpatialSoftmaxFeatureExtractor bypasses the backbone MLP and feeds the
+        # final conv layer output through a fresh SpatialSoftmax, producing
+        # 2 * channels[-1] features — NOT backbone.output_dim.
+        if _Y.vision_encoder.backbone is None:
+            raise ValueError(
+                "vision_encoder.backbone must be set when vision_encoder.type == "
+                "'frozen_cnn'. Add a 'backbone:' section to vision_encoder in the "
+                "env config YAML."
+            )
+        observation_space = (
+            2 * _Y.vision_encoder.backbone.channels[-1] + NUM_ACTIVE_JOINTS
+        )
+    else:
+        raise ValueError(
+            f"Unknown vision_encoder.type: {_Y.vision_encoder.type!r}. "
+            "Must be 'frozen_resnet18' or 'frozen_cnn'."
+        )
+
+    state_space = 2 * NUM_ACTIVE_JOINTS + sum(
+        KEY_OBS_DIMS[k] for k in _Y.observations.critic_obs_metrics
     )
 
     # ── Asset configs ───────────────────────────────────────────────────────
@@ -67,7 +93,7 @@ class So101LiftCubeCfg(DirectRLEnvCfg):
 
     cube_cfg: RigidObjectCfg = DEX_CUBE_CFG.replace(prim_path="/World/envs/env_.*/Object")  # type: ignore
 
-    camera_cfg: CameraCfg = CAMERA_CFG.replace(  # type: ignore
+    camera_cfg: TiledCameraCfg = TILED_CAMERA_CFG.replace(  # type: ignore
         prim_path="/World/envs/env_.*/Robot/gripper/gripper_camera",
         height=_Y.sensors.camera.height,
         width=_Y.sensors.camera.width,
@@ -104,21 +130,11 @@ class So101LiftCubeCfg(DirectRLEnvCfg):
     gripper_transforms_cfg = FrameTransformerCfg(
         prim_path="/World/envs/env_.*/Robot/gripper",
         target_frames=[
-            FrameTransformerCfg.FrameCfg(prim_path="/World/envs/env_.*/Object", name="cube")
+            FrameTransformerCfg.FrameCfg(
+                prim_path="/World/envs/env_.*/Object", name="cube"
+            )
         ],
         debug_vis=_Y.sensors.gripper_transform.debug_vis,
-    )
-
-    grip_zone_transformer_cfg = FrameTransformerCfg(
-        prim_path="/World/envs/env_.*/Robot/gripper",
-        source_frame_offset=OffsetCfg(
-            pos=_Y.gripper.grip_zone_offset,
-            rot=_Y.gripper.grip_zone_rot,
-        ),
-        target_frames=[
-            FrameTransformerCfg.FrameCfg(prim_path="/World/envs/env_.*/Object", name="cube")
-        ],
-        debug_vis=_Y.sensors.grip_zone_transform.debug_vis,
     )
 
     # ── Distractor rigid object configs ─────────────────────────────────────
@@ -147,14 +163,14 @@ class So101LiftCubeCfg(DirectRLEnvCfg):
         )
 
     # ── Typed config groups (self.cfg.<group>.<field>) ───────────────────────
-    joints            = _Y.joints
-    control           = _Y.control
-    safety            = _Y.safety
-    gripper           = _Y.gripper
-    distractors       = _Y.distractors
-    debug             = _Y.debug
-    behavior          = _Y.behavior
-    rewards           = _Y.rewards
+    joints = _Y.joints
+    control = _Y.control
+    safety = _Y.safety
+    gripper = _Y.gripper
+    distractors = _Y.distractors
+    debug = _Y.debug
+    behavior = _Y.behavior
+    rewards = _Y.rewards
     domain_randomization = _Y.domain_randomization
-    observations      = _Y.observations
-
+    observations = _Y.observations
+    vision_encoder = _Y.vision_encoder

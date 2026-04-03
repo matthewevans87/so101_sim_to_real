@@ -8,8 +8,12 @@ from __future__ import annotations
 import math
 import os
 
-from so101_utils.feature_extraction.feature_extraction import ResNet18SpatialSoftmaxFeatureExtractor
-from so101_utils.image_processing import (
+from so101.utils.feature_extraction.feature_extraction import (
+    CnnSpatialSoftmaxFeatureExtractor,
+    ResNet18SpatialSoftmaxFeatureExtractor,
+)
+from so101.model.model import MultiTaskCnn, multitask_cnn_from_checkpoint
+from so101.utils.image_processing import (
     CameraBrightnessPipelineStep,
     CameraContrastPipelineStep,
     CheapWebcamEffectPipelineStep,
@@ -18,18 +22,20 @@ from so101_utils.image_processing import (
     GaussianNoisePipelineStep,
     ImageNetNormalizationPipelineStep,
     ImagePipeline,
+    ImagePipelineStep,
     JpegCompressionPipelineStep,
     MotionBlurPipelineStep,
     ResizePipelineStep,
+    Uint8ToFloatCHWPipelineStep,
 )
 from torch import zeros_like
 
 from so101_rl.helpers.visual_markers import (
+    define_grip_zone_markers,
     define_gripper_arrow_markers,
-    define_tip_markers,
     define_camera_frame_markers,
+    visualize_grip_zone_markers,
     visualize_gripper_arrow,
-    visualize_tip_markers,
     visualize_camera_frame_markers,
 )
 from so101_rl.helpers.utils import set_material
@@ -39,19 +45,21 @@ from so101_rl.configurations.camera import (
     CAMERA_ROTATION_QUAT_WXYZ,
     CAMERA_TRANSLATE_VEC,
 )
-from so101_rl.helpers.variations import (
-    # create_ground_materials,
-    randomize_camera_pose,
-    randomize_rigid_object_color,
-    randomize_rigid_object_position,
-    randomize_rigid_object_position_polar,
-    randomize_rigid_object_size,
-    randomize_ground_material,
-    randomize_world_light,
-    randomize_env_lights,
-)
 from .so101_lift_cube_env_cfg import So101LiftCubeCfg
-from so101_rl.env_pipeline import StepContext, MetricPipeline, RewardPipeline, build_metric_pipeline, build_reward_pipeline, KEY_OBS_DIMS
+from so101_rl.viz.vision_debug import VisionDebugLogger
+from so101_rl.env_pipeline import (
+    DRContext,
+    DRPipeline,
+    EnvMetricPipeline,
+    StepContext,
+    MetricPipeline,
+    RewardPipeline,
+    build_dr_pipeline,
+    build_env_metric_pipeline,
+    build_metric_pipeline,
+    build_reward_pipeline,
+    KEY_OBS_DIMS,
+)
 import torch
 from collections.abc import Sequence
 
@@ -59,7 +67,7 @@ from isaaclab.assets import Articulation, RigidObject
 from isaaclab.envs import DirectRLEnv
 from isaaclab.utils.math import sample_uniform, quat_apply
 
-from isaaclab.sensors import Camera, ContactSensor, FrameTransformer
+from isaaclab.sensors import Camera, TiledCamera, ContactSensor, FrameTransformer
 import isaaclab.utils.math as math_utils
 import isaaclab.sim as sim_utils
 
@@ -78,9 +86,7 @@ import isaaclab.sim as sim_utils
 class So101LiftCube(DirectRLEnv):
     cfg: So101LiftCubeCfg
 
-    def __init__(
-        self, cfg: So101LiftCubeCfg, render_mode: str | None = None, **kwargs
-    ):
+    def __init__(self, cfg: So101LiftCubeCfg, render_mode: str | None = None, **kwargs):
         # Store render mode BEFORE super().__init__() because _setup_scene() needs it
         self._render_mode = render_mode
 
@@ -94,11 +100,6 @@ class So101LiftCube(DirectRLEnv):
         self._dof_idx, _ = self.robot.find_joints(self.cfg.joints.active)
         self._all_joint_idx, _ = self.robot.find_joints(self.cfg.joints.all)
         self._ee_body_idx, _ = self.robot.find_bodies(self.cfg.gripper.ee_link_name)
-        self._grip_zone_offset = torch.tensor(
-            self.cfg.gripper.grip_zone_offset,
-            device=self.device,
-            dtype=torch.float32,
-        ).view(1, 3)
 
         # tip offset as tensor
         self._tip_offset = torch.tensor(
@@ -163,41 +164,153 @@ class So101LiftCube(DirectRLEnv):
         )  # type: ignore
 
         self.step_metrics: dict[str, torch.Tensor] = None  # type: ignore
+        self.env_metrics: dict[str, torch.Tensor] = {}
 
         self._step_ctx = StepContext(env=self)
         self.reward_pipeline: RewardPipeline = build_reward_pipeline(self.cfg)
+        self.env_metric_pipeline: EnvMetricPipeline = build_env_metric_pipeline(
+            self.cfg
+        )
         self.metric_pipeline: MetricPipeline = build_metric_pipeline(
             self.reward_pipeline,
-            extra_keys=frozenset({
-                # consumed by _get_dones
-                "is_success_lift_fraction_terminal",
-                "is_success_point_at_cube_terminal",
-                "is_success_touch_terminal",
-                "is_table_touched",
-                # consumed by _get_observations (critic features)
-                *self.cfg.observations.critic_obs_metrics,
-                # consumed by _pre_physics_step (arrow markers)
-                "v_grip_zone_to_cube_ee",
-            }),
+            extra_keys=frozenset(
+                {
+                    # consumed by _get_dones
+                    "is_success_lift_fraction_terminal",
+                    "is_success_point_at_cube_terminal",
+                    "is_success_touch_terminal",
+                    "is_table_touched",
+                    # consumed by _get_observations (critic features)
+                    *self.cfg.observations.critic_obs_metrics,
+                }
+            ),
+            env_metric_pipeline=self.env_metric_pipeline,
         )
-
-        self.vision_feature_extractor = ResNet18SpatialSoftmaxFeatureExtractor(device=self.device)
-
-        _image_pipeline_steps = []
-        if self.cfg.domain_randomization.camera.feed.preshape_image.enabled:
-            _image_pipeline_steps.append(ResizePipelineStep((224, 224)))
-        _image_pipeline_steps.extend([
-            GaussianBlurPipelineStep(),
-            JpegCompressionPipelineStep(),
-            MotionBlurPipelineStep(),
-            CheapWebcamEffectPipelineStep(),
-            GaussianNoisePipelineStep(),
-            CameraBrightnessPipelineStep(),
-            CameraContrastPipelineStep(),
-            ImageNetNormalizationPipelineStep(),
-            ClampPipelineStep(),
-        ])
+        self.dr_pipeline: DRPipeline = build_dr_pipeline(self.cfg)
+        _dr_feed = self.cfg.domain_randomization.camera.feed
+        _image_pipeline_steps: list[ImagePipelineStep] = [Uint8ToFloatCHWPipelineStep()]
+        if _dr_feed.gaussian_blur.enabled:
+            _image_pipeline_steps.append(
+                GaussianBlurPipelineStep(
+                    kernel_size=_dr_feed.gaussian_blur.kernel_size,
+                    sigma=_dr_feed.gaussian_blur.sigma,
+                )
+            )
+        if _dr_feed.jpeg_compression.enabled:
+            _image_pipeline_steps.append(
+                JpegCompressionPipelineStep(
+                    quality_range=(
+                        _dr_feed.jpeg_compression.quality_range[0],
+                        _dr_feed.jpeg_compression.quality_range[1],
+                    ),
+                    device=self.device,
+                )
+            )
+        if _dr_feed.motion_blur.enabled:
+            _image_pipeline_steps.append(
+                MotionBlurPipelineStep(
+                    motion_blur_strength_range=(
+                        _dr_feed.motion_blur.strength_range[0],
+                        _dr_feed.motion_blur.strength_range[1],
+                    ),
+                    motion_blur_kernel_size=_dr_feed.motion_blur.kernel_size,
+                    device=self.device,
+                )
+            )
+        if _dr_feed.cheap_webcam_effect.enabled:
+            _image_pipeline_steps.append(
+                CheapWebcamEffectPipelineStep(device=self.device)
+            )
+        if _dr_feed.gaussian_noise.enabled:
+            _image_pipeline_steps.append(
+                GaussianNoisePipelineStep(
+                    noise_std_range=(
+                        _dr_feed.gaussian_noise.std_range[0],
+                        _dr_feed.gaussian_noise.std_range[1],
+                    ),
+                    device=self.device,
+                )
+            )
+        if _dr_feed.brightness.enabled:
+            _image_pipeline_steps.append(
+                CameraBrightnessPipelineStep(
+                    brightness_range=(
+                        _dr_feed.brightness.range[0],
+                        _dr_feed.brightness.range[1],
+                    ),
+                    device=self.device,
+                )
+            )
+        if _dr_feed.contrast.enabled:
+            _image_pipeline_steps.append(
+                CameraContrastPipelineStep(
+                    contrast_range=(
+                        _dr_feed.contrast.range[0],
+                        _dr_feed.contrast.range[1],
+                    ),
+                    device=self.device,
+                )
+            )
+        _vision_type = self.cfg.vision_encoder.type
+        if _vision_type == "frozen_resnet18":
+            self.vision_feature_extractor = ResNet18SpatialSoftmaxFeatureExtractor(
+                device=self.device
+            )
+            if self.cfg.domain_randomization.camera.feed.preshape_image.enabled:
+                # 224x224 matches ImageNet pretraining resolution for best feature quality
+                _image_pipeline_steps.insert(1, ResizePipelineStep((224, 224)))
+            _image_pipeline_steps.append(ImageNetNormalizationPipelineStep())
+            _image_pipeline_steps.append(ClampPipelineStep())
+        elif _vision_type == "frozen_cnn":
+            ve = self.cfg.vision_encoder
+            if ve.backbone is None:
+                raise ValueError(
+                    "vision_encoder.backbone must be set when "
+                    "vision_encoder.type == 'frozen_cnn'."
+                )
+            _image_pipeline_steps.insert(
+                1,
+                ResizePipelineStep((ve.image_height, ve.image_width)),
+            )
+            backbone_cfg = {
+                "in_channels": 3,
+                "channels": list(ve.backbone.channels),
+                "kernel_sizes": list(ve.backbone.kernel_sizes),
+                "strides": list(ve.backbone.strides),
+                "mlp_hidden_dims": list(ve.backbone.mlp_hidden_dims),
+                "output_dim": ve.backbone.output_dim,
+            }
+            if ve.cnn_checkpoint is not None:
+                _model = multitask_cnn_from_checkpoint(
+                    path=ve.cnn_checkpoint,
+                    backbone_cfg=backbone_cfg,
+                    device=self.device,
+                )
+            else:
+                _model = MultiTaskCnn(backbone_cfg=backbone_cfg, heads_cfg=None)
+            self.vision_feature_extractor = CnnSpatialSoftmaxFeatureExtractor(
+                model=_model, device=self.device
+            )
+            _image_pipeline_steps.append(ClampPipelineStep())
+        else:
+            raise ValueError(
+                f"Unknown vision_encoder.type: {_vision_type!r}. "
+                "Must be 'frozen_resnet18' or 'frozen_cnn'."
+            )
         self.image_pipeline = ImagePipeline(_image_pipeline_steps)
+
+        _vd_cfg = self.cfg.debug.vision_debug
+        if _vd_cfg.enabled:
+            if self.cfg.log_dir is None:
+                raise ValueError(
+                    "cfg.log_dir must be set before the environment is created "
+                    "when debug.vision_debug.enabled is True."
+                )
+        self._vision_debug_logger = VisionDebugLogger(
+            extractor=self.vision_feature_extractor,
+            log_dir=self.cfg.log_dir or "",
+            cfg=_vd_cfg,
+        )
 
     # Called by super class to setup the scene
     def _setup_scene(self):
@@ -206,7 +319,7 @@ class So101LiftCube(DirectRLEnv):
         self.table = RigidObject(self.cfg.table_cfg)
         self.robot = Articulation(self.cfg.robot_cfg)
         self.cube = RigidObject(self.cfg.cube_cfg)
-        self.camera = Camera(self.cfg.camera_cfg)
+        self.camera = TiledCamera(self.cfg.camera_cfg)
         self.overhead_camera = (
             Camera(self.cfg.overhead_camera_cfg)
             if self.cfg.overhead_camera_cfg is not None
@@ -215,7 +328,6 @@ class So101LiftCube(DirectRLEnv):
         self.gripper_contact_sensor = ContactSensor(self.cfg.gripper_contact_sensor_cfg)
         self.table_contact_sensor = ContactSensor(self.cfg.table_contact_sensor_cfg)
         self.gripper_tf = FrameTransformer(self.cfg.gripper_transforms_cfg)
-        self.grip_zone_tf = FrameTransformer(self.cfg.grip_zone_transformer_cfg)
 
         self._distractors: list[RigidObject] = []
         for i in range(self.cfg.distractors.count):
@@ -233,7 +345,6 @@ class So101LiftCube(DirectRLEnv):
         self.scene.sensors["gripper_contact_sensor"] = self.gripper_contact_sensor
         self.scene.sensors["table_contact_sensor"] = self.table_contact_sensor
         self.scene.sensors["gripper_tf"] = self.gripper_tf
-        self.scene.sensors["grip_zone_tf"] = self.grip_zone_tf
 
         # # 3) Ground plane
         # spawn_ground_plane(
@@ -254,14 +365,14 @@ class So101LiftCube(DirectRLEnv):
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
 
-        if self.cfg.debug.enable_tip_markers:
-            self.tip_markers = define_tip_markers()
-
         if self.cfg.debug.enable_camera_frame_markers:
             self.camera_frame_markers = define_camera_frame_markers()
 
         if self.cfg.debug.enable_gripper_arrow_markers:
             self.gripper_arrow_markers = define_gripper_arrow_markers()
+
+        if self.cfg.debug.enable_grip_zone_markers:
+            self.grip_zone_markers = define_grip_zone_markers()
 
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
         """Called before stepping the physics; store and scale actions."""
@@ -283,25 +394,32 @@ class So101LiftCube(DirectRLEnv):
         target_pos = self._joint_lower + t * (self._joint_upper - self._joint_lower)
         self._target_pos = target_pos
 
-        if self.cfg.debug.enable_tip_markers:
-            visualize_tip_markers(self.tip_markers, self._compute_ee_pos_w(self._grip_zone_offset), self.device)
-
         if self.cfg.debug.enable_camera_frame_markers:
             ee_pos = self.robot.data.body_pos_w[:, self._ee_body_idx[0], :]
             ee_quat = self.robot.data.body_quat_w[:, self._ee_body_idx[0], :]
-            cam_pos_w = ee_pos + math_utils.quat_apply(ee_quat, self._camera_offset_pos.expand(self.num_envs, -1))
-            cam_quat_w = math_utils.quat_mul(ee_quat, self._camera_offset_quat.expand(self.num_envs, -1))
-            visualize_camera_frame_markers(self.camera_frame_markers, cam_pos_w, cam_quat_w, self.device)
+            cam_pos_w = ee_pos + math_utils.quat_apply(
+                ee_quat, self._camera_offset_pos.expand(self.num_envs, -1)
+            )
+            cam_quat_w = math_utils.quat_mul(
+                ee_quat, self._camera_offset_quat.expand(self.num_envs, -1)
+            )
+            visualize_camera_frame_markers(
+                self.camera_frame_markers, cam_pos_w, cam_quat_w, self.device
+            )
 
-        v_ee = self.step_metrics["v_grip_zone_to_cube_ee"]
-        if self.cfg.debug.enable_gripper_arrow_markers and v_ee is not None:
+        if (
+            self.cfg.debug.enable_grip_zone_markers
+            and self.env_metrics.get("grip_zone_offset") is not None
+        ):
             src_pos = self.gripper_tf.data.source_pos_w
             src_quat = self.gripper_tf.data.source_quat_w
             gripper_pos_w = src_pos[:, 0, :] if src_pos.ndim == 3 else src_pos
             gripper_quat_w = src_quat[:, 0, :] if src_quat.ndim == 3 else src_quat
-            visualize_gripper_arrow(
-                self.gripper_arrow_markers, gripper_pos_w, gripper_quat_w,
-                v_ee, self.cfg.gripper.grip_zone_offset, self.device
+            gz_pos_w = gripper_pos_w + math_utils.quat_apply(
+                gripper_quat_w, self.env_metrics["grip_zone_offset"]
+            )
+            visualize_grip_zone_markers(
+                self.grip_zone_markers, gz_pos_w, gripper_quat_w, self.device
             )
 
     def _apply_action(self) -> None:
@@ -309,35 +427,54 @@ class So101LiftCube(DirectRLEnv):
         self.robot.set_joint_position_target(self._target_pos, joint_ids=self._dof_idx)
 
     def _get_observations(self) -> dict:
-        """Return visual features (ResNet18) + joint positions."""
+        """Return visual features + joint positions."""
 
         # Raw camera RGB: (num_envs, H, W, 3), uint8
         camera_data = self.camera.data.output["rgb"]
 
-        # Transform to (N, 3, H, W) float in [0, 1]
-        images = camera_data.permute(0, 3, 1, 2).float() / 255.0
-
-        # Apply domain randomization
-        images = self.image_pipeline.process(images)
-
-        if (
-            self.cfg.debug.save_images
-            and self.common_step_counter % self.cfg.debug.save_image_interval == 0
-        ):
+        _pre_cfg = self.cfg.debug.save_images.pre_processing
+        if _pre_cfg.save and self.common_step_counter % _pre_cfg.interval == 0:
+            if self.cfg.log_dir is None:
+                raise RuntimeError(
+                    "cfg.log_dir must be set before the environment is created."
+                )
+            pre_dir = os.path.join(self.cfg.log_dir, "debug_images", "pre_processing")
+            os.makedirs(pre_dir, exist_ok=True)
+            # camera_data is (N, H, W, 3) uint8 — convert to (3, H, W) float for save_image
             save_image(
-                images[0],  # (3, H, W)
-                os.path.join(f"aug_{self.common_step_counter:06d}.png"),
+                camera_data[0].permute(2, 0, 1).float() / 255.0,
+                os.path.join(pre_dir, f"camera_{self.common_step_counter:06d}.png"),
             )
 
-        # Extract visual features
-        visual_features = self.vision_feature_extractor.extract(images)  # (N, 1024)
+        # Apply image pipeline (uint8→float CHW conversion + any enabled DR steps)
+        images = self.image_pipeline.process(camera_data)
+
+        _post_cfg = self.cfg.debug.save_images.post_processing
+        if _post_cfg.save and self.common_step_counter % _post_cfg.interval == 0:
+            if self.cfg.log_dir is None:
+                raise RuntimeError(
+                    "cfg.log_dir must be set before the environment is created."
+                )
+            post_dir = os.path.join(self.cfg.log_dir, "debug_images", "post_processing")
+            os.makedirs(post_dir, exist_ok=True)
+            save_image(
+                images[0],  # (3, H, W)
+                os.path.join(post_dir, f"camera_{self.common_step_counter:06d}.png"),
+            )
 
         # Proprioception
         q = self.joint_pos[:, self._dof_idx]  # (N, num_joints)
         dq = self.joint_vel[:, self._dof_idx]  # (N, num_joints) - Joint velocities
 
-        # Observations
-        actor_obs = torch.cat([visual_features, q], dim=-1)  # (N, 1024 + num_joints)
+        # Actor observations: frozen feature extractor (RN18 or CNN) + joint positions
+        visual_features = self.vision_feature_extractor.extract(
+            images
+        )  # (N, feature_dim)
+
+        # Log vision debug visualisations to TensorBoard (no-op when disabled)
+        self._vision_debug_logger.log(camera_data, images, self.common_step_counter)
+
+        actor_obs = torch.cat([visual_features, q], dim=-1)
 
         # Compute on first observation call (when _get_observations is called from elf._env.reset())
         if self.step_metrics is None:
@@ -346,7 +483,7 @@ class So101LiftCube(DirectRLEnv):
 
         critic_obs = torch.cat(
             [
-                q,   # (N, num_joints)
+                q,  # (N, num_joints)
                 dq,  # (N, num_joints)
                 *[
                     self.step_metrics[key].reshape(self.num_envs, KEY_OBS_DIMS[key])
@@ -423,7 +560,10 @@ class So101LiftCube(DirectRLEnv):
         if self.cfg.joints.starting_position_noise.enabled:
             noise_range = self.cfg.joints.starting_position_noise.range
             joint_pos[:, self._dof_idx] += sample_uniform(
-                noise_range[0], noise_range[1], joint_pos[:, self._dof_idx].shape, self.device
+                noise_range[0],
+                noise_range[1],
+                joint_pos[:, self._dof_idx].shape,
+                self.device,
             )
 
         default_root_state = self.robot.data.default_root_state[env_ids].clone()
@@ -437,93 +577,12 @@ class So101LiftCube(DirectRLEnv):
         self.robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
         self.robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
 
+        # Env metrics (per-episode values derived from reset state, e.g. DR cube scale)
+        # Must run BEFORE DR so DR steps can consume env metrics (e.g. dr_cube_scale).
+        self.env_metric_pipeline.apply(DRContext(env=self, env_ids=env_ids))
+
         # Domain Randomization
-        if self.cfg.domain_randomization.cube.color_randomization_enabled:
-            randomize_rigid_object_color(env_ids, object_name="Object")
-
-        if self.cfg.domain_randomization.cube.size_randomization_enabled:
-            randomize_rigid_object_size(
-                env_ids,
-                object_name="Object",
-                size_range=self.cfg.domain_randomization.cube.size_range,
-            )
-
-        if self.cfg.domain_randomization.cube.position_randomization.enabled:
-            randomize_rigid_object_position_polar(
-                env_ids=env_ids,
-                scene=self.scene,
-                rigid_object=self.cube,
-                object_name="Object",
-                radius_range=self.cfg.domain_randomization.cube.position_randomization.radius_range,
-                angle_range=self.cfg.domain_randomization.cube.position_randomization.angle_range,
-                z_range=self.cfg.domain_randomization.cube.position_randomization.z_range,
-                device=self.device,
-            )
-
-        if self.cfg.domain_randomization.camera.pose.enabled:
-            randomize_camera_pose(
-                env_ids,
-                self.cfg.domain_randomization.camera.pose.position_noise_range,
-                self.cfg.domain_randomization.camera.pose.rotation_noise_deg_range,
-            )
-
-        if 0 in env_ids and self.cfg.domain_randomization.world_lighting.enabled:
-            randomize_world_light(
-                self.cfg.domain_randomization.world_lighting.intensity_range,
-                self.cfg.domain_randomization.world_lighting.color_variation,
-            )
-
-        if self.cfg.domain_randomization.env_lighting.enabled:
-            randomize_env_lights(
-                env_ids,
-                self.cfg.domain_randomization.env_lighting.height_range,
-                self.cfg.domain_randomization.env_lighting.intensity_range,
-                self.cfg.domain_randomization.env_lighting.color_variation,
-                self.cfg.domain_randomization.env_lighting.specular_range,
-            )
-
-        if 0 in env_ids and self.cfg.domain_randomization.ground.enabled:
-            randomize_ground_material()
-
-        if self.cfg.distractors.randomization.enabled:
-            # Randomize each distractor object
-            for i, distractor in enumerate(self._distractors):
-                distractor_name = f"distractor_{i}"
-
-                # Reset distractor to default state first
-                distractor_default_root_state = distractor.data.default_root_state[
-                    env_ids
-                ].clone()
-                distractor_default_root_state[:, :3] += self.scene.env_origins[env_ids]
-                distractor.write_root_pose_to_sim(
-                    distractor_default_root_state[:, :7], env_ids
-                )
-                distractor.write_root_velocity_to_sim(
-                    distractor_default_root_state[:, 7:], env_ids
-                )
-
-                # Randomize color
-                randomize_rigid_object_color(env_ids, object_name=distractor_name)
-
-                # Randomize size
-                if self.cfg.distractors.randomization.size_randomization_enabled:
-                    randomize_rigid_object_size(
-                        env_ids,
-                        object_name=distractor_name + "/geometry/mesh",
-                        size_range=self.cfg.distractors.randomization.size_range,
-                    )
-
-                # Randomize position
-                randomize_rigid_object_position(
-                    env_ids=env_ids,
-                    scene=self.scene,
-                    rigid_object=distractor,
-                    object_name=distractor_name,
-                    x_range=self.cfg.distractors.position.x_range,
-                    y_range=self.cfg.distractors.position.y_range,
-                    z_range=self.cfg.distractors.position.z_range,
-                    device=self.device,
-                )
+        self.dr_pipeline.apply(DRContext(env=self, env_ids=env_ids))
 
     def _compute_step_metrics(self) -> None:
         """Compute custom metrics at each step for logging purposes."""
@@ -545,4 +604,3 @@ class So101LiftCube(DirectRLEnv):
             tip_pos = ee_pos
 
         return tip_pos
-

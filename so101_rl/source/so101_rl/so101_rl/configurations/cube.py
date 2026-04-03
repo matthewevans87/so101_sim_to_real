@@ -3,8 +3,10 @@ import isaaclab.sim as sim_utils
 from isaaclab.assets import RigidObjectCfg
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
+CUBE_DEFAULT_DIMS = (0.03, 0.03, 0.03)  # 3cm cube
 WORKSPACE_PATH = os.environ.get("ISAAC_LAB_WORKSPACE_PATH", "/workspace")
-CUBE_RESTING_HEIGHT = 0.0150  # half the cube height (0.03m cube)
+CUBE_WIDTH = 0.03  # 3cm cube
+CUBE_RESTING_HEIGHT = CUBE_WIDTH / 2  # half the cube height (0.03m cube)
 DEX_CUBE_CFG = RigidObjectCfg(
     prim_path="{ENV_REGEX_NS}/Object",
     init_state=RigidObjectCfg.InitialStateCfg(
@@ -25,6 +27,7 @@ DEX_CUBE_CFG = RigidObjectCfg(
             disable_gravity=False,
         ),
         activate_contact_sensors=True,
+        semantic_tags=[("class", "cube")],
     ),
 )
 

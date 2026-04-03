@@ -1,16 +1,16 @@
 """
-DEPRECATED: This module has been moved to so101_utils.image_processing
+DEPRECATED: This module has been moved to so101.utils.image_processing
 
 This file is kept for backward compatibility and re-exports from the new location.
-Please update your imports to use: from so101_utils.image_processing import ...
+Please update your imports to use: from so101.utils.image_processing import ...
 
-To install so101_utils:
-    cd /path/to/so101_sim_to_real/so101_utils
+To install so101:
+    cd /path/to/so101_sim_to_real
     pip install -e .
 """
 
 # Re-export everything from the new location
-from so101_utils.image_processing import (
+from so101.utils.image_processing import (
     ImagePipeline,
     ImagePipelineStep,
     JpegCompressionPipelineStep,
@@ -33,4 +33,3 @@ __all__ = [
     "CameraBrightnessPipelineStep",
     "CameraContrastPipelineStep",
 ]
-

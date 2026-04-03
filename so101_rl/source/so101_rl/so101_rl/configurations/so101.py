@@ -88,3 +88,6 @@ GRIPPER_CONTACT_SENSOR_CFG = ContactSensorCfg(
 
 
 SO101_NUM_JOINTS = 6
+
+# the x component of the vector from gripper's origin to the surface of the furthest gripper tooth on the fixed jaw
+X_DIST_TO_GRIPPER_TOOTH = 0.0078

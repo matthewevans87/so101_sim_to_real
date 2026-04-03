@@ -1,4 +1,4 @@
-from isaaclab.sensors import CameraCfg
+from isaaclab.sensors import CameraCfg, TiledCameraCfg
 import isaaclab.sim as sim_utils
 
 # Camera calibration from actual hardware:
@@ -30,6 +30,31 @@ CAMERA_CFG = CameraCfg(
     offset=CameraCfg.OffsetCfg(
         pos=CAMERA_TRANSLATE_VEC,  # Camera position relative to gripper link
         rot=CAMERA_ROTATION_QUAT_WXYZ,  # w, x, y, z quaternion
+        convention="opengl",
+    ),
+)
+
+# TiledCamera variant of CAMERA_CFG — same intrinsics, single GPU pass across all envs.
+# data_types contains only "rgb" by default; collect_telemetry.py injects
+# "instance_segmentation_fast" at startup before env creation.
+# colorize_instance_segmentation=False → segmentation tensor is [B, H, W, 1] int32
+# (integer IDs rather than RGBA colours, which simplifies cube-label lookup).
+TILED_CAMERA_CFG = TiledCameraCfg(
+    prim_path="{ENV_REGEX_NS}/Robot/gripper/gripper_camera",
+    update_period=(1.0 / 30.0),
+    height=128,
+    width=128,
+    data_types=["rgb"],
+    colorize_instance_segmentation=False,
+    spawn=sim_utils.PinholeCameraCfg(
+        focal_length=6.12,
+        focus_distance=400.0,
+        horizontal_aperture=6.3,
+        clipping_range=(0.01, 10.0),
+    ),
+    offset=TiledCameraCfg.OffsetCfg(
+        pos=CAMERA_TRANSLATE_VEC,
+        rot=CAMERA_ROTATION_QUAT_WXYZ,
         convention="opengl",
     ),
 )

@@ -1,27 +1,41 @@
 from __future__ import annotations
 
 import math
+import random
 from abc import ABC, abstractmethod
 from collections import defaultdict, deque
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+import omni.usd  # type: ignore
+from so101_rl.configurations.so101 import X_DIST_TO_GRIPPER_TOOTH
 import torch
+from pxr import Gf, UsdGeom, UsdLux, UsdShade  # type: ignore
 
-from isaaclab.utils.math import matrix_from_quat, quat_apply, quat_unique
+from isaaclab.utils.math import (
+    matrix_from_quat,
+    quat_apply,
+    quat_unique,
+    sample_uniform,
+)
 import isaaclab.utils.math as math_utils
 
-from so101_rl.configurations.camera import CAMERA_ROTATION_QUAT_WXYZ, CAMERA_TRANSLATE_VEC
-from so101_rl.configurations.cube import CUBE_RESTING_HEIGHT
+from so101_rl.configurations.camera import (
+    CAMERA_ROTATION_QUAT_WXYZ,
+    CAMERA_TRANSLATE_VEC,
+)
+from so101_rl.configurations.cube import CUBE_DEFAULT_DIMS, CUBE_RESTING_HEIGHT
 from so101_rl.helpers.utils import assert_tensor
 
 if TYPE_CHECKING:
-    from .so101_lift_cube_env import So101LiftCube
+    from so101_rl.tasks.direct.so101_lift_cube.so101_lift_cube_env import So101LiftCube
 
 
 # ---------------------------------------------------------------------------
 # Context
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class StepContext:
@@ -30,13 +44,35 @@ class StepContext:
     ``env`` provides access to all Isaac Lab scene objects and cfg.
     ``metrics`` accumulates outputs from MetricSteps and is then read by RewardSteps.
     """
+
     env: So101LiftCube
+    metrics: dict[str, torch.Tensor] = field(default_factory=dict)
+
+    @property
+    def env_metrics(self) -> dict[str, torch.Tensor]:
+        """Per-episode env values computed by :class:`EnvMetricPipeline` at reset."""
+        return self.env.env_metrics
+
+
+@dataclass
+class DRContext:
+    """Context passed to each :class:`DRStep` during an episode reset.
+
+    ``env`` provides access to the environment, its config, and scene objects.
+    ``env_ids`` is the sequence of environment indices being reset this step.
+    ``metrics`` is reserved for future DR steps that depend on computed metric
+    values (e.g., current cube scale) rather than re-deriving them.
+    """
+
+    env: So101LiftCube
+    env_ids: Sequence[int]
     metrics: dict[str, torch.Tensor] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
 # Base classes
 # ---------------------------------------------------------------------------
+
 
 class MetricStep(ABC):
     """Computes one or more step-level metrics, writing results into ``ctx.metrics``.
@@ -52,14 +88,19 @@ class MetricStep(ABC):
     depends_on: frozenset[str] = frozenset()
     """Metric keys that must be present in ``ctx.metrics`` before this step runs."""
 
+    depends_on_env_metrics: frozenset[str] = frozenset()
+    """Keys from ``env.env_metrics`` (produced by :class:`EnvMetricStep`) that
+    this step reads during :meth:`compute`.  Validated at pipeline construction
+    time against the set of keys provided by the active
+    :class:`EnvMetricPipeline`."""
+
     obs_dim: int = 0
     """Number of columns this step contributes when included in an observation vector.
     0 means the step is not intended for direct use in observations.
     Scalars-per-env should set 1; vectors of length K should set K."""
 
     @abstractmethod
-    def compute(self, ctx: StepContext) -> None:
-        ...
+    def compute(self, ctx: StepContext) -> None: ...
 
 
 class MetricPipeline:
@@ -72,11 +113,15 @@ class MetricPipeline:
             is a dependency cycle among the steps.
     """
 
-    def __init__(self, steps: list[MetricStep]) -> None:
-        self.steps = self._toposort(steps)
+    def __init__(
+        self, steps: list[MetricStep], known_env_keys: frozenset[str] = frozenset()
+    ) -> None:
+        self.steps = self._toposort(steps, known_env_keys)
 
     @staticmethod
-    def _toposort(steps: list[MetricStep]) -> list[MetricStep]:
+    def _toposort(
+        steps: list[MetricStep], known_env_keys: frozenset[str] = frozenset()
+    ) -> list[MetricStep]:
         # Map each produced key to the step that produces it.
         key_to_step: dict[str, MetricStep] = {}
         for step in steps:
@@ -89,31 +134,43 @@ class MetricPipeline:
                 key_to_step[key] = step
 
         # Validate: every depends_on key must be produced by some step.
+        # Keys in known_env_keys are satisfied by EnvMetricPipeline — skip them.
         for step in steps:
             for key in step.depends_on:
-                if key not in key_to_step:
+                if key not in key_to_step and key not in known_env_keys:
                     raise ValueError(
                         f"{type(step).__name__} depends on metric key '{key}', "
                         f"but no step produces it."
                     )
+            # Validate depends_on_env_metrics keys are available from EnvMetricPipeline.
+            for key in step.depends_on_env_metrics:
+                if key not in known_env_keys:
+                    raise ValueError(
+                        f"{type(step).__name__} depends on env-metric key '{key}' "
+                        f"via depends_on_env_metrics, but it is not provided by the "
+                        f"EnvMetricPipeline (known_env_keys={known_env_keys!r})."
+                    )
 
         # Build adjacency list: predecessor_step -> {dependent_steps}
         # and in-degree counts for Kahn's algorithm.
-        dependents: dict[int, set[int]] = defaultdict(set)  # id(step) -> set of id(step)
+        dependents: dict[int, set[int]] = defaultdict(
+            set
+        )  # id(step) -> set of id(step)
         in_degree: dict[int, int] = {id(s): 0 for s in steps}
         step_by_id: dict[int, MetricStep] = {id(s): s for s in steps}
 
         for step in steps:
             for key in step.depends_on:
+                if key in known_env_keys:
+                    # satisfied by EnvMetricPipeline — no predecessor step in this graph
+                    continue
                 predecessor = key_to_step[key]
                 if id(predecessor) != id(step):
                     dependents[id(predecessor)].add(id(step))
                     in_degree[id(step)] += 1
 
         # Kahn's algorithm
-        queue: deque[int] = deque(
-            sid for sid, deg in in_degree.items() if deg == 0
-        )
+        queue: deque[int] = deque(sid for sid, deg in in_degree.items() if deg == 0)
         sorted_ids: list[int] = []
         while queue:
             sid = queue.popleft()
@@ -146,6 +203,10 @@ class RewardStep(ABC):
     requires_metrics: frozenset[str] = frozenset()
     """Metric keys from ``ctx.metrics`` that this step reads during ``compute``.
     Used by ``build_metric_pipeline`` to determine which metric steps to include."""
+
+    requires_env_metrics: frozenset[str] = frozenset()
+    """Keys from ``env.env_metrics`` (produced by :class:`EnvMetricStep`) that
+    this step reads during :meth:`compute`."""
 
     @abstractmethod
     def compute(self, ctx: StepContext) -> torch.Tensor:
@@ -188,6 +249,7 @@ class RewardPipeline:
 # ---------------------------------------------------------------------------
 # Metric steps
 # ---------------------------------------------------------------------------
+
 
 class GripperContactForceMagnitudeMetricStep(MetricStep):
     produces = frozenset({"gripper_cube_contact_force_magnitude"})
@@ -297,26 +359,15 @@ class CameraCubeAlignmentMetricStep(MetricStep):
         ctx.metrics["camera_cube_alignment"] = val
 
 
-class VGripZoneToCubeEEMetricStep(MetricStep):
-    produces = frozenset({"v_grip_zone_to_cube_ee"})
-    depends_on = frozenset({"cube_pos_ee"})
-    obs_dim = 3
-
-    def compute(self, ctx: StepContext) -> None:
-        env = ctx.env
-        val = ctx.metrics["cube_pos_ee"] - env._grip_zone_offset
-        assert_tensor(val, (env.num_envs, 3), torch.float32)
-        ctx.metrics["v_grip_zone_to_cube_ee"] = val
-
-
 class CubePosGZMetricStep(MetricStep):
     produces = frozenset({"cube_pos_gz"})
-    depends_on = frozenset()
+    depends_on = frozenset({"cube_pos_ee"})
+    depends_on_env_metrics = frozenset({"grip_zone_offset"})
     obs_dim = 3
 
     def compute(self, ctx: StepContext) -> None:
         env = ctx.env
-        val = env.grip_zone_tf.data.target_pos_source[:, 0, :]
+        val = ctx.metrics["cube_pos_ee"] - ctx.env_metrics["grip_zone_offset"]
         assert_tensor(val, (env.num_envs, 3), torch.float32)
         ctx.metrics["cube_pos_gz"] = val
 
@@ -328,7 +379,7 @@ class CubeRot6DGZMetricStep(MetricStep):
 
     def compute(self, ctx: StepContext) -> None:
         env = ctx.env
-        q_gz = quat_unique(env.grip_zone_tf.data.target_quat_source[:, 0, :])
+        q_gz = quat_unique(env.gripper_tf.data.target_quat_source[:, 0, :])
         R = matrix_from_quat(q_gz)
         val = torch.cat([R[..., :, 0], R[..., :, 1]], dim=-1)
         assert_tensor(val, (env.num_envs, 6), torch.float32)
@@ -337,12 +388,12 @@ class CubeRot6DGZMetricStep(MetricStep):
 
 class GripZoneCubeDistanceMetricStep(MetricStep):
     produces = frozenset({"grip_zone_cube_distance"})
-    depends_on = frozenset({"v_grip_zone_to_cube_ee"})
+    depends_on = frozenset({"cube_pos_gz"})
     obs_dim = 1
 
     def compute(self, ctx: StepContext) -> None:
         env = ctx.env
-        val = ctx.metrics["v_grip_zone_to_cube_ee"].norm(dim=-1, keepdim=True).squeeze(-1)
+        val = ctx.metrics["cube_pos_gz"].norm(dim=-1, keepdim=True).squeeze(-1)
         assert_tensor(val, (env.num_envs,), torch.float32)
         ctx.metrics["grip_zone_cube_distance"] = val
 
@@ -366,7 +417,10 @@ class CubeLiftFractionMetricStep(MetricStep):
 
     def compute(self, ctx: StepContext) -> None:
         env = ctx.env
-        val = ctx.metrics["cube_height_w"] / env.cfg.rewards.success_lift_fraction_terminal.height_threshold
+        val = (
+            ctx.metrics["cube_height_w"]
+            / env.cfg.rewards.success_lift_fraction_terminal.height_threshold
+        )
         assert_tensor(val, (env.num_envs,), torch.float32)
         ctx.metrics["cube_lift_fraction"] = val
 
@@ -424,7 +478,9 @@ class IsCubeInGripPositionMetricStep(MetricStep):
 
 class IsCubeGrippedMetricStep(MetricStep):
     produces = frozenset({"is_cube_gripped"})
-    depends_on = frozenset({"is_cube_in_grip_position", "gripper_cube_contact_force_magnitude"})
+    depends_on = frozenset(
+        {"is_cube_in_grip_position", "gripper_cube_contact_force_magnitude"}
+    )
     obs_dim = 1
 
     def compute(self, ctx: StepContext) -> None:
@@ -444,18 +500,22 @@ class IsCubeGrippedMetricStep(MetricStep):
 # Reward steps — Primary
 # ---------------------------------------------------------------------------
 
+
 class DistanceRewardStep(RewardStep):
     name = "rew_distance"
     requires_metrics = frozenset({"grip_zone_cube_distance"})
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
         env = ctx.env
-        return ctx.metrics["grip_zone_cube_distance"] * env.cfg.rewards.distance.scale
+        grip_zone_dist = 1 - (1.0 / torch.exp(ctx.metrics["grip_zone_cube_distance"]))
+        return grip_zone_dist * env.cfg.rewards.distance.scale
 
 
 class GripCubeRewardStep(RewardStep):
     name = "rew_grip_cube"
-    requires_metrics = frozenset({"is_cube_in_grip_position", "gripper_cube_contact_force_magnitude"})
+    requires_metrics = frozenset(
+        {"is_cube_in_grip_position", "gripper_cube_contact_force_magnitude"}
+    )
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
         env = ctx.env
@@ -478,6 +538,7 @@ class LiftCubeRewardStep(RewardStep):
 # ---------------------------------------------------------------------------
 # Reward steps — Shaping
 # ---------------------------------------------------------------------------
+
 
 class GripperCubeAlignmentRewardStep(RewardStep):
     name = "rew_gripper_cube_alignment"
@@ -513,7 +574,9 @@ class GripperLookAtCubeRewardStep(RewardStep):
         camera_pos_w = gripper_pos + quat_apply(gripper_quat, camera_offset)
 
         camera_rot_offset = (
-            torch.tensor(CAMERA_ROTATION_QUAT_WXYZ, device=env.device, dtype=torch.float32)
+            torch.tensor(
+                CAMERA_ROTATION_QUAT_WXYZ, device=env.device, dtype=torch.float32
+            )
             .unsqueeze(0)
             .expand(env.num_envs, 4)
         )
@@ -529,10 +592,16 @@ class GripperLookAtCubeRewardStep(RewardStep):
         cube_pos_w = env.gripper_tf.data.target_pos_w[:, 0, :]
         vec_to_cube = cube_pos_w - camera_pos_w
 
-        cam_forward_norm = cam_forward_w / (torch.linalg.norm(cam_forward_w, dim=-1, keepdim=True) + eps)
-        vec_to_cube_norm = vec_to_cube / (torch.linalg.norm(vec_to_cube, dim=-1, keepdim=True) + eps)
+        cam_forward_norm = cam_forward_w / (
+            torch.linalg.norm(cam_forward_w, dim=-1, keepdim=True) + eps
+        )
+        vec_to_cube_norm = vec_to_cube / (
+            torch.linalg.norm(vec_to_cube, dim=-1, keepdim=True) + eps
+        )
 
-        lookat_factor = torch.clamp((cam_forward_norm * vec_to_cube_norm).sum(dim=-1), min=0.0, max=1.0)
+        lookat_factor = torch.clamp(
+            (cam_forward_norm * vec_to_cube_norm).sum(dim=-1), min=0.0, max=1.0
+        )
         lookat_factor = torch.maximum(lookat_factor, ctx.metrics["is_cube_gripped"])
 
         return env.cfg.rewards.gripper_look_at_cube.scale * lookat_factor
@@ -560,10 +629,12 @@ class CloseGripperRewardStep(RewardStep):
     def compute(self, ctx: StepContext) -> torch.Tensor:
         env = ctx.env
         gripper_pos = env.joint_pos[:, env._ee_body_idx]
-        gripper_close_error = torch.abs(gripper_pos - env.cfg.rewards.close_gripper.close_target)
-        fraction_to_target = (
-            1.0 - (gripper_close_error / env.cfg.rewards.close_gripper.max_open).squeeze(-1)
+        gripper_close_error = torch.abs(
+            gripper_pos - env.cfg.rewards.close_gripper.close_target
         )
+        fraction_to_target = 1.0 - (
+            gripper_close_error / env.cfg.rewards.close_gripper.max_open
+        ).squeeze(-1)
         return (
             ctx.metrics["is_cube_in_grip_position"]
             * fraction_to_target
@@ -573,13 +644,20 @@ class CloseGripperRewardStep(RewardStep):
 
 class GripperForceRewardStep(RewardStep):
     name = "rew_gripper_force"
-    requires_metrics = frozenset({"gripper_cube_contact_force_magnitude", "is_cube_in_grip_position"})
+    requires_metrics = frozenset(
+        {"gripper_cube_contact_force_magnitude", "is_cube_in_grip_position"}
+    )
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
         env = ctx.env
         target = env.cfg.rewards.gripper_force.force_target
-        force_error = torch.abs(ctx.metrics["gripper_cube_contact_force_magnitude"] - target)
-        rew = torch.exp(-force_error / (target + 1e-6)) * env.cfg.rewards.gripper_force.scale
+        force_error = torch.abs(
+            ctx.metrics["gripper_cube_contact_force_magnitude"] - target
+        )
+        rew = (
+            torch.exp(-force_error / (target + 1e-6))
+            * env.cfg.rewards.gripper_force.scale
+        )
         return rew * ctx.metrics["is_cube_in_grip_position"].float()
 
 
@@ -592,7 +670,8 @@ class VantageRewardStep(RewardStep):
         cfg = env.cfg.rewards.vantage
 
         cube_gripper_dist = torch.linalg.norm(
-            env.gripper_tf.data.source_pos_w - env.gripper_tf.data.target_pos_w[:, 0, :],
+            env.gripper_tf.data.source_pos_w
+            - env.gripper_tf.data.target_pos_w[:, 0, :],
             dim=-1,
         )
         is_far = cube_gripper_dist > cfg.far_distance_threshold
@@ -602,7 +681,7 @@ class VantageRewardStep(RewardStep):
         far_enough = d > cfg.min_distance_threshold
 
         dist_reward = torch.exp(
-            -((d - cfg.ideal_distance) ** 2) / (2 * cfg.ideal_distance_sigma ** 2)
+            -((d - cfg.ideal_distance) ** 2) / (2 * cfg.ideal_distance_sigma**2)
         )
 
         h_above_cube = (
@@ -611,14 +690,17 @@ class VantageRewardStep(RewardStep):
         )
         height_reward = torch.where(
             h_above_cube >= 0,
-            torch.exp(-((h_above_cube - cfg.ideal_height) ** 2) / (2 * cfg.ideal_height_sigma ** 2)),
-            torch.exp(-((h_above_cube) ** 2) / (2 * (cfg.ideal_height_sigma / 2) ** 2)) * 0.3,
+            torch.exp(
+                -((h_above_cube - cfg.ideal_height) ** 2)
+                / (2 * cfg.ideal_height_sigma**2)
+            ),
+            torch.exp(-((h_above_cube) ** 2) / (2 * (cfg.ideal_height_sigma / 2) ** 2))
+            * 0.3,
         )
 
-        gripper_roll_error = (
-            torch.abs(env.robot.data.joint_pos[:, env._wrist_roll_idx] - math.radians(-90.0))
-            / math.radians(-90.0)
-        )
+        gripper_roll_error = torch.abs(
+            env.robot.data.joint_pos[:, env._wrist_roll_idx] - math.radians(-90.0)
+        ) / math.radians(-90.0)
 
         raw = torch.where(
             is_far & far_enough,
@@ -649,6 +731,7 @@ class KeepCameraUprightRewardStep(RewardStep):
 # Reward steps — Smoothing
 # ---------------------------------------------------------------------------
 
+
 class ActionRewardStep(RewardStep):
     name = "rew_action"
     requires_metrics = frozenset()
@@ -657,7 +740,7 @@ class ActionRewardStep(RewardStep):
         env = ctx.env
         if env.actions is None:
             return torch.zeros(env.num_envs, device=env.device)
-        return env.cfg.rewards.action.scale * torch.sum(env.actions, dim=-1)
+        return env.cfg.rewards.action.scale * torch.sum(torch.abs(env.actions), dim=-1)
 
 
 class EELinearSpeedRewardStep(RewardStep):
@@ -670,7 +753,7 @@ class EELinearSpeedRewardStep(RewardStep):
         speed = torch.linalg.norm(ee_lin_vel_w, dim=-1)
         v_safe = env.cfg.rewards.ee_linear_speed.safe_speed
         v_excess = torch.clamp(speed - v_safe, min=0.0)
-        return env.cfg.rewards.ee_linear_speed.scale * (v_excess + v_excess ** 2)
+        return env.cfg.rewards.ee_linear_speed.scale * (v_excess + v_excess**2)
 
 
 class JointSpeedRewardStep(RewardStep):
@@ -680,7 +763,7 @@ class JointSpeedRewardStep(RewardStep):
     def compute(self, ctx: StepContext) -> torch.Tensor:
         env = ctx.env
         joint_speed = torch.abs(env.joint_vel[:, env._dof_idx])
-        return env.cfg.rewards.joint_speed.scale * torch.sum(joint_speed ** 2, dim=-1)
+        return env.cfg.rewards.joint_speed.scale * torch.sum(joint_speed**2, dim=-1)
 
 
 class EEHeightSafetyRewardStep(RewardStep):
@@ -701,6 +784,7 @@ class EEHeightSafetyRewardStep(RewardStep):
 # ---------------------------------------------------------------------------
 # Reward steps — Terminal
 # ---------------------------------------------------------------------------
+
 
 class SuccessTouchTerminalRewardStep(RewardStep):
     name = "rew_success_touch_terminal"
@@ -725,7 +809,9 @@ class SuccessLiftFractionTerminalRewardStep(RewardStep):
         flag = ctx.metrics["is_success_lift_fraction_terminal"]
         return torch.where(
             flag >= 1.0,
-            torch.full_like(flag.float(), env.cfg.rewards.success_lift_fraction_terminal.scale),
+            torch.full_like(
+                flag.float(), env.cfg.rewards.success_lift_fraction_terminal.scale
+            ),
             torch.zeros(env.num_envs, device=env.device),
         )
 
@@ -739,7 +825,9 @@ class SuccessPointAtCubeTerminalRewardStep(RewardStep):
         flag = ctx.metrics["is_success_point_at_cube_terminal"]
         return torch.where(
             flag >= 1.0,
-            torch.full_like(flag.float(), env.cfg.rewards.success_point_at_cube_terminal.scale),
+            torch.full_like(
+                flag.float(), env.cfg.rewards.success_point_at_cube_terminal.scale
+            ),
             torch.zeros(env.num_envs, device=env.device),
         )
 
@@ -752,7 +840,11 @@ class SafetyTouchTableTerminalRewardStep(RewardStep):
         env = ctx.env
         return torch.where(
             ctx.metrics["is_table_touched"],
-            torch.tensor(env.cfg.rewards.safety_touch_table_terminal.scale, device=env.device, dtype=torch.float32),
+            torch.tensor(
+                env.cfg.rewards.safety_touch_table_terminal.scale,
+                device=env.device,
+                dtype=torch.float32,
+            ),
             torch.tensor(0.0, device=env.device, dtype=torch.float32),
         )
 
@@ -765,8 +857,40 @@ class SafetyTouchTableRewardStep(RewardStep):
         env = ctx.env
         return torch.where(
             ctx.metrics["is_table_touched"],
-            torch.tensor(env.cfg.rewards.safety_touch_table.scale, device=env.device, dtype=torch.float32),
+            torch.tensor(
+                env.cfg.rewards.safety_touch_table.scale,
+                device=env.device,
+                dtype=torch.float32,
+            ),
             torch.tensor(0.0, device=env.device, dtype=torch.float32),
+        )
+
+
+# ---------------------------------------------------------------------------
+# (Novel) Reward: Approach Phase
+# ---------------------------------------------------------------------------
+
+
+class ApproachPhaseRewardStep(RewardStep):
+    name = "rew_approach_phase"
+    requires_metrics = frozenset({"grip_zone_cube_distance"})
+
+    def compute(self, ctx: StepContext) -> torch.Tensor:
+        env = ctx.env
+        grip_zone_dist = 1.0 / torch.exp(ctx.metrics["grip_zone_cube_distance"])
+
+        gripper_pos = env.joint_pos[:, env._ee_body_idx]
+        gripper_close_error = 1.0 / torch.exp(
+            torch.abs(gripper_pos - env.cfg.rewards.close_gripper.max_open)
+        ).squeeze(-1)
+
+        alignment = ctx.metrics["gripper_cube_alignment"]
+
+        return (
+            grip_zone_dist
+            * gripper_close_error
+            * alignment
+            * env.cfg.rewards.approach_phase.scale
         )
 
 
@@ -781,7 +905,6 @@ ALL_METRIC_STEPS: list[type[MetricStep]] = [
     CubePosEEMetricStep,
     GripperCubeAlignmentMetricStep,
     CameraCubeAlignmentMetricStep,
-    VGripZoneToCubeEEMetricStep,
     CubePosGZMetricStep,
     CubeRot6DGZMetricStep,
     GripZoneCubeDistanceMetricStep,
@@ -808,9 +931,11 @@ KEY_OBS_DIMS: dict[str, int] = {
 # Factory helpers
 # ---------------------------------------------------------------------------
 
+
 def build_metric_pipeline(
     reward_pipeline: RewardPipeline,
     extra_keys: frozenset[str] = frozenset(),
+    env_metric_pipeline: EnvMetricPipeline | None = None,
 ) -> MetricPipeline:
     """Build a :class:`MetricPipeline` containing only the steps needed by
     ``reward_pipeline`` (via ``RewardStep.requires_metrics``) plus any
@@ -828,7 +953,16 @@ def build_metric_pipeline(
         extra_keys: Additional metric keys to force-include (e.g. keys
             consumed by observations or ``_pre_physics_step`` rather than
             rewards).
+        env_metric_pipeline: The active :class:`EnvMetricPipeline`, used to
+            validate ``depends_on_env_metrics`` declarations and avoid chasing
+            env-metric keys through the MetricStep catalog.
     """
+    known_env_keys: frozenset[str] = (
+        env_metric_pipeline.provided_keys
+        if env_metric_pipeline is not None
+        else frozenset()
+    )
+
     # Build a key → step-class map from the full catalog.
     key_to_cls: dict[str, type[MetricStep]] = {}
     for cls in ALL_METRIC_STEPS:
@@ -841,19 +975,22 @@ def build_metric_pipeline(
     while frontier:
         key = frontier.pop()
         if key not in key_to_cls:
-            # Will be caught as an unsatisfied dependency by MetricPipeline._toposort.
+            # Either an env-metric key (satisfied by EnvMetricPipeline) or will be
+            # caught as an unsatisfied dependency by MetricPipeline._toposort.
             continue
-        for dep_key in key_to_cls[key].depends_on:
-            if dep_key not in needed_keys:
+        cls = key_to_cls[key]
+        for dep_key in cls.depends_on:
+            if dep_key not in needed_keys and dep_key not in known_env_keys:
                 needed_keys.add(dep_key)
                 frontier.add(dep_key)
+        # depends_on_env_metrics keys are satisfied externally — don't chase them.
 
     # Collect the unique step classes required.
     needed_cls: set[type[MetricStep]] = {
         key_to_cls[k] for k in needed_keys if k in key_to_cls
     }
 
-    return MetricPipeline([cls() for cls in needed_cls])
+    return MetricPipeline([cls() for cls in needed_cls], known_env_keys=known_env_keys)
 
 
 def build_reward_pipeline(cfg) -> RewardPipeline:
@@ -911,4 +1048,827 @@ def build_reward_pipeline(cfg) -> RewardPipeline:
     if r.safety_touch_table.enabled:
         steps.append(SafetyTouchTableRewardStep())
 
+    # Phase-specific
+    if r.approach_phase.enabled:
+        steps.append(ApproachPhaseRewardStep())
+
     return RewardPipeline(steps)
+
+
+# ---------------------------------------------------------------------------
+# DR base classes
+# ---------------------------------------------------------------------------
+
+
+class DRStep(ABC):
+    """Applies one domain-randomisation operation to a subset of environments
+    during an episode reset.
+
+    Subclasses must implement :meth:`apply`.  The ``requires_metrics``
+    declaration is empty for all current steps; it is reserved for the
+    upcoming phase where DR steps will consume values from
+    :class:`MetricStep` outputs (e.g., current cube scale) rather than
+    re-deriving them.
+    """
+
+    requires_metrics: frozenset[str] = frozenset()
+    """Metric keys from ``ctx.metrics`` that this step reads during :meth:`apply`."""
+
+    requires_env_metrics: frozenset[str] = frozenset()
+    """Keys from ``env.env_metrics`` (produced by :class:`EnvMetricPipeline`) that
+    this step reads during :meth:`apply`."""
+
+    @abstractmethod
+    def apply(self, ctx: DRContext) -> None: ...
+
+
+class DRPipeline:
+    """Runs a sequence of :class:`DRStep` objects in order on every episode reset.
+
+    Only the steps passed at construction are executed — callers should filter
+    by the matching ``cfg`` enabled flag once at startup via
+    :func:`build_dr_pipeline`.
+    """
+
+    def __init__(self, steps: list[DRStep]) -> None:
+        self.steps = steps
+
+    def apply(self, ctx: DRContext) -> None:
+        for step in self.steps:
+            step.apply(ctx)
+
+
+# ---------------------------------------------------------------------------
+# EnvMetricStep base classes
+# ---------------------------------------------------------------------------
+
+
+class EnvMetricStep(ABC):
+    """Computes one or more per-episode, per-environment values and stores them in
+    ``env.env_metrics`` during episode reset.
+
+    Unlike :class:`MetricStep` (which is recomputed every physics step), an
+    ``EnvMetricStep`` runs once per reset inside :class:`EnvMetricPipeline`.
+    Results persist on ``env.env_metrics`` across the entire episode and are
+    accessible to :class:`MetricStep`s via ``ctx.env_metrics``.
+
+    Subclasses must declare ``produces`` and ``depends_on`` for toposorting,
+    and implement :meth:`apply`.  Values must be written as full tensors of
+    shape ``(num_envs, ...)``, initialised on first call (if absent) and
+    updated in-place for ``ctx.env_ids`` only.
+    """
+
+    produces: frozenset[str] = frozenset()
+    """Keys this step writes into ``env.env_metrics``."""
+
+    depends_on: frozenset[str] = frozenset()
+    """Other ``env.env_metrics`` keys that must be populated before this step runs."""
+
+    @abstractmethod
+    def apply(self, ctx: DRContext) -> None:
+        """Write values for ``ctx.env_ids`` into ``ctx.env.env_metrics``."""
+        ...
+
+
+class EnvMetricPipeline:
+    """Runs a topologically-sorted sequence of :class:`EnvMetricStep` objects
+    at episode reset, populating ``env.env_metrics``.
+
+    Raises:
+        ValueError: On duplicate ``produces`` keys, unsatisfied dependencies,
+            or dependency cycles.
+    """
+
+    def __init__(self, steps: list[EnvMetricStep]) -> None:
+        self.steps = self._toposort(steps)
+
+    @property
+    def provided_keys(self) -> frozenset[str]:
+        """Union of all ``produces`` sets across all steps in this pipeline."""
+        return frozenset().union(*(s.produces for s in self.steps))
+
+    @staticmethod
+    def _toposort(steps: list[EnvMetricStep]) -> list[EnvMetricStep]:
+        key_to_step: dict[str, EnvMetricStep] = {}
+        for step in steps:
+            for key in step.produces:
+                if key in key_to_step:
+                    raise ValueError(
+                        f"Env-metric key '{key}' is produced by more than one step: "
+                        f"{type(key_to_step[key]).__name__} and {type(step).__name__}"
+                    )
+                key_to_step[key] = step
+
+        for step in steps:
+            for key in step.depends_on:
+                if key not in key_to_step:
+                    raise ValueError(
+                        f"{type(step).__name__} depends on env-metric key '{key}', "
+                        f"but no step produces it."
+                    )
+
+        dependents: dict[int, set[int]] = defaultdict(set)
+        in_degree: dict[int, int] = {id(s): 0 for s in steps}
+        step_by_id: dict[int, EnvMetricStep] = {id(s): s for s in steps}
+
+        for step in steps:
+            for key in step.depends_on:
+                predecessor = key_to_step[key]
+                if id(predecessor) != id(step):
+                    dependents[id(predecessor)].add(id(step))
+                    in_degree[id(step)] += 1
+
+        queue: deque[int] = deque(sid for sid, deg in in_degree.items() if deg == 0)
+        sorted_ids: list[int] = []
+        while queue:
+            sid = queue.popleft()
+            sorted_ids.append(sid)
+            for dep_id in dependents[sid]:
+                in_degree[dep_id] -= 1
+                if in_degree[dep_id] == 0:
+                    queue.append(dep_id)
+
+        if len(sorted_ids) != len(steps):
+            raise ValueError(
+                "Cycle detected among env-metric steps. Check the 'produces' and "
+                "'depends_on' declarations for a circular dependency."
+            )
+
+        return [step_by_id[sid] for sid in sorted_ids]
+
+    def apply(self, ctx: DRContext) -> None:
+        for step in self.steps:
+            step.apply(ctx)
+
+
+# ---------------------------------------------------------------------------
+# DR steps — Cube
+# ---------------------------------------------------------------------------
+
+
+class CubeColorDRStep(DRStep):
+    """Randomise the cube diffuse colour for each resetting environment."""
+
+    requires_metrics: frozenset[str] = frozenset()
+
+    def apply(self, ctx: DRContext) -> None:
+        stage = omni.usd.get_context().get_stage()
+        for env_id in ctx.env_ids:
+            color = torch.rand(3, device="cpu")
+            rgb = (float(color[0]), float(color[1]), float(color[2]))
+
+            mesh_prim_path = f"/World/envs/env_{env_id}/Object/geometry/mesh"
+            mesh_prim = stage.GetPrimAtPath(mesh_prim_path)
+            if not mesh_prim.IsValid():
+                print(f"[CubeColorDRStep] Invalid mesh prim: {mesh_prim_path}")
+                continue
+
+            binding = UsdShade.MaterialBindingAPI(mesh_prim)
+            material, _ = binding.ComputeBoundMaterial()
+            if not material:
+                print(f"[CubeColorDRStep] No material bound for env {env_id}")
+                continue
+
+            mat_prim = material.GetPrim()
+            shader_prim = mat_prim.GetChild("Shader")
+            shader = UsdShade.Shader(shader_prim)
+            if not shader:
+                print(f"[CubeColorDRStep] No Shader child under {mat_prim.GetPath()}")
+                continue
+
+            diffuse_input = shader.GetInput("diffuseColor")
+            if not diffuse_input:
+                print(
+                    f"[CubeColorDRStep] Shader {shader_prim.GetPath()} has no "
+                    "'diffuseColor' input"
+                )
+                continue
+
+            diffuse_input.Set(Gf.Vec3f(*rgb))
+
+
+class CubeSizeDRStep(DRStep):
+    """Apply the per-env cube scale that was sampled by :class:`CubeDimsEnvMetricStep`.
+
+    Reads ``env.env_metrics["dr_cube_scale"]`` (shape ``(num_envs, 3)``) and sets the
+    ``XformOp.TypeScale`` on the cube prim for each resetting environment.
+    """
+
+    requires_env_metrics: frozenset[str] = frozenset({"dr_cube_scale"})
+
+    def apply(self, ctx: DRContext) -> None:
+        env = ctx.env
+        stage = omni.usd.get_context().get_stage()
+        for env_id in ctx.env_ids:
+            scale_xyz = env.env_metrics["dr_cube_scale"][env_id]  # (3,)
+            sx, sy, sz = float(scale_xyz[0]), float(scale_xyz[1]), float(scale_xyz[2])
+            object_prim_path = f"/World/envs/env_{env_id}/Object"
+            try:
+                object_prim = stage.GetPrimAtPath(object_prim_path)
+                if not object_prim.IsValid():
+                    print(f"[CubeSizeDRStep] Invalid prim: {object_prim_path}")
+                    continue
+            except Exception as e:
+                print(f"[CubeSizeDRStep] Error: {e}")
+                continue
+            try:
+                xformable = UsdGeom.Xformable(object_prim)
+                scale_op = None
+                for op in xformable.GetOrderedXformOps():
+                    if op.GetOpType() == UsdGeom.XformOp.TypeScale:
+                        scale_op = op
+                        break
+                if scale_op is None:
+                    scale_op = xformable.AddScaleOp()
+                scale_op.Set(Gf.Vec3f(sx, sy, sz))
+            except Exception as e:
+                print(f"[CubeSizeDRStep] Error setting scale: {e}")
+
+
+class CubePositionDRStep(DRStep):
+    """Randomise the cube position (polar coordinates) for each resetting environment."""
+
+    requires_metrics: frozenset[str] = frozenset()
+
+    def apply(self, ctx: DRContext) -> None:
+        env = ctx.env
+        pos_cfg = env.cfg.domain_randomization.cube.position_randomization
+        env_ids = ctx.env_ids
+        num_envs = len(env_ids)
+
+        radius = sample_uniform(
+            pos_cfg.radius_range[0],
+            pos_cfg.radius_range[1],
+            (num_envs, 1),
+            device=env.device,
+        )
+        angle_rad = sample_uniform(
+            math.radians(pos_cfg.angle_range[0]),
+            math.radians(pos_cfg.angle_range[1]),
+            (num_envs, 1),
+            device=env.device,
+        )
+        obj_x = radius * torch.cos(angle_rad)
+        obj_y = radius * torch.sin(angle_rad)
+        obj_z = sample_uniform(
+            pos_cfg.z_range[0], pos_cfg.z_range[1], (num_envs, 1), device=env.device
+        )
+        obj_pos = torch.cat([obj_x, obj_y, obj_z], dim=-1)
+        obj_pos += env.scene.env_origins[env_ids]
+
+        random_roll = sample_uniform(0, 2 * 3.14159, (num_envs,), device=env.device)
+        random_pitch = sample_uniform(0, 2 * 3.14159, (num_envs,), device=env.device)
+        random_yaw = sample_uniform(0, 2 * 3.14159, (num_envs,), device=env.device)
+        obj_quat = math_utils.quat_from_euler_xyz(random_roll, random_pitch, random_yaw)
+
+        root_state = env.cube.data.default_root_state[env_ids].clone()
+        root_state[:, :3] = obj_pos
+        root_state[:, 3:7] = obj_quat
+        env.cube.write_root_pose_to_sim(root_state[:, :7], env_ids)
+        env.cube.write_root_velocity_to_sim(root_state[:, 7:], env_ids)
+
+
+# ---------------------------------------------------------------------------
+# DR steps — Camera
+# ---------------------------------------------------------------------------
+
+
+class CameraPoseDRStep(DRStep):
+    """Randomise the wrist camera mounting pose for each resetting environment."""
+
+    requires_metrics: frozenset[str] = frozenset()
+
+    def apply(self, ctx: DRContext) -> None:
+        env = ctx.env
+        pose_cfg = env.cfg.domain_randomization.camera.pose
+        stage = omni.usd.get_context().get_stage()
+
+        for env_id in ctx.env_ids:
+            pos_noise = sample_uniform(
+                pose_cfg.position_noise_range[0],
+                pose_cfg.position_noise_range[1],
+                (3,),
+                device="cpu",
+            )
+            rot_noise_deg = sample_uniform(
+                pose_cfg.rotation_noise_deg_range[0],
+                pose_cfg.rotation_noise_deg_range[1],
+                (3,),
+                device="cpu",
+            )
+            camera_prim_path = f"/World/envs/env_{env_id}/Robot/gripper/gripper_camera"
+            try:
+                camera_prim = stage.GetPrimAtPath(camera_prim_path)
+                if not camera_prim.IsValid():
+                    print(f"[CameraPoseDRStep] Invalid prim: {camera_prim_path}")
+                    continue
+
+                xformable = UsdGeom.Xformable(camera_prim)
+                translate_op = None
+                orient_op = None
+                for op in xformable.GetOrderedXformOps():
+                    op_type = op.GetOpType()
+                    if (
+                        op_type == UsdGeom.XformOp.TypeTranslate
+                        and translate_op is None
+                    ):
+                        translate_op = op
+                    elif op_type == UsdGeom.XformOp.TypeOrient and orient_op is None:
+                        orient_op = op
+
+                if translate_op is None:
+                    print(
+                        f"[CameraPoseDRStep] No translate op on camera at "
+                        f"{camera_prim_path}; skipping position randomization."
+                    )
+                    raise ValueError("No translate op found")
+                if orient_op is None:
+                    print(
+                        f"[CameraPoseDRStep] No orient op on camera at "
+                        f"{camera_prim_path}; skipping rotation randomization."
+                    )
+                    raise ValueError("No orient op found")
+
+                # Apply translation noise
+                current_translate = translate_op.Get()
+                if current_translate is None:
+                    current_translate = Gf.Vec3d(0.0, 0.0, 0.0)
+                translate_op.Set(
+                    Gf.Vec3d(
+                        current_translate[0] + pos_noise[0].item(),
+                        current_translate[1] + pos_noise[1].item(),
+                        current_translate[2] + pos_noise[2].item(),
+                    )
+                )
+
+                # Apply rotation noise
+                current_quat = orient_op.Get()
+                if current_quat is None:
+                    current_quat = Gf.Quatf(1.0, 0.0, 0.0, 0.0)
+                    print(
+                        f"[CameraPoseDRStep] No existing orient on camera at "
+                        f"{camera_prim_path}, assuming identity."
+                    )
+                    raise ValueError("No existing orient op value")
+
+                current_rot = Gf.Rotation(current_quat)
+                dx = rot_noise_deg[0].item()
+                dy = rot_noise_deg[1].item()
+                dz = rot_noise_deg[2].item()
+                delta_rot = (
+                    Gf.Rotation(Gf.Vec3d(0.0, 0.0, 1.0), dz)
+                    * Gf.Rotation(Gf.Vec3d(0.0, 1.0, 0.0), dy)
+                    * Gf.Rotation(Gf.Vec3d(1.0, 0.0, 0.0), dx)
+                )
+                new_quat = (delta_rot * current_rot).GetQuat()
+                if isinstance(current_quat, Gf.Quatf):
+                    new_quat = Gf.Quatf(
+                        float(new_quat.GetReal()),
+                        Gf.Vec3f(*[float(c) for c in new_quat.GetImaginary()]),
+                    )
+                orient_op.Set(new_quat)
+
+            except Exception as e:
+                print(
+                    f"[CameraPoseDRStep] Error modifying camera at "
+                    f"{camera_prim_path}: {e}"
+                )
+
+
+# ---------------------------------------------------------------------------
+# DR steps — Lighting
+# ---------------------------------------------------------------------------
+
+
+class WorldLightingDRStep(DRStep):
+    """Randomise the global dome light once per reset batch (env 0 guard)."""
+
+    requires_metrics: frozenset[str] = frozenset()
+
+    def apply(self, ctx: DRContext) -> None:
+        if 0 not in ctx.env_ids:
+            return
+        env = ctx.env
+        wl_cfg = env.cfg.domain_randomization.world_lighting
+        try:
+            stage = omni.usd.get_context().get_stage()
+            light_prim = stage.GetPrimAtPath("/World/Light")
+            if not light_prim or not light_prim.IsValid():
+                print("[WorldLightingDRStep] No valid light at /World/Light")
+                return
+
+            dome_light = UsdLux.DomeLight(light_prim)
+            low, high = wl_cfg.intensity_range
+            dome_light.GetIntensityAttr().Set(
+                float(low + (high - low) * torch.rand(1).item())
+            )
+
+            base_color = torch.tensor([0.75, 0.75, 0.75], dtype=torch.float32)
+            color = torch.clamp(
+                base_color
+                + (torch.rand(3, dtype=torch.float32) - 0.5)
+                * 2
+                * wl_cfg.color_variation,
+                0.0,
+                1.0,
+            )
+            dome_light.GetColorAttr().Set(
+                Gf.Vec3f(float(color[0]), float(color[1]), float(color[2]))
+            )
+        except Exception as e:
+            print(f"[WorldLightingDRStep] Error: {e}")
+
+
+class EnvLightingDRStep(DRStep):
+    """Randomise per-environment point lights for each resetting environment."""
+
+    requires_metrics: frozenset[str] = frozenset()
+
+    def apply(self, ctx: DRContext) -> None:
+        env = ctx.env
+        el_cfg = env.cfg.domain_randomization.env_lighting
+        stage = omni.usd.get_context().get_stage()
+        p = 0.5
+
+        for env_id in ctx.env_ids:
+            light_prim_path = f"/World/envs/env_{env_id}/RandomPointLight"
+            should_have_light = torch.rand(1, device="cuda").item() < p
+            light_prim = stage.GetPrimAtPath(light_prim_path)
+
+            if should_have_light:
+                if not light_prim.IsValid():
+                    light_prim = stage.DefinePrim(light_prim_path, "SphereLight")
+                    point_light = UsdLux.SphereLight(light_prim)
+                else:
+                    point_light = UsdLux.SphereLight(light_prim)
+                    light_prim.SetActive(True)
+
+                x = (torch.rand(1).item() - 0.5) * 0.5
+                y = (torch.rand(1).item() - 0.5) * 0.5
+                z = (
+                    torch.rand(1).item()
+                    * (el_cfg.height_range[1] - el_cfg.height_range[0])
+                    + el_cfg.height_range[0]
+                )
+                UsdGeom.XformCommonAPI(light_prim).SetTranslate(
+                    Gf.Vec3d(float(x), float(y), float(z))
+                )
+
+                low, high = el_cfg.intensity_range
+                point_light.GetIntensityAttr().Set(
+                    float(low + (high - low) * torch.rand(1).item())
+                )
+                point_light.GetRadiusAttr().Set(random.uniform(0.1, 0.5))
+                point_light.GetDiffuseAttr().Set(1.0)
+                low_spec, high_spec = el_cfg.specular_range
+                point_light.GetSpecularAttr().Set(
+                    float(low_spec + (high_spec - low_spec) * torch.rand(1).item())
+                )
+                base_color = torch.tensor([0.75, 0.75, 0.75], dtype=torch.float32)
+                color = torch.clamp(
+                    base_color + (torch.rand(3) - 0.5) * 2 * el_cfg.color_variation,
+                    0.0,
+                    1.0,
+                )
+                point_light.GetColorAttr().Set(
+                    Gf.Vec3f(float(color[0]), float(color[1]), float(color[2]))
+                )
+            else:
+                if light_prim.IsValid():
+                    light_prim.SetActive(False)
+
+
+# ---------------------------------------------------------------------------
+# DR steps — Ground
+# ---------------------------------------------------------------------------
+
+_GROUND_MATERIAL_PATHS: list[str] = [
+    "/World/Looks/GroundMat0",
+    "/World/Looks/GroundMat1",
+    "/World/Looks/GroundMat2",
+]
+
+
+class GroundMaterialDRStep(DRStep):
+    """Swap the ground plane material once per reset batch (env 0 guard)."""
+
+    requires_metrics: frozenset[str] = frozenset()
+
+    def apply(self, ctx: DRContext) -> None:
+        if 0 not in ctx.env_ids:
+            return
+        stage = omni.usd.get_context().get_stage()
+        plane_path = "/World/ground/GroundPlane/CollisionPlane"
+        plane_prim = stage.GetPrimAtPath(plane_path)
+        if not plane_prim.IsValid():
+            print(f"[GroundMaterialDRStep] Invalid ground plane prim: {plane_path}")
+            return
+        mat_path = random.choice(_GROUND_MATERIAL_PATHS)
+        mat_prim = stage.GetPrimAtPath(mat_path)
+        if not mat_prim.IsValid():
+            print(f"[GroundMaterialDRStep] Invalid material prim: {mat_path}")
+            return
+        UsdShade.MaterialBindingAPI(plane_prim).Bind(UsdShade.Material(mat_prim))
+
+
+# ---------------------------------------------------------------------------
+# DR steps — Distractors
+# ---------------------------------------------------------------------------
+
+
+class DistractorsDRStep(DRStep):
+    """Reset and randomise every distractor object for each resetting environment.
+
+    Handles default-state reset, colour randomisation, optional size
+    randomisation, and position randomisation with an active/inactive mask
+    (inactive distractors are hidden 10 m below ground).
+    """
+
+    requires_metrics: frozenset[str] = frozenset()
+
+    def apply(self, ctx: DRContext) -> None:
+        env = ctx.env
+        env_ids = ctx.env_ids
+        stage = omni.usd.get_context().get_stage()
+
+        for i, distractor in enumerate(env._distractors):
+            distractor_name = f"distractor_{i}"
+
+            # Reset to default state first
+            default_root_state = distractor.data.default_root_state[env_ids].clone()
+            default_root_state[:, :3] += env.scene.env_origins[env_ids]
+            distractor.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
+            distractor.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
+
+            # Randomize colour
+            for env_id in env_ids:
+                color = torch.rand(3, device="cpu")
+                rgb = (float(color[0]), float(color[1]), float(color[2]))
+                mesh_prim_path = (
+                    f"/World/envs/env_{env_id}/{distractor_name}/geometry/mesh"
+                )
+                mesh_prim = stage.GetPrimAtPath(mesh_prim_path)
+                if not mesh_prim.IsValid():
+                    print(f"[DistractorsDRStep] Invalid mesh prim: {mesh_prim_path}")
+                    continue
+                binding = UsdShade.MaterialBindingAPI(mesh_prim)
+                material, _ = binding.ComputeBoundMaterial()
+                if not material:
+                    continue
+                shader = UsdShade.Shader(material.GetPrim().GetChild("Shader"))
+                if not shader:
+                    continue
+                diffuse_input = shader.GetInput("diffuseColor")
+                if diffuse_input:
+                    diffuse_input.Set(Gf.Vec3f(*rgb))
+
+            # Randomize size
+            if env.cfg.distractors.randomization.size_randomization_enabled:
+                size_range = env.cfg.distractors.randomization.size_range
+                size_factors = (
+                    torch.rand(len(env_ids), device="cuda")
+                    * (size_range[1] - size_range[0])
+                    + size_range[0]
+                )
+                for idx, env_id in enumerate(env_ids):
+                    size_factor = size_factors[idx].item()
+                    prim_path = (
+                        f"/World/envs/env_{env_id}/{distractor_name}/geometry/mesh"
+                    )
+                    try:
+                        prim = stage.GetPrimAtPath(prim_path)
+                        if not prim.IsValid():
+                            print(f"[DistractorsDRStep] Invalid prim: {prim_path}")
+                            continue
+                        xformable = UsdGeom.Xformable(prim)
+                        scale_op = None
+                        for op in xformable.GetOrderedXformOps():
+                            if op.GetOpType() == UsdGeom.XformOp.TypeScale:
+                                scale_op = op
+                                break
+                        if scale_op is None:
+                            scale_op = xformable.AddScaleOp()
+                        scale_op.Set(Gf.Vec3f(size_factor, size_factor, size_factor))
+                    except Exception as e:
+                        print(f"[DistractorsDRStep] Error setting scale: {e}")
+
+            # Randomize position with active/inactive mask
+            active_mask = (
+                torch.rand(len(env_ids), device=env.device)
+                < env.cfg.distractors.randomization.active_probability
+            )
+            env_ids_t = torch.as_tensor(env_ids, device=env.device)
+            active_env_ids = env_ids_t[active_mask]
+            inactive_env_ids = env_ids_t[~active_mask]
+
+            if len(active_env_ids) > 0:
+                num_active = len(active_env_ids)
+                pos_cfg = env.cfg.distractors.position
+                obj_x = sample_uniform(
+                    pos_cfg.x_range[0],
+                    pos_cfg.x_range[1],
+                    (num_active, 1),
+                    device=env.device,
+                )
+                obj_y = sample_uniform(
+                    pos_cfg.y_range[0],
+                    pos_cfg.y_range[1],
+                    (num_active, 1),
+                    device=env.device,
+                )
+                obj_z = sample_uniform(
+                    pos_cfg.z_range[0],
+                    pos_cfg.z_range[1],
+                    (num_active, 1),
+                    device=env.device,
+                )
+                obj_pos = torch.cat([obj_x, obj_y, obj_z], dim=-1)
+                obj_pos += env.scene.env_origins[active_env_ids]
+                roll = sample_uniform(0, 2 * 3.14159, (num_active,), device=env.device)
+                pitch = sample_uniform(0, 2 * 3.14159, (num_active,), device=env.device)
+                yaw = sample_uniform(0, 2 * 3.14159, (num_active,), device=env.device)
+                obj_quat = math_utils.quat_from_euler_xyz(roll, pitch, yaw)
+                root_state = distractor.data.default_root_state[active_env_ids].clone()
+                root_state[:, :3] = obj_pos
+                root_state[:, 3:7] = obj_quat
+                distractor.write_root_pose_to_sim(root_state[:, :7], active_env_ids)
+                distractor.write_root_velocity_to_sim(root_state[:, 7:], active_env_ids)
+
+            if len(inactive_env_ids) > 0:
+                hidden_state = distractor.data.default_root_state[
+                    inactive_env_ids
+                ].clone()
+                hidden_state[:, :3] = env.scene.env_origins[inactive_env_ids]
+                hidden_state[:, 2] -= 10.0
+                distractor.write_root_pose_to_sim(hidden_state[:, :7], inactive_env_ids)
+                distractor.write_root_velocity_to_sim(
+                    hidden_state[:, 7:], inactive_env_ids
+                )
+
+
+# ---------------------------------------------------------------------------
+# EnvMetric steps
+# ---------------------------------------------------------------------------
+
+
+class CubeDimsEnvMetricStep(EnvMetricStep):
+    """Samples a per-env, per-episode (X, Y, Z) scale for the cube.
+
+    Produces ``env.env_metrics["dr_cube_scale"]`` of shape ``(num_envs, 3)``.
+    Scales are drawn i.i.d. uniformly from
+    ``cfg.domain_randomization.cube.size_range`` and stored as isotropic
+    (X = Y = Z) vectors; independent per-axis non-isotropic scaling can be
+    added later by extending this step.
+
+    This step runs **before** :class:`CubeSizeDRStep` so that DR steps can
+    consume the sampled values directly without re-sampling.
+    """
+
+    produces = frozenset({"dr_cube_scale"})
+    depends_on = frozenset()
+
+    def apply(self, ctx: DRContext) -> None:
+        env = ctx.env
+        n = len(ctx.env_ids)
+        env_ids_t = torch.as_tensor(list(ctx.env_ids), device=env.device)
+
+        # Initialise full tensor on first call (all-ones = no scale change).
+        if "dr_cube_scale" not in env.env_metrics:
+            env.env_metrics["dr_cube_scale"] = torch.ones(
+                env.num_envs, 3, device=env.device, dtype=torch.float32
+            )
+
+        size_range = env.cfg.domain_randomization.cube.size_range
+        scalar_scales = (
+            torch.rand(n, device=env.device) * (size_range[1] - size_range[0])
+            + size_range[0]
+        )  # (n,) — isotropic
+        # Store as (n, 3) so downstream steps can handle per-axis scales uniformly.
+        env.env_metrics["dr_cube_scale"][env_ids_t] = scalar_scales.unsqueeze(
+            -1
+        ).expand(-1, 3)
+
+
+class GripZoneOffsetEnvMetricStep(EnvMetricStep):
+    """Computes the grip-zone offset vector for each env, scaled by the
+    per-episode DR cube scale sampled by :class:`CubeDimsEnvMetricStep`.
+
+    Produces ``env.env_metrics["grip_zone_offset"]`` of shape ``(num_envs, 3)``.
+    This is an :class:`EnvMetricStep` (not a :class:`MetricStep`) because the
+    grip-zone offset only changes at episode reset (when the cube scale is
+    re-sampled), not on every physics step.
+
+    Reads ``env.env_metrics["dr_cube_scale"]`` (shape ``(num_envs, 3)``) and
+    multiplies the static ``env._grip_zone_offset`` element-wise.  When size DR
+    is disabled the scale is all-ones and the result equals the static config
+    value.
+    """
+
+    produces = frozenset({"grip_zone_offset"})
+    depends_on = frozenset({"dr_cube_scale"})
+
+    def apply(self, ctx: DRContext) -> None:
+        env = ctx.env
+        env_ids_t = torch.as_tensor(list(ctx.env_ids), device=env.device)
+
+        _grip_zone_offset = torch.tensor(
+            ctx.env.cfg.gripper.grip_zone_offset,
+            device=ctx.env.device,
+            dtype=torch.float32,
+        ).view(1, 3)
+
+        # Initialise full tensor on first call.
+        if "grip_zone_offset" not in env.env_metrics:
+            env.env_metrics["grip_zone_offset"] = _grip_zone_offset.expand(
+                env.num_envs, -1
+            ).clone()
+
+        cube_scale = env.env_metrics["dr_cube_scale"][env_ids_t]  # (len, 3)
+
+        # Body diagonal of the scaled cube, shape (len,).
+        cube_dims = torch.tensor(
+            CUBE_DEFAULT_DIMS, device=env.device, dtype=torch.float32
+        )
+        d = torch.norm(cube_dims * cube_scale, dim=-1)  # (len,)
+
+        val = _grip_zone_offset.expand(len(env_ids_t), -1).clone()  # (len, 3)
+        val[:, 0] = val[:, 0] - X_DIST_TO_GRIPPER_TOOTH + d
+        env.env_metrics["grip_zone_offset"][env_ids_t] = val
+
+        print(f"[GripZoneOffsetEnvMetricStep] cube_dims (base): {cube_dims.tolist()}")
+        print(
+            f"[GripZoneOffsetEnvMetricStep] cube_scale[0]:    {cube_scale[0].tolist()}"
+        )
+        print(f"[GripZoneOffsetEnvMetricStep] d[0]:             {d[0].item():.6f}")
+        print(f"[GripZoneOffsetEnvMetricStep] grip_zone_offset[0]: {val[0].tolist()}")
+
+
+ALL_ENV_METRIC_STEPS: list[type[EnvMetricStep]] = [
+    CubeDimsEnvMetricStep,
+    GripZoneOffsetEnvMetricStep,
+]
+
+
+# ---------------------------------------------------------------------------
+# DR pipeline factory
+# ---------------------------------------------------------------------------
+
+
+def build_dr_pipeline(cfg) -> DRPipeline:
+    """Construct the domain-randomisation pipeline, including only enabled steps.
+
+    Args:
+        cfg: The ``So101LiftCubeCfg`` instance (``env.cfg``).
+    """
+    dr = cfg.domain_randomization
+    steps: list[DRStep] = []
+
+    # Cube
+    if dr.cube.color_randomization_enabled:
+        steps.append(CubeColorDRStep())
+    if dr.cube.size_randomization_enabled:
+        steps.append(CubeSizeDRStep())
+    if dr.cube.position_randomization.enabled:
+        steps.append(CubePositionDRStep())
+
+    # Camera
+    if dr.camera.pose.enabled:
+        steps.append(CameraPoseDRStep())
+
+    # Lighting
+    if dr.world_lighting.enabled:
+        steps.append(WorldLightingDRStep())
+    if dr.env_lighting.enabled:
+        steps.append(EnvLightingDRStep())
+
+    # Ground
+    if dr.ground.enabled:
+        steps.append(GroundMaterialDRStep())
+
+    # Distractors
+    if cfg.distractors.randomization.enabled:
+        steps.append(DistractorsDRStep())
+
+    return DRPipeline(steps)
+
+
+# ---------------------------------------------------------------------------
+# EnvMetric pipeline factory
+# ---------------------------------------------------------------------------
+
+
+def build_env_metric_pipeline(cfg) -> EnvMetricPipeline:
+    """Construct the :class:`EnvMetricPipeline` for the given config.
+
+    Currently always includes :class:`CubeDimsEnvMetricStep` so that
+    ``env.env_metrics["dr_cube_scale"]`` is always available (defaulting to
+    ``1.0`` when size DR is disabled).
+
+    Args:
+        cfg: The ``So101LiftCubeCfg`` instance (``env.cfg``).
+    """
+    steps: list[EnvMetricStep] = [
+        CubeDimsEnvMetricStep(),
+        GripZoneOffsetEnvMetricStep(),
+    ]
+    return EnvMetricPipeline(steps)

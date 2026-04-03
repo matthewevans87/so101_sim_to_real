@@ -1,0 +1,1722 @@
+{
+  "started_at_utc": "2026-03-24T15:15:23.307974+00:00",
+  "finished_at_utc": "2026-03-24T15:16:19.888896+00:00",
+  "duration_seconds": 56.580922,
+  "config": "/home/matthew-evans/src/so101_sim_to_real/configs/cnn_pretrain.yaml",
+  "curated_dir": "/home/matthew-evans/src/so101_sim_to_real/test/2026-03-12_09-52-10/curate",
+  "output_dir": "/home/matthew-evans/src/so101_sim_to_real/test/2026-03-12_09-52-10/cnn_rerun",
+  "device": "cuda",
+  "seed": 42,
+  "num_epochs_planned": 100,
+  "num_epochs_ran": 68,
+  "best_val_metric": 0.724794328212738,
+  "best_metric_key": "loss_total",
+  "checkpoints": {
+    "best_model": "/home/matthew-evans/src/so101_sim_to_real/test/2026-03-12_09-52-10/cnn_rerun/checkpoints/best_model.pt",
+    "best_backbone": "/home/matthew-evans/src/so101_sim_to_real/test/2026-03-12_09-52-10/cnn_rerun/checkpoints/best_backbone.pt",
+    "final_model": "/home/matthew-evans/src/so101_sim_to_real/test/2026-03-12_09-52-10/cnn_rerun/checkpoints/final_model.pt",
+    "final_backbone": "/home/matthew-evans/src/so101_sim_to_real/test/2026-03-12_09-52-10/cnn_rerun/checkpoints/final_backbone.pt"
+  },
+  "epoch_log": [
+    {
+      "epoch": 1,
+      "elapsed_s": 1.41,
+      "train": {
+        "loss_total": 2.042166,
+        "loss_grip_position": 0.702795,
+        "loss_orientation": 0.653176,
+        "loss_visibility": 0.686195,
+        "grip_position_acc": 0.238095,
+        "visibility_acc": 0.847619,
+        "orientation_mse": 0.653176
+      },
+      "val": {
+        "loss_total": 1.631038,
+        "loss_grip_position": 0.693862,
+        "loss_orientation": 0.25786,
+        "loss_visibility": 0.679316,
+        "grip_position_acc": 0.357143,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.25786
+      },
+      "lr": 0.0009997557473810372,
+      "best_val_metric": 1.631038,
+      "improved": true
+    },
+    {
+      "epoch": 2,
+      "elapsed_s": 0.82,
+      "train": {
+        "loss_total": 1.78142,
+        "loss_grip_position": 0.686915,
+        "loss_orientation": 0.462764,
+        "loss_visibility": 0.631742,
+        "grip_position_acc": 0.776191,
+        "visibility_acc": 0.866667,
+        "orientation_mse": 0.462764
+      },
+      "val": {
+        "loss_total": 1.560533,
+        "loss_grip_position": 0.691338,
+        "loss_orientation": 0.20124,
+        "loss_visibility": 0.667955,
+        "grip_position_acc": 0.642857,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.20124
+      },
+      "lr": 0.0009990232305719946,
+      "best_val_metric": 1.560533,
+      "improved": true
+    },
+    {
+      "epoch": 3,
+      "elapsed_s": 0.83,
+      "train": {
+        "loss_total": 1.58585,
+        "loss_grip_position": 0.671903,
+        "loss_orientation": 0.333885,
+        "loss_visibility": 0.580061,
+        "grip_position_acc": 0.761905,
+        "visibility_acc": 0.866667,
+        "orientation_mse": 0.333885
+      },
+      "val": {
+        "loss_total": 1.521721,
+        "loss_grip_position": 0.689038,
+        "loss_orientation": 0.176328,
+        "loss_visibility": 0.656355,
+        "grip_position_acc": 0.642857,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.176328
+      },
+      "lr": 0.0009978031724785247,
+      "best_val_metric": 1.521721,
+      "improved": true
+    },
+    {
+      "epoch": 4,
+      "elapsed_s": 0.82,
+      "train": {
+        "loss_total": 1.426904,
+        "loss_grip_position": 0.653521,
+        "loss_orientation": 0.262091,
+        "loss_visibility": 0.511292,
+        "grip_position_acc": 0.761905,
+        "visibility_acc": 0.866667,
+        "orientation_mse": 0.262091
+      },
+      "val": {
+        "loss_total": 1.498936,
+        "loss_grip_position": 0.686693,
+        "loss_orientation": 0.168264,
+        "loss_visibility": 0.643979,
+        "grip_position_acc": 0.642857,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.168264
+      },
+      "lr": 0.0009960967771506667,
+      "best_val_metric": 1.498936,
+      "improved": true
+    },
+    {
+      "epoch": 5,
+      "elapsed_s": 0.82,
+      "train": {
+        "loss_total": 1.282423,
+        "loss_grip_position": 0.624255,
+        "loss_orientation": 0.230217,
+        "loss_visibility": 0.42795,
+        "grip_position_acc": 0.761905,
+        "visibility_acc": 0.866667,
+        "orientation_mse": 0.230217
+      },
+      "val": {
+        "loss_total": 1.482071,
+        "loss_grip_position": 0.684252,
+        "loss_orientation": 0.166965,
+        "loss_visibility": 0.630854,
+        "grip_position_acc": 0.642857,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.166965
+      },
+      "lr": 0.0009939057285945933,
+      "best_val_metric": 1.482071,
+      "improved": true
+    },
+    {
+      "epoch": 6,
+      "elapsed_s": 0.81,
+      "train": {
+        "loss_total": 1.141541,
+        "loss_grip_position": 0.581003,
+        "loss_orientation": 0.221523,
+        "loss_visibility": 0.339015,
+        "grip_position_acc": 0.761905,
+        "visibility_acc": 0.866667,
+        "orientation_mse": 0.221523
+      },
+      "val": {
+        "loss_total": 1.467402,
+        "loss_grip_position": 0.681762,
+        "loss_orientation": 0.167834,
+        "loss_visibility": 0.617806,
+        "grip_position_acc": 0.642857,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.167834
+      },
+      "lr": 0.0009912321891107012,
+      "best_val_metric": 1.467402,
+      "improved": true
+    },
+    {
+      "epoch": 7,
+      "elapsed_s": 0.81,
+      "train": {
+        "loss_total": 1.010446,
+        "loss_grip_position": 0.52277,
+        "loss_orientation": 0.22267,
+        "loss_visibility": 0.265005,
+        "grip_position_acc": 0.761905,
+        "visibility_acc": 0.866667,
+        "orientation_mse": 0.22267
+      },
+      "val": {
+        "loss_total": 1.454903,
+        "loss_grip_position": 0.679157,
+        "loss_orientation": 0.169879,
+        "loss_visibility": 0.605867,
+        "grip_position_acc": 0.642857,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.169879
+      },
+      "lr": 0.0009880787971596802,
+      "best_val_metric": 1.454903,
+      "improved": true
+    },
+    {
+      "epoch": 8,
+      "elapsed_s": 0.81,
+      "train": {
+        "loss_total": 0.888031,
+        "loss_grip_position": 0.453511,
+        "loss_orientation": 0.223043,
+        "loss_visibility": 0.211477,
+        "grip_position_acc": 0.761905,
+        "visibility_acc": 0.866667,
+        "orientation_mse": 0.223043
+      },
+      "val": {
+        "loss_total": 1.441927,
+        "loss_grip_position": 0.67641,
+        "loss_orientation": 0.17013,
+        "loss_visibility": 0.595387,
+        "grip_position_acc": 0.642857,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.17013
+      },
+      "lr": 0.0009844486647586726,
+      "best_val_metric": 1.441927,
+      "improved": true
+    },
+    {
+      "epoch": 9,
+      "elapsed_s": 0.81,
+      "train": {
+        "loss_total": 0.785316,
+        "loss_grip_position": 0.388196,
+        "loss_orientation": 0.220682,
+        "loss_visibility": 0.176438,
+        "grip_position_acc": 0.761905,
+        "visibility_acc": 0.866667,
+        "orientation_mse": 0.220682
+      },
+      "val": {
+        "loss_total": 1.428942,
+        "loss_grip_position": 0.673802,
+        "loss_orientation": 0.168543,
+        "loss_visibility": 0.586598,
+        "grip_position_acc": 0.642857,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.168543
+      },
+      "lr": 0.000980345374410087,
+      "best_val_metric": 1.428942,
+      "improved": true
+    },
+    {
+      "epoch": 10,
+      "elapsed_s": 0.81,
+      "train": {
+        "loss_total": 0.712874,
+        "loss_grip_position": 0.342696,
+        "loss_orientation": 0.215748,
+        "loss_visibility": 0.15443,
+        "grip_position_acc": 0.761905,
+        "visibility_acc": 0.866667,
+        "orientation_mse": 0.215748
+      },
+      "val": {
+        "loss_total": 1.416831,
+        "loss_grip_position": 0.671722,
+        "loss_orientation": 0.163943,
+        "loss_visibility": 0.581166,
+        "grip_position_acc": 0.642857,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.163943
+      },
+      "lr": 0.0009757729755661012,
+      "best_val_metric": 1.416831,
+      "improved": true
+    },
+    {
+      "epoch": 11,
+      "elapsed_s": 0.81,
+      "train": {
+        "loss_total": 0.667673,
+        "loss_grip_position": 0.318153,
+        "loss_orientation": 0.209246,
+        "loss_visibility": 0.140274,
+        "grip_position_acc": 0.761905,
+        "visibility_acc": 0.866667,
+        "orientation_mse": 0.209246
+      },
+      "val": {
+        "loss_total": 1.412066,
+        "loss_grip_position": 0.671662,
+        "loss_orientation": 0.156374,
+        "loss_visibility": 0.584029,
+        "grip_position_acc": 0.642857,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.156374
+      },
+      "lr": 0.0009707359806323418,
+      "best_val_metric": 1.412066,
+      "improved": true
+    },
+    {
+      "epoch": 12,
+      "elapsed_s": 0.8,
+      "train": {
+        "loss_total": 0.630237,
+        "loss_grip_position": 0.294566,
+        "loss_orientation": 0.204349,
+        "loss_visibility": 0.131322,
+        "grip_position_acc": 0.761905,
+        "visibility_acc": 0.866667,
+        "orientation_mse": 0.204349
+      },
+      "val": {
+        "loss_total": 1.420737,
+        "loss_grip_position": 0.674218,
+        "loss_orientation": 0.149306,
+        "loss_visibility": 0.597213,
+        "grip_position_acc": 0.642857,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.149306
+      },
+      "lr": 0.0009652393605146846,
+      "best_val_metric": 1.412066,
+      "improved": false
+    },
+    {
+      "epoch": 13,
+      "elapsed_s": 0.83,
+      "train": {
+        "loss_total": 0.603276,
+        "loss_grip_position": 0.270073,
+        "loss_orientation": 0.201498,
+        "loss_visibility": 0.131704,
+        "grip_position_acc": 0.761905,
+        "visibility_acc": 0.866667,
+        "orientation_mse": 0.201498
+      },
+      "val": {
+        "loss_total": 1.438924,
+        "loss_grip_position": 0.677285,
+        "loss_orientation": 0.146903,
+        "loss_visibility": 0.614736,
+        "grip_position_acc": 0.642857,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.146903
+      },
+      "lr": 0.0009592885397135708,
+      "best_val_metric": 1.412066,
+      "improved": false
+    },
+    {
+      "epoch": 14,
+      "elapsed_s": 0.81,
+      "train": {
+        "loss_total": 0.576183,
+        "loss_grip_position": 0.250776,
+        "loss_orientation": 0.19607,
+        "loss_visibility": 0.129338,
+        "grip_position_acc": 0.761905,
+        "visibility_acc": 0.880952,
+        "orientation_mse": 0.19607
+      },
+      "val": {
+        "loss_total": 1.461727,
+        "loss_grip_position": 0.679793,
+        "loss_orientation": 0.148441,
+        "loss_visibility": 0.633494,
+        "grip_position_acc": 0.642857,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.148441
+      },
+      "lr": 0.0009528893909706799,
+      "best_val_metric": 1.412066,
+      "improved": false
+    },
+    {
+      "epoch": 15,
+      "elapsed_s": 0.82,
+      "train": {
+        "loss_total": 0.544408,
+        "loss_grip_position": 0.231666,
+        "loss_orientation": 0.183368,
+        "loss_visibility": 0.129374,
+        "grip_position_acc": 0.785714,
+        "visibility_acc": 0.985714,
+        "orientation_mse": 0.183368
+      },
+      "val": {
+        "loss_total": 1.490958,
+        "loss_grip_position": 0.683674,
+        "loss_orientation": 0.152053,
+        "loss_visibility": 0.655231,
+        "grip_position_acc": 0.642857,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.152053
+      },
+      "lr": 0.0009460482294732424,
+      "best_val_metric": 1.412066,
+      "improved": false
+    },
+    {
+      "epoch": 16,
+      "elapsed_s": 0.82,
+      "train": {
+        "loss_total": 0.509201,
+        "loss_grip_position": 0.207032,
+        "loss_orientation": 0.162066,
+        "loss_visibility": 0.140102,
+        "grip_position_acc": 0.904762,
+        "visibility_acc": 0.990476,
+        "orientation_mse": 0.162066
+      },
+      "val": {
+        "loss_total": 1.508463,
+        "loss_grip_position": 0.684036,
+        "loss_orientation": 0.159575,
+        "loss_visibility": 0.664852,
+        "grip_position_acc": 0.642857,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.159575
+      },
+      "lr": 0.0009387718066217127,
+      "best_val_metric": 1.412066,
+      "improved": false
+    },
+    {
+      "epoch": 17,
+      "elapsed_s": 0.82,
+      "train": {
+        "loss_total": 0.470949,
+        "loss_grip_position": 0.192719,
+        "loss_orientation": 0.141862,
+        "loss_visibility": 0.136368,
+        "grip_position_acc": 0.933333,
+        "visibility_acc": 0.966667,
+        "orientation_mse": 0.141862
+      },
+      "val": {
+        "loss_total": 1.51412,
+        "loss_grip_position": 0.680912,
+        "loss_orientation": 0.16826,
+        "loss_visibility": 0.664948,
+        "grip_position_acc": 0.642857,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.16826
+      },
+      "lr": 0.0009310673033669524,
+      "best_val_metric": 1.412066,
+      "improved": false
+    },
+    {
+      "epoch": 18,
+      "elapsed_s": 0.82,
+      "train": {
+        "loss_total": 0.441433,
+        "loss_grip_position": 0.183374,
+        "loss_orientation": 0.128835,
+        "loss_visibility": 0.129223,
+        "grip_position_acc": 0.942857,
+        "visibility_acc": 0.957143,
+        "orientation_mse": 0.128835
+      },
+      "val": {
+        "loss_total": 1.499855,
+        "loss_grip_position": 0.672418,
+        "loss_orientation": 0.174319,
+        "loss_visibility": 0.653118,
+        "grip_position_acc": 0.892857,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.174319
+      },
+      "lr": 0.0009229423231234977,
+      "best_val_metric": 1.412066,
+      "improved": false
+    },
+    {
+      "epoch": 19,
+      "elapsed_s": 0.83,
+      "train": {
+        "loss_total": 0.543232,
+        "loss_grip_position": 0.170492,
+        "loss_orientation": 0.245719,
+        "loss_visibility": 0.12702,
+        "grip_position_acc": 0.957143,
+        "visibility_acc": 0.952381,
+        "orientation_mse": 0.245719
+      },
+      "val": {
+        "loss_total": 1.482622,
+        "loss_grip_position": 0.656503,
+        "loss_orientation": 0.190736,
+        "loss_visibility": 0.635383,
+        "grip_position_acc": 0.892857,
+        "visibility_acc": 0.75,
+        "orientation_mse": 0.190736
+      },
+      "lr": 0.0009144048842659084,
+      "best_val_metric": 1.412066,
+      "improved": false
+    },
+    {
+      "epoch": 20,
+      "elapsed_s": 0.83,
+      "train": {
+        "loss_total": 0.428325,
+        "loss_grip_position": 0.156843,
+        "loss_orientation": 0.137393,
+        "loss_visibility": 0.134089,
+        "grip_position_acc": 0.971429,
+        "visibility_acc": 0.938095,
+        "orientation_mse": 0.137393
+      },
+      "val": {
+        "loss_total": 1.417259,
+        "loss_grip_position": 0.61811,
+        "loss_orientation": 0.215609,
+        "loss_visibility": 0.58354,
+        "grip_position_acc": 0.964286,
+        "visibility_acc": 0.821429,
+        "orientation_mse": 0.215609
+      },
+      "lr": 0.0009054634122155993,
+      "best_val_metric": 1.412066,
+      "improved": false
+    },
+    {
+      "epoch": 21,
+      "elapsed_s": 0.83,
+      "train": {
+        "loss_total": 0.42778,
+        "loss_grip_position": 0.15653,
+        "loss_orientation": 0.146381,
+        "loss_visibility": 0.124869,
+        "grip_position_acc": 0.961905,
+        "visibility_acc": 0.952381,
+        "orientation_mse": 0.146381
+      },
+      "val": {
+        "loss_total": 1.344941,
+        "loss_grip_position": 0.570157,
+        "loss_orientation": 0.255058,
+        "loss_visibility": 0.519726,
+        "grip_position_acc": 0.964286,
+        "visibility_acc": 0.857143,
+        "orientation_mse": 0.255058
+      },
+      "lr": 0.000896126731125967,
+      "best_val_metric": 1.344941,
+      "improved": true
+    },
+    {
+      "epoch": 22,
+      "elapsed_s": 0.82,
+      "train": {
+        "loss_total": 0.424404,
+        "loss_grip_position": 0.152373,
+        "loss_orientation": 0.156617,
+        "loss_visibility": 0.115414,
+        "grip_position_acc": 0.947619,
+        "visibility_acc": 0.957143,
+        "orientation_mse": 0.156617
+      },
+      "val": {
+        "loss_total": 1.314851,
+        "loss_grip_position": 0.544612,
+        "loss_orientation": 0.275309,
+        "loss_visibility": 0.49493,
+        "grip_position_acc": 0.964286,
+        "visibility_acc": 0.821429,
+        "orientation_mse": 0.275309
+      },
+      "lr": 0.000886404055174016,
+      "best_val_metric": 1.314851,
+      "improved": true
+    },
+    {
+      "epoch": 23,
+      "elapsed_s": 0.81,
+      "train": {
+        "loss_total": 0.406928,
+        "loss_grip_position": 0.129805,
+        "loss_orientation": 0.15826,
+        "loss_visibility": 0.118863,
+        "grip_position_acc": 0.971429,
+        "visibility_acc": 0.942857,
+        "orientation_mse": 0.15826
+      },
+      "val": {
+        "loss_total": 1.29816,
+        "loss_grip_position": 0.532268,
+        "loss_orientation": 0.279339,
+        "loss_visibility": 0.486553,
+        "grip_position_acc": 0.964286,
+        "visibility_acc": 0.821429,
+        "orientation_mse": 0.279339
+      },
+      "lr": 0.0008763049794670778,
+      "best_val_metric": 1.29816,
+      "improved": true
+    },
+    {
+      "epoch": 24,
+      "elapsed_s": 0.81,
+      "train": {
+        "loss_total": 0.389596,
+        "loss_grip_position": 0.105695,
+        "loss_orientation": 0.154945,
+        "loss_visibility": 0.128956,
+        "grip_position_acc": 0.985714,
+        "visibility_acc": 0.919048,
+        "orientation_mse": 0.154945
+      },
+      "val": {
+        "loss_total": 1.253861,
+        "loss_grip_position": 0.514755,
+        "loss_orientation": 0.287269,
+        "loss_visibility": 0.451837,
+        "grip_position_acc": 0.964286,
+        "visibility_acc": 0.821429,
+        "orientation_mse": 0.287269
+      },
+      "lr": 0.000865839470573599,
+      "best_val_metric": 1.253861,
+      "improved": true
+    },
+    {
+      "epoch": 25,
+      "elapsed_s": 0.81,
+      "train": {
+        "loss_total": 0.366943,
+        "loss_grip_position": 0.096705,
+        "loss_orientation": 0.151063,
+        "loss_visibility": 0.119176,
+        "grip_position_acc": 0.980952,
+        "visibility_acc": 0.933333,
+        "orientation_mse": 0.151063
+      },
+      "val": {
+        "loss_total": 1.208288,
+        "loss_grip_position": 0.50376,
+        "loss_orientation": 0.293992,
+        "loss_visibility": 0.410536,
+        "grip_position_acc": 0.892857,
+        "visibility_acc": 0.857143,
+        "orientation_mse": 0.293992
+      },
+      "lr": 0.0008550178566873413,
+      "best_val_metric": 1.208288,
+      "improved": true
+    },
+    {
+      "epoch": 26,
+      "elapsed_s": 0.81,
+      "train": {
+        "loss_total": 0.348618,
+        "loss_grip_position": 0.096167,
+        "loss_orientation": 0.147766,
+        "loss_visibility": 0.104685,
+        "grip_position_acc": 0.971429,
+        "visibility_acc": 0.938095,
+        "orientation_mse": 0.147766
+      },
+      "val": {
+        "loss_total": 1.193791,
+        "loss_grip_position": 0.503664,
+        "loss_orientation": 0.291755,
+        "loss_visibility": 0.398372,
+        "grip_position_acc": 0.892857,
+        "visibility_acc": 0.857143,
+        "orientation_mse": 0.291755
+      },
+      "lr": 0.0008438508174347012,
+      "best_val_metric": 1.193791,
+      "improved": true
+    },
+    {
+      "epoch": 27,
+      "elapsed_s": 0.81,
+      "train": {
+        "loss_total": 0.324867,
+        "loss_grip_position": 0.073108,
+        "loss_orientation": 0.14214,
+        "loss_visibility": 0.109618,
+        "grip_position_acc": 0.990476,
+        "visibility_acc": 0.938095,
+        "orientation_mse": 0.14214
+      },
+      "val": {
+        "loss_total": 1.161323,
+        "loss_grip_position": 0.49961,
+        "loss_orientation": 0.299978,
+        "loss_visibility": 0.361735,
+        "grip_position_acc": 0.857143,
+        "visibility_acc": 0.928571,
+        "orientation_mse": 0.299978
+      },
+      "lr": 0.000832349373335208,
+      "best_val_metric": 1.161323,
+      "improved": true
+    },
+    {
+      "epoch": 28,
+      "elapsed_s": 0.81,
+      "train": {
+        "loss_total": 0.301813,
+        "loss_grip_position": 0.061208,
+        "loss_orientation": 0.137862,
+        "loss_visibility": 0.102744,
+        "grip_position_acc": 0.985714,
+        "visibility_acc": 0.942857,
+        "orientation_mse": 0.137862
+      },
+      "val": {
+        "loss_total": 1.115797,
+        "loss_grip_position": 0.499514,
+        "loss_orientation": 0.321712,
+        "loss_visibility": 0.294571,
+        "grip_position_acc": 0.857143,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.321712
+      },
+      "lr": 0.0008205248749256018,
+      "best_val_metric": 1.115797,
+      "improved": true
+    },
+    {
+      "epoch": 29,
+      "elapsed_s": 0.81,
+      "train": {
+        "loss_total": 0.280546,
+        "loss_grip_position": 0.067382,
+        "loss_orientation": 0.135053,
+        "loss_visibility": 0.078112,
+        "grip_position_acc": 0.971429,
+        "visibility_acc": 0.952381,
+        "orientation_mse": 0.135053
+      },
+      "val": {
+        "loss_total": 1.097482,
+        "loss_grip_position": 0.484925,
+        "loss_orientation": 0.326997,
+        "loss_visibility": 0.28556,
+        "grip_position_acc": 0.857143,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.326997
+      },
+      "lr": 0.0008083889915582238,
+      "best_val_metric": 1.097482,
+      "improved": true
+    },
+    {
+      "epoch": 30,
+      "elapsed_s": 0.81,
+      "train": {
+        "loss_total": 0.258005,
+        "loss_grip_position": 0.048942,
+        "loss_orientation": 0.128737,
+        "loss_visibility": 0.080326,
+        "grip_position_acc": 0.995238,
+        "visibility_acc": 0.952381,
+        "orientation_mse": 0.128737
+      },
+      "val": {
+        "loss_total": 1.063826,
+        "loss_grip_position": 0.462298,
+        "loss_orientation": 0.34028,
+        "loss_visibility": 0.261249,
+        "grip_position_acc": 0.857143,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.34028
+      },
+      "lr": 0.0007959536998847747,
+      "best_val_metric": 1.063826,
+      "improved": true
+    },
+    {
+      "epoch": 31,
+      "elapsed_s": 0.82,
+      "train": {
+        "loss_total": 0.236086,
+        "loss_grip_position": 0.043932,
+        "loss_orientation": 0.121763,
+        "loss_visibility": 0.070391,
+        "grip_position_acc": 0.995238,
+        "visibility_acc": 0.961905,
+        "orientation_mse": 0.121763
+      },
+      "val": {
+        "loss_total": 1.026966,
+        "loss_grip_position": 0.435575,
+        "loss_orientation": 0.35894,
+        "loss_visibility": 0.232451,
+        "grip_position_acc": 0.857143,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.35894
+      },
+      "lr": 0.0007832312720368051,
+      "best_val_metric": 1.026966,
+      "improved": true
+    },
+    {
+      "epoch": 32,
+      "elapsed_s": 0.81,
+      "train": {
+        "loss_total": 0.21713,
+        "loss_grip_position": 0.045207,
+        "loss_orientation": 0.115284,
+        "loss_visibility": 0.056639,
+        "grip_position_acc": 0.995238,
+        "visibility_acc": 0.985714,
+        "orientation_mse": 0.115284
+      },
+      "val": {
+        "loss_total": 0.996235,
+        "loss_grip_position": 0.386686,
+        "loss_orientation": 0.366303,
+        "loss_visibility": 0.243246,
+        "grip_position_acc": 0.892857,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.366303
+      },
+      "lr": 0.0007702342635146037,
+      "best_val_metric": 0.996235,
+      "improved": true
+    },
+    {
+      "epoch": 33,
+      "elapsed_s": 0.81,
+      "train": {
+        "loss_total": 0.200078,
+        "loss_grip_position": 0.033335,
+        "loss_orientation": 0.108866,
+        "loss_visibility": 0.057877,
+        "grip_position_acc": 1.0,
+        "visibility_acc": 0.985714,
+        "orientation_mse": 0.108866
+      },
+      "val": {
+        "loss_total": 0.96643,
+        "loss_grip_position": 0.360807,
+        "loss_orientation": 0.395621,
+        "loss_visibility": 0.210002,
+        "grip_position_acc": 0.892857,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.395621
+      },
+      "lr": 0.0007569755007964342,
+      "best_val_metric": 0.96643,
+      "improved": true
+    },
+    {
+      "epoch": 34,
+      "elapsed_s": 0.81,
+      "train": {
+        "loss_total": 0.181089,
+        "loss_grip_position": 0.032259,
+        "loss_orientation": 0.104694,
+        "loss_visibility": 0.044137,
+        "grip_position_acc": 0.995238,
+        "visibility_acc": 0.990476,
+        "orientation_mse": 0.104694
+      },
+      "val": {
+        "loss_total": 0.940727,
+        "loss_grip_position": 0.321676,
+        "loss_orientation": 0.412592,
+        "loss_visibility": 0.206458,
+        "grip_position_acc": 0.964286,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.412592
+      },
+      "lr": 0.0007434680686803494,
+      "best_val_metric": 0.940727,
+      "improved": true
+    },
+    {
+      "epoch": 35,
+      "elapsed_s": 0.82,
+      "train": {
+        "loss_total": 0.162314,
+        "loss_grip_position": 0.021939,
+        "loss_orientation": 0.099765,
+        "loss_visibility": 0.04061,
+        "grip_position_acc": 1.0,
+        "visibility_acc": 0.995238,
+        "orientation_mse": 0.099765
+      },
+      "val": {
+        "loss_total": 0.91674,
+        "loss_grip_position": 0.28537,
+        "loss_orientation": 0.426511,
+        "loss_visibility": 0.204858,
+        "grip_position_acc": 0.964286,
+        "visibility_acc": 0.964286,
+        "orientation_mse": 0.426511
+      },
+      "lr": 0.0007297252973710761,
+      "best_val_metric": 0.91674,
+      "improved": true
+    },
+    {
+      "epoch": 36,
+      "elapsed_s": 0.82,
+      "train": {
+        "loss_total": 0.147047,
+        "loss_grip_position": 0.015205,
+        "loss_orientation": 0.094746,
+        "loss_visibility": 0.037096,
+        "grip_position_acc": 1.0,
+        "visibility_acc": 0.995238,
+        "orientation_mse": 0.094746
+      },
+      "val": {
+        "loss_total": 0.898388,
+        "loss_grip_position": 0.265739,
+        "loss_orientation": 0.445225,
+        "loss_visibility": 0.187425,
+        "grip_position_acc": 0.964286,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.445225
+      },
+      "lr": 0.0007157607493247114,
+      "best_val_metric": 0.898388,
+      "improved": true
+    },
+    {
+      "epoch": 37,
+      "elapsed_s": 0.81,
+      "train": {
+        "loss_total": 0.133382,
+        "loss_grip_position": 0.013522,
+        "loss_orientation": 0.091118,
+        "loss_visibility": 0.028741,
+        "grip_position_acc": 1.0,
+        "visibility_acc": 0.995238,
+        "orientation_mse": 0.091118
+      },
+      "val": {
+        "loss_total": 0.868471,
+        "loss_grip_position": 0.223582,
+        "loss_orientation": 0.448778,
+        "loss_visibility": 0.196112,
+        "grip_position_acc": 0.964286,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.448778
+      },
+      "lr": 0.0007015882058642168,
+      "best_val_metric": 0.868471,
+      "improved": true
+    },
+    {
+      "epoch": 38,
+      "elapsed_s": 0.82,
+      "train": {
+        "loss_total": 0.120675,
+        "loss_grip_position": 0.010022,
+        "loss_orientation": 0.085585,
+        "loss_visibility": 0.025068,
+        "grip_position_acc": 1.0,
+        "visibility_acc": 0.995238,
+        "orientation_mse": 0.085585
+      },
+      "val": {
+        "loss_total": 0.849484,
+        "loss_grip_position": 0.193491,
+        "loss_orientation": 0.449899,
+        "loss_visibility": 0.206094,
+        "grip_position_acc": 0.964286,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.449899
+      },
+      "lr": 0.0006872216535789162,
+      "best_val_metric": 0.849484,
+      "improved": true
+    },
+    {
+      "epoch": 39,
+      "elapsed_s": 0.82,
+      "train": {
+        "loss_total": 0.110338,
+        "loss_grip_position": 0.009473,
+        "loss_orientation": 0.079454,
+        "loss_visibility": 0.021411,
+        "grip_position_acc": 1.0,
+        "visibility_acc": 0.995238,
+        "orientation_mse": 0.079454
+      },
+      "val": {
+        "loss_total": 0.828867,
+        "loss_grip_position": 0.17652,
+        "loss_orientation": 0.467228,
+        "loss_visibility": 0.185118,
+        "grip_position_acc": 0.964286,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.467228
+      },
+      "lr": 0.0006726752705214198,
+      "best_val_metric": 0.828867,
+      "improved": true
+    },
+    {
+      "epoch": 40,
+      "elapsed_s": 0.81,
+      "train": {
+        "loss_total": 0.100271,
+        "loss_grip_position": 0.00843,
+        "loss_orientation": 0.075692,
+        "loss_visibility": 0.016149,
+        "grip_position_acc": 1.0,
+        "visibility_acc": 0.995238,
+        "orientation_mse": 0.075692
+      },
+      "val": {
+        "loss_total": 0.811335,
+        "loss_grip_position": 0.155616,
+        "loss_orientation": 0.469915,
+        "loss_visibility": 0.185804,
+        "grip_position_acc": 0.964286,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.469915
+      },
+      "lr": 0.0006579634122155995,
+      "best_val_metric": 0.811335,
+      "improved": true
+    },
+    {
+      "epoch": 41,
+      "elapsed_s": 0.81,
+      "train": {
+        "loss_total": 0.09045,
+        "loss_grip_position": 0.006797,
+        "loss_orientation": 0.069742,
+        "loss_visibility": 0.013911,
+        "grip_position_acc": 1.0,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.069742
+      },
+      "val": {
+        "loss_total": 0.793544,
+        "loss_grip_position": 0.143809,
+        "loss_orientation": 0.471666,
+        "loss_visibility": 0.178068,
+        "grip_position_acc": 0.964286,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.471666
+      },
+      "lr": 0.000643100597489419,
+      "best_val_metric": 0.793544,
+      "improved": true
+    },
+    {
+      "epoch": 42,
+      "elapsed_s": 0.82,
+      "train": {
+        "loss_total": 0.083155,
+        "loss_grip_position": 0.006443,
+        "loss_orientation": 0.064801,
+        "loss_visibility": 0.011911,
+        "grip_position_acc": 1.0,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.064801
+      },
+      "val": {
+        "loss_total": 0.778339,
+        "loss_grip_position": 0.148011,
+        "loss_orientation": 0.481957,
+        "loss_visibility": 0.148371,
+        "grip_position_acc": 0.964286,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.481957
+      },
+      "lr": 0.0006281014941466035,
+      "best_val_metric": 0.778339,
+      "improved": true
+    },
+    {
+      "epoch": 43,
+      "elapsed_s": 0.82,
+      "train": {
+        "loss_total": 0.075402,
+        "loss_grip_position": 0.004946,
+        "loss_orientation": 0.060618,
+        "loss_visibility": 0.009838,
+        "grip_position_acc": 1.0,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.060618
+      },
+      "val": {
+        "loss_total": 0.762743,
+        "loss_grip_position": 0.148332,
+        "loss_orientation": 0.4779,
+        "loss_visibility": 0.136511,
+        "grip_position_acc": 0.964286,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.4779
+      },
+      "lr": 0.000612980904491289,
+      "best_val_metric": 0.762743,
+      "improved": true
+    },
+    {
+      "epoch": 44,
+      "elapsed_s": 0.81,
+      "train": {
+        "loss_total": 0.067498,
+        "loss_grip_position": 0.003894,
+        "loss_orientation": 0.054958,
+        "loss_visibility": 0.008646,
+        "grip_position_acc": 1.0,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.054958
+      },
+      "val": {
+        "loss_total": 0.745911,
+        "loss_grip_position": 0.146147,
+        "loss_orientation": 0.465501,
+        "loss_visibility": 0.134263,
+        "grip_position_acc": 0.964286,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.465501
+      },
+      "lr": 0.0005977537507199342,
+      "best_val_metric": 0.745911,
+      "improved": true
+    },
+    {
+      "epoch": 45,
+      "elapsed_s": 0.82,
+      "train": {
+        "loss_total": 0.060404,
+        "loss_grip_position": 0.003478,
+        "loss_orientation": 0.048992,
+        "loss_visibility": 0.007933,
+        "grip_position_acc": 1.0,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.048992
+      },
+      "val": {
+        "loss_total": 0.740151,
+        "loss_grip_position": 0.156023,
+        "loss_orientation": 0.464843,
+        "loss_visibility": 0.119285,
+        "grip_position_acc": 0.964286,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.464843
+      },
+      "lr": 0.0005824350601949147,
+      "best_val_metric": 0.740151,
+      "improved": true
+    },
+    {
+      "epoch": 46,
+      "elapsed_s": 0.83,
+      "train": {
+        "loss_total": 0.054423,
+        "loss_grip_position": 0.002495,
+        "loss_orientation": 0.044732,
+        "loss_visibility": 0.007196,
+        "grip_position_acc": 1.0,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.044732
+      },
+      "val": {
+        "loss_total": 0.745925,
+        "loss_grip_position": 0.171535,
+        "loss_orientation": 0.471807,
+        "loss_visibility": 0.102584,
+        "grip_position_acc": 0.964286,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.471807
+      },
+      "lr": 0.000567039950614331,
+      "best_val_metric": 0.740151,
+      "improved": false
+    },
+    {
+      "epoch": 47,
+      "elapsed_s": 0.83,
+      "train": {
+        "loss_total": 0.050935,
+        "loss_grip_position": 0.001977,
+        "loss_orientation": 0.042503,
+        "loss_visibility": 0.006454,
+        "grip_position_acc": 1.0,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.042503
+      },
+      "val": {
+        "loss_total": 0.737471,
+        "loss_grip_position": 0.169886,
+        "loss_orientation": 0.473285,
+        "loss_visibility": 0.0943,
+        "grip_position_acc": 0.964286,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.473285
+      },
+      "lr": 0.0005515836150926649,
+      "best_val_metric": 0.737471,
+      "improved": true
+    },
+    {
+      "epoch": 48,
+      "elapsed_s": 0.81,
+      "train": {
+        "loss_total": 0.046181,
+        "loss_grip_position": 0.001571,
+        "loss_orientation": 0.038801,
+        "loss_visibility": 0.005809,
+        "grip_position_acc": 1.0,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.038801
+      },
+      "val": {
+        "loss_total": 0.724794,
+        "loss_grip_position": 0.170027,
+        "loss_orientation": 0.469048,
+        "loss_visibility": 0.085719,
+        "grip_position_acc": 0.964286,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.469048
+      },
+      "lr": 0.0005360813071670105,
+      "best_val_metric": 0.724794,
+      "improved": true
+    },
+    {
+      "epoch": 49,
+      "elapsed_s": 0.81,
+      "train": {
+        "loss_total": 0.042783,
+        "loss_grip_position": 0.001271,
+        "loss_orientation": 0.036321,
+        "loss_visibility": 0.005191,
+        "grip_position_acc": 1.0,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.036321
+      },
+      "val": {
+        "loss_total": 0.730252,
+        "loss_grip_position": 0.191112,
+        "loss_orientation": 0.46659,
+        "loss_visibility": 0.072549,
+        "grip_position_acc": 0.928571,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.46659
+      },
+      "lr": 0.0005205483257436738,
+      "best_val_metric": 0.724794,
+      "improved": false
+    },
+    {
+      "epoch": 50,
+      "elapsed_s": 0.83,
+      "train": {
+        "loss_total": 0.039861,
+        "loss_grip_position": 0.001128,
+        "loss_orientation": 0.034145,
+        "loss_visibility": 0.004588,
+        "grip_position_acc": 1.0,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.034145
+      },
+      "val": {
+        "loss_total": 0.752857,
+        "loss_grip_position": 0.224583,
+        "loss_orientation": 0.467435,
+        "loss_visibility": 0.060839,
+        "grip_position_acc": 0.928571,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.467435
+      },
+      "lr": 0.0005050000000000002,
+      "best_val_metric": 0.724794,
+      "improved": false
+    },
+    {
+      "epoch": 51,
+      "elapsed_s": 0.83,
+      "train": {
+        "loss_total": 0.037252,
+        "loss_grip_position": 0.001301,
+        "loss_orientation": 0.031853,
+        "loss_visibility": 0.004098,
+        "grip_position_acc": 1.0,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.031853
+      },
+      "val": {
+        "loss_total": 0.765009,
+        "loss_grip_position": 0.239816,
+        "loss_orientation": 0.469791,
+        "loss_visibility": 0.055402,
+        "grip_position_acc": 0.928571,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.469791
+      },
+      "lr": 0.0004894516742563267,
+      "best_val_metric": 0.724794,
+      "improved": false
+    },
+    {
+      "epoch": 52,
+      "elapsed_s": 0.83,
+      "train": {
+        "loss_total": 0.034573,
+        "loss_grip_position": 0.001103,
+        "loss_orientation": 0.029688,
+        "loss_visibility": 0.003782,
+        "grip_position_acc": 1.0,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.029688
+      },
+      "val": {
+        "loss_total": 0.765355,
+        "loss_grip_position": 0.238968,
+        "loss_orientation": 0.472917,
+        "loss_visibility": 0.05347,
+        "grip_position_acc": 0.928571,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.472917
+      },
+      "lr": 0.0004739186928329901,
+      "best_val_metric": 0.724794,
+      "improved": false
+    },
+    {
+      "epoch": 53,
+      "elapsed_s": 0.81,
+      "train": {
+        "loss_total": 0.032326,
+        "loss_grip_position": 0.000775,
+        "loss_orientation": 0.027951,
+        "loss_visibility": 0.0036,
+        "grip_position_acc": 1.0,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.027951
+      },
+      "val": {
+        "loss_total": 0.769291,
+        "loss_grip_position": 0.241799,
+        "loss_orientation": 0.476264,
+        "loss_visibility": 0.051228,
+        "grip_position_acc": 0.928571,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.476264
+      },
+      "lr": 0.00045841638490733556,
+      "best_val_metric": 0.724794,
+      "improved": false
+    },
+    {
+      "epoch": 54,
+      "elapsed_s": 0.82,
+      "train": {
+        "loss_total": 0.030276,
+        "loss_grip_position": 0.00064,
+        "loss_orientation": 0.026207,
+        "loss_visibility": 0.00343,
+        "grip_position_acc": 1.0,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.026207
+      },
+      "val": {
+        "loss_total": 0.778814,
+        "loss_grip_position": 0.254933,
+        "loss_orientation": 0.476901,
+        "loss_visibility": 0.04698,
+        "grip_position_acc": 0.928571,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.476901
+      },
+      "lr": 0.0004429600493856696,
+      "best_val_metric": 0.724794,
+      "improved": false
+    },
+    {
+      "epoch": 55,
+      "elapsed_s": 0.81,
+      "train": {
+        "loss_total": 0.027975,
+        "loss_grip_position": 0.000652,
+        "loss_orientation": 0.024142,
+        "loss_visibility": 0.003181,
+        "grip_position_acc": 1.0,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.024142
+      },
+      "val": {
+        "loss_total": 0.777121,
+        "loss_grip_position": 0.262635,
+        "loss_orientation": 0.471604,
+        "loss_visibility": 0.042881,
+        "grip_position_acc": 0.928571,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.471604
+      },
+      "lr": 0.0004275649398050859,
+      "best_val_metric": 0.724794,
+      "improved": false
+    },
+    {
+      "epoch": 56,
+      "elapsed_s": 0.84,
+      "train": {
+        "loss_total": 0.026413,
+        "loss_grip_position": 0.000692,
+        "loss_orientation": 0.022788,
+        "loss_visibility": 0.002933,
+        "grip_position_acc": 1.0,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.022788
+      },
+      "val": {
+        "loss_total": 0.760353,
+        "loss_grip_position": 0.255877,
+        "loss_orientation": 0.46432,
+        "loss_visibility": 0.040157,
+        "grip_position_acc": 0.928571,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.46432
+      },
+      "lr": 0.0004122462492800665,
+      "best_val_metric": 0.724794,
+      "improved": false
+    },
+    {
+      "epoch": 57,
+      "elapsed_s": 0.82,
+      "train": {
+        "loss_total": 0.025207,
+        "loss_grip_position": 0.000634,
+        "loss_orientation": 0.021817,
+        "loss_visibility": 0.002756,
+        "grip_position_acc": 1.0,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.021817
+      },
+      "val": {
+        "loss_total": 0.746412,
+        "loss_grip_position": 0.249125,
+        "loss_orientation": 0.459626,
+        "loss_visibility": 0.037661,
+        "grip_position_acc": 0.928571,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.459626
+      },
+      "lr": 0.00039701909550871175,
+      "best_val_metric": 0.724794,
+      "improved": false
+    },
+    {
+      "epoch": 58,
+      "elapsed_s": 0.82,
+      "train": {
+        "loss_total": 0.024143,
+        "loss_grip_position": 0.000528,
+        "loss_orientation": 0.020978,
+        "loss_visibility": 0.002637,
+        "grip_position_acc": 1.0,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.020978
+      },
+      "val": {
+        "loss_total": 0.745884,
+        "loss_grip_position": 0.251682,
+        "loss_orientation": 0.459686,
+        "loss_visibility": 0.034517,
+        "grip_position_acc": 0.928571,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.459686
+      },
+      "lr": 0.000381898505853397,
+      "best_val_metric": 0.724794,
+      "improved": false
+    },
+    {
+      "epoch": 59,
+      "elapsed_s": 0.83,
+      "train": {
+        "loss_total": 0.022705,
+        "loss_grip_position": 0.000437,
+        "loss_orientation": 0.019731,
+        "loss_visibility": 0.002537,
+        "grip_position_acc": 1.0,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.019731
+      },
+      "val": {
+        "loss_total": 0.745765,
+        "loss_grip_position": 0.251987,
+        "loss_orientation": 0.461939,
+        "loss_visibility": 0.031839,
+        "grip_position_acc": 0.928571,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.461939
+      },
+      "lr": 0.00036689940251058173,
+      "best_val_metric": 0.724794,
+      "improved": false
+    },
+    {
+      "epoch": 60,
+      "elapsed_s": 0.83,
+      "train": {
+        "loss_total": 0.021362,
+        "loss_grip_position": 0.000348,
+        "loss_orientation": 0.01855,
+        "loss_visibility": 0.002464,
+        "grip_position_acc": 1.0,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.01855
+      },
+      "val": {
+        "loss_total": 0.74061,
+        "loss_grip_position": 0.25051,
+        "loss_orientation": 0.460934,
+        "loss_visibility": 0.029167,
+        "grip_position_acc": 0.928571,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.460934
+      },
+      "lr": 0.00035203658778440135,
+      "best_val_metric": 0.724794,
+      "improved": false
+    },
+    {
+      "epoch": 61,
+      "elapsed_s": 0.85,
+      "train": {
+        "loss_total": 0.020122,
+        "loss_grip_position": 0.000287,
+        "loss_orientation": 0.017442,
+        "loss_visibility": 0.002393,
+        "grip_position_acc": 1.0,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.017442
+      },
+      "val": {
+        "loss_total": 0.745896,
+        "loss_grip_position": 0.265665,
+        "loss_orientation": 0.455327,
+        "loss_visibility": 0.024904,
+        "grip_position_acc": 0.928571,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.455327
+      },
+      "lr": 0.00033732472947858096,
+      "best_val_metric": 0.724794,
+      "improved": false
+    },
+    {
+      "epoch": 62,
+      "elapsed_s": 0.87,
+      "train": {
+        "loss_total": 0.01935,
+        "loss_grip_position": 0.00027,
+        "loss_orientation": 0.016819,
+        "loss_visibility": 0.002261,
+        "grip_position_acc": 1.0,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.016819
+      },
+      "val": {
+        "loss_total": 0.775113,
+        "loss_grip_position": 0.30779,
+        "loss_orientation": 0.447807,
+        "loss_visibility": 0.019516,
+        "grip_position_acc": 0.928571,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.447807
+      },
+      "lr": 0.0003227783464210847,
+      "best_val_metric": 0.724794,
+      "improved": false
+    },
+    {
+      "epoch": 63,
+      "elapsed_s": 0.82,
+      "train": {
+        "loss_total": 0.018433,
+        "loss_grip_position": 0.000305,
+        "loss_orientation": 0.016034,
+        "loss_visibility": 0.002094,
+        "grip_position_acc": 1.0,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.016034
+      },
+      "val": {
+        "loss_total": 0.816722,
+        "loss_grip_position": 0.358074,
+        "loss_orientation": 0.443364,
+        "loss_visibility": 0.015285,
+        "grip_position_acc": 0.928571,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.443364
+      },
+      "lr": 0.0003084117941357837,
+      "best_val_metric": 0.724794,
+      "improved": false
+    },
+    {
+      "epoch": 64,
+      "elapsed_s": 0.82,
+      "train": {
+        "loss_total": 0.017668,
+        "loss_grip_position": 0.000369,
+        "loss_orientation": 0.01533,
+        "loss_visibility": 0.001969,
+        "grip_position_acc": 1.0,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.01533
+      },
+      "val": {
+        "loss_total": 0.849893,
+        "loss_grip_position": 0.393646,
+        "loss_orientation": 0.443601,
+        "loss_visibility": 0.012647,
+        "grip_position_acc": 0.928571,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.443601
+      },
+      "lr": 0.0002942392506752892,
+      "best_val_metric": 0.724794,
+      "improved": false
+    },
+    {
+      "epoch": 65,
+      "elapsed_s": 0.83,
+      "train": {
+        "loss_total": 0.016882,
+        "loss_grip_position": 0.000372,
+        "loss_orientation": 0.014619,
+        "loss_visibility": 0.001891,
+        "grip_position_acc": 1.0,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.014619
+      },
+      "val": {
+        "loss_total": 0.872309,
+        "loss_grip_position": 0.416654,
+        "loss_orientation": 0.444779,
+        "loss_visibility": 0.010876,
+        "grip_position_acc": 0.928571,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.444779
+      },
+      "lr": 0.0002802747026289245,
+      "best_val_metric": 0.724794,
+      "improved": false
+    },
+    {
+      "epoch": 66,
+      "elapsed_s": 0.82,
+      "train": {
+        "loss_total": 0.016376,
+        "loss_grip_position": 0.000336,
+        "loss_orientation": 0.014207,
+        "loss_visibility": 0.001834,
+        "grip_position_acc": 1.0,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.014207
+      },
+      "val": {
+        "loss_total": 0.886648,
+        "loss_grip_position": 0.4333,
+        "loss_orientation": 0.443897,
+        "loss_visibility": 0.009451,
+        "grip_position_acc": 0.892857,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.443897
+      },
+      "lr": 0.000266531931319651,
+      "best_val_metric": 0.724794,
+      "improved": false
+    },
+    {
+      "epoch": 67,
+      "elapsed_s": 0.83,
+      "train": {
+        "loss_total": 0.01585,
+        "loss_grip_position": 0.000305,
+        "loss_orientation": 0.013762,
+        "loss_visibility": 0.001783,
+        "grip_position_acc": 1.0,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.013762
+      },
+      "val": {
+        "loss_total": 0.889836,
+        "loss_grip_position": 0.438686,
+        "loss_orientation": 0.442813,
+        "loss_visibility": 0.008336,
+        "grip_position_acc": 0.928571,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.442813
+      },
+      "lr": 0.0002530244992035663,
+      "best_val_metric": 0.724794,
+      "improved": false
+    },
+    {
+      "epoch": 68,
+      "elapsed_s": 0.82,
+      "train": {
+        "loss_total": 0.015383,
+        "loss_grip_position": 0.000277,
+        "loss_orientation": 0.013367,
+        "loss_visibility": 0.00174,
+        "grip_position_acc": 1.0,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.013367
+      },
+      "val": {
+        "loss_total": 0.885662,
+        "loss_grip_position": 0.432203,
+        "loss_orientation": 0.445965,
+        "loss_visibility": 0.007494,
+        "grip_position_acc": 0.928571,
+        "visibility_acc": 1.0,
+        "orientation_mse": 0.445965
+      },
+      "lr": 0.00023976573648539667,
+      "best_val_metric": 0.724794,
+      "improved": false
+    }
+  ]
+}
