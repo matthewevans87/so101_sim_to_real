@@ -579,7 +579,9 @@ def cmd_play(args) -> None:
         if args.checkpoint:
             checkpoint = Path(args.checkpoint).resolve()
         else:
-            checkpoint = experiment_dir / "skrl" / "checkpoints" / "best_agent.pt"
+            checkpoint = (
+                experiment_dir / "skrl" / "agent" / "checkpoints" / "best_agent.pt"
+            )
             info(f"Derived checkpoint: {checkpoint}")
         ckpt_root = experiment_dir
     else:

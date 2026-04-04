@@ -82,7 +82,7 @@ def main(
     log_dir = os.path.dirname(os.path.dirname(os.path.abspath(args_cli.checkpoint)))
     print(f"[INFO] Export log dir: {log_dir}")
     agent_cfg["agent"]["experiment"]["directory"] = log_dir
-    agent_cfg["agent"]["experiment"]["experiment_name"] = ""
+    agent_cfg["agent"]["experiment"]["experiment_name"] = "agent"
 
     # create env
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode=None)

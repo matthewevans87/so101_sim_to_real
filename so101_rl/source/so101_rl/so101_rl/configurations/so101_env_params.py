@@ -324,12 +324,33 @@ class ApproachPhaseRewardCfg:
     enabled: bool
     scale: float
     distance_pressure: float
+    gripper_pos_distance_pressure: float
+    gripper_pos_target: float
 
 
 @dataclass
 class AvoidBumpingCubeRewardCfg:
     enabled: bool
     scale: float
+    cube_widths: float  # multiplier on CUBE_WIDTH to define "near cube" region
+
+
+@dataclass
+class CubeOutOfRangeTerminalRewardCfg:
+    enabled: bool
+    scale: float
+    distance_threshold: (
+        float  # metres; cube further than this from robot base triggers termination
+    )
+
+
+@dataclass
+class GraspPositionTerminalRewardCfg:
+    enabled: bool
+    scale: float
+    distance_threshold: (
+        float  # metres; grip-zone–to–cube distance below which terminal fires
+    )
 
 
 @dataclass
@@ -355,6 +376,8 @@ class RewardsCfg:
     keep_camera_upright: RewardCfg
     approach_phase: ApproachPhaseRewardCfg
     avoid_bumping_cube: AvoidBumpingCubeRewardCfg
+    cube_out_of_range_terminal: CubeOutOfRangeTerminalRewardCfg
+    grasp_position_terminal: GraspPositionTerminalRewardCfg
 
 
 # ---------------------------------------------------------------------------

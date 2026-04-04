@@ -84,11 +84,24 @@ rewards:
     enabled: true
     distance_pressure: 20.0
     scale: 5.0
+    gripper_pos_distance_pressure: 20.0
+    gripper_pos_target: 1.7453292519943295
   
 # Punish touching the cube without being in the grip zone.
   avoid_bumping_cube:
     enabled: true
-    scale: -0.1
+    scale: -0.025
+    cube_widths: 0.25
+# terminal when cube is pushed out of reach of the robot base (no reward penalty)
+  cube_out_of_range_terminal:
+    enabled: true
+    scale: 0.0
+    distance_threshold: 0.40
+# terminal reward for near-perfect grasping position (cube centroid within d of grip zone)
+  grasp_position_terminal:
+    enabled: true
+    scale: 500.0
+    distance_threshold: 0.005
 
 # distance from gripper to cube (meters)
   distance:

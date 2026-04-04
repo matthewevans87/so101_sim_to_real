@@ -28,8 +28,6 @@ from so101.utils.image_processing import (
     ResizePipelineStep,
     Uint8ToFloatCHWPipelineStep,
 )
-from torch import zeros_like
-
 from so101_rl.helpers.visual_markers import (
     define_grip_zone_markers,
     define_gripper_arrow_markers,
@@ -176,11 +174,6 @@ class So101LiftCube(DirectRLEnv):
             self.reward_pipeline,
             extra_keys=frozenset(
                 {
-                    # consumed by _get_dones
-                    "is_success_lift_fraction_terminal",
-                    "is_success_point_at_cube_terminal",
-                    "is_success_touch_terminal",
-                    "is_table_touched",
                     # consumed by _get_observations (critic features)
                     *self.cfg.observations.critic_obs_metrics,
                 }
@@ -522,24 +515,7 @@ class So101LiftCube(DirectRLEnv):
         # Episode timeout
         time_out = self.episode_length_buf >= self.max_episode_length - 1
 
-        terminal = zeros_like(self.episode_length_buf, dtype=torch.bool)
-        if self.cfg.rewards.success_lift_fraction_terminal.enabled:
-            terminal = torch.logical_or(
-                terminal, self.step_metrics["is_success_lift_fraction_terminal"]
-            )
-
-        if self.cfg.rewards.success_point_at_cube_terminal.enabled:
-            terminal = torch.logical_or(
-                terminal, self.step_metrics["is_success_point_at_cube_terminal"]
-            )
-
-        if self.cfg.rewards.success_touch_terminal.enabled:
-            is_success_touch_terminal = self.step_metrics["is_success_touch_terminal"]
-            terminal = torch.logical_or(terminal, is_success_touch_terminal)
-
-        if self.cfg.rewards.safety_touch_table_terminal.enabled:
-            is_table_touched_terminal = self.step_metrics["is_table_touched"]
-            terminal = torch.logical_or(terminal, is_table_touched_terminal)
+        terminal = self.reward_pipeline.get_dones(self._step_ctx)
 
         return terminal, time_out
 

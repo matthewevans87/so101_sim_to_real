@@ -162,6 +162,16 @@ rewards:
   avoid_bumping_cube:
     enabled: false
     scale: -1.0
+# terminal when cube is pushed out of reach of the robot base (no reward penalty)
+  cube_out_of_range_terminal:
+    enabled: true
+    scale: 0.0
+    distance_threshold: 0.40
+# terminal reward for near-perfect grasping position (cube centroid within d of grip zone)
+  grasp_position_terminal:
+    enabled: false
+    scale: 500.0
+    distance_threshold: 0.0025
 
 domain_randomization:
   camera:

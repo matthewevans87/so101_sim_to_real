@@ -185,7 +185,9 @@ def _ensure_positive(name: str, value: int) -> None:
 
 
 def _find_checkpoint_and_task(experiment_path: Path) -> tuple[Path, str]:
-    checkpoint_path = experiment_path / "skrl" / "checkpoints" / "best_agent.pt"
+    checkpoint_path = (
+        experiment_path / "skrl" / "agent" / "checkpoints" / "best_agent.pt"
+    )
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Checkpoint not found at {checkpoint_path}")
     return checkpoint_path, ""

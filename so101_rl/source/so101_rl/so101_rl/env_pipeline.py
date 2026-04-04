@@ -217,6 +217,21 @@ class RewardStep(ABC):
         ...
 
 
+class TerminalRewardStep(RewardStep):
+    """A :class:`RewardStep` that also signals episode termination.
+
+    Subclasses must implement both :meth:`compute` (inherited) and
+    :meth:`done`.  :class:`RewardPipeline` uses :meth:`done` to build
+    the terminal mask returned by :meth:`RewardPipeline.get_dones`.
+    """
+
+    @abstractmethod
+    def done(self, ctx: StepContext) -> torch.Tensor:
+        """Return a bool tensor of shape ``(num_envs,)`` — True for environments
+        that should terminate this step."""
+        ...
+
+
 class RewardPipeline:
     """Sums contributions from a sequence of :class:`RewardStep` objects.
 
@@ -232,6 +247,23 @@ class RewardPipeline:
     def required_metric_keys(self) -> frozenset[str]:
         """Union of all ``requires_metrics`` declared by the steps in this pipeline."""
         return frozenset().union(*(s.requires_metrics for s in self.steps))
+
+    @property
+    def terminal_steps(self) -> list[TerminalRewardStep]:
+        """All :class:`TerminalRewardStep` instances in this pipeline."""
+        return [s for s in self.steps if isinstance(s, TerminalRewardStep)]
+
+    def get_dones(self, ctx: StepContext) -> torch.Tensor:
+        """Return a bool tensor of shape ``(num_envs,)`` — True for any environment
+        where at least one :class:`TerminalRewardStep` signals termination.
+
+        Assumes metrics have already been computed for the current step.
+        """
+        env = ctx.env
+        terminal = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
+        for step in self.terminal_steps:
+            terminal = terminal | step.done(ctx)
+        return terminal
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
         env = ctx.env
@@ -497,6 +529,48 @@ class IsCubeGrippedMetricStep(MetricStep):
         ).bool()
         assert_tensor(val, (env.num_envs,), torch.bool)
         ctx.metrics["is_cube_gripped"] = val
+
+
+class CubeDistanceFromBaseMetricStep(MetricStep):
+    produces = frozenset({"cube_distance_from_base"})
+    depends_on = frozenset()
+    obs_dim = 1
+
+    def compute(self, ctx: StepContext) -> None:
+        env = ctx.env
+        cube_pos_w = env.cube.data.root_pos_w
+        base_pos_w = env.robot.data.root_pos_w
+        val = torch.linalg.norm(cube_pos_w - base_pos_w, dim=-1)
+        assert_tensor(val, (env.num_envs,), torch.float32)
+        ctx.metrics["cube_distance_from_base"] = val
+
+
+class IsCubeOutOfRangeMetricStep(MetricStep):
+    produces = frozenset({"is_cube_out_of_range"})
+    depends_on = frozenset({"cube_distance_from_base"})
+
+    def compute(self, ctx: StepContext) -> None:
+        env = ctx.env
+        val = (
+            ctx.metrics["cube_distance_from_base"]
+            > env.cfg.rewards.cube_out_of_range_terminal.distance_threshold
+        ).bool()
+        assert_tensor(val, (env.num_envs,), torch.bool)
+        ctx.metrics["is_cube_out_of_range"] = val
+
+
+class IsGraspPositionTerminalMetricStep(MetricStep):
+    produces = frozenset({"is_grasp_position_terminal"})
+    depends_on = frozenset({"grip_zone_cube_distance"})
+
+    def compute(self, ctx: StepContext) -> None:
+        env = ctx.env
+        val = (
+            ctx.metrics["grip_zone_cube_distance"]
+            < env.cfg.rewards.grasp_position_terminal.distance_threshold
+        ).bool()
+        assert_tensor(val, (env.num_envs,), torch.bool)
+        ctx.metrics["is_grasp_position_terminal"] = val
 
 
 # ---------------------------------------------------------------------------
@@ -794,7 +868,7 @@ class EEHeightSafetyRewardStep(RewardStep):
 # ---------------------------------------------------------------------------
 
 
-class SuccessTouchTerminalRewardStep(RewardStep):
+class SuccessTouchTerminalRewardStep(TerminalRewardStep):
     name = "rew_success_touch_terminal"
     requires_metrics = frozenset({"is_success_touch_terminal"})
 
@@ -807,8 +881,11 @@ class SuccessTouchTerminalRewardStep(RewardStep):
             torch.zeros(env.num_envs, device=env.device),
         )
 
+    def done(self, ctx: StepContext) -> torch.Tensor:
+        return ctx.metrics["is_success_touch_terminal"]
 
-class SuccessLiftFractionTerminalRewardStep(RewardStep):
+
+class SuccessLiftFractionTerminalRewardStep(TerminalRewardStep):
     name = "rew_success_lift_fraction_terminal"
     requires_metrics = frozenset({"is_success_lift_fraction_terminal"})
 
@@ -823,8 +900,11 @@ class SuccessLiftFractionTerminalRewardStep(RewardStep):
             torch.zeros(env.num_envs, device=env.device),
         )
 
+    def done(self, ctx: StepContext) -> torch.Tensor:
+        return ctx.metrics["is_success_lift_fraction_terminal"]
 
-class SuccessPointAtCubeTerminalRewardStep(RewardStep):
+
+class SuccessPointAtCubeTerminalRewardStep(TerminalRewardStep):
     name = "rew_success_point_at_cube_terminal"
     requires_metrics = frozenset({"is_success_point_at_cube_terminal"})
 
@@ -839,8 +919,11 @@ class SuccessPointAtCubeTerminalRewardStep(RewardStep):
             torch.zeros(env.num_envs, device=env.device),
         )
 
+    def done(self, ctx: StepContext) -> torch.Tensor:
+        return ctx.metrics["is_success_point_at_cube_terminal"]
 
-class SafetyTouchTableTerminalRewardStep(RewardStep):
+
+class SafetyTouchTableTerminalRewardStep(TerminalRewardStep):
     name = "rew_safety_touch_table_terminal"
     requires_metrics = frozenset({"is_table_touched"})
 
@@ -855,6 +938,9 @@ class SafetyTouchTableTerminalRewardStep(RewardStep):
             ),
             torch.tensor(0.0, device=env.device, dtype=torch.float32),
         )
+
+    def done(self, ctx: StepContext) -> torch.Tensor:
+        return ctx.metrics["is_table_touched"]
 
 
 class SafetyTouchTableRewardStep(RewardStep):
@@ -874,6 +960,34 @@ class SafetyTouchTableRewardStep(RewardStep):
         )
 
 
+class CubeOutOfRangeTerminalRewardStep(TerminalRewardStep):
+    name = "rew_cube_out_of_range_terminal"
+    requires_metrics = frozenset({"is_cube_out_of_range"})
+
+    def compute(self, ctx: StepContext) -> torch.Tensor:
+        env = ctx.env
+        return (
+            ctx.metrics["is_cube_out_of_range"].float()
+            * env.cfg.rewards.cube_out_of_range_terminal.scale
+        )
+
+    def done(self, ctx: StepContext) -> torch.Tensor:
+        return ctx.metrics["is_cube_out_of_range"]
+
+
+class GraspPositionTerminalRewardStep(TerminalRewardStep):
+    name = "rew_grasp_position_terminal"
+    requires_metrics = frozenset({"is_grasp_position_terminal"})
+
+    def compute(self, ctx: StepContext) -> torch.Tensor:
+        env = ctx.env
+        flag = ctx.metrics["is_grasp_position_terminal"]
+        return flag.float() * env.cfg.rewards.grasp_position_terminal.scale
+
+    def done(self, ctx: StepContext) -> torch.Tensor:
+        return ctx.metrics["is_grasp_position_terminal"]
+
+
 # ---------------------------------------------------------------------------
 # (Novel) Reward: Approach Phase
 # ---------------------------------------------------------------------------
@@ -881,7 +995,7 @@ class SafetyTouchTableRewardStep(RewardStep):
 
 class ApproachPhaseRewardStep(RewardStep):
     name = "rew_approach_phase"
-    requires_metrics = frozenset({"grip_zone_cube_distance"})
+    requires_metrics = frozenset({"grip_zone_cube_distance", "gripper_cube_alignment"})
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
         env = ctx.env
@@ -893,7 +1007,8 @@ class ApproachPhaseRewardStep(RewardStep):
 
         gripper_pos = env.joint_pos[:, env._ee_body_idx]
         gripper_close_error = torch.exp(
-            -torch.abs(gripper_pos - env.cfg.rewards.close_gripper.max_open)
+            -env.cfg.rewards.approach_phase.gripper_pos_distance_pressure
+            * torch.abs(gripper_pos - env.cfg.rewards.approach_phase.gripper_pos_target)
         ).squeeze(-1)
 
         alignment = ctx.metrics["gripper_cube_alignment"]
@@ -915,7 +1030,9 @@ class AvoidBumpingCubeRewardStep(RewardStep):
     def compute(self, ctx: StepContext) -> torch.Tensor:
         env = ctx.env
         force_mag = ctx.metrics["gripper_cube_contact_force_magnitude"]
-        cube_near_gz = ctx.metrics["grip_zone_cube_distance"] < (CUBE_WIDTH / 2)
+        cube_near_gz = ctx.metrics["grip_zone_cube_distance"] < (
+            env.cfg.rewards.avoid_bumping_cube.cube_widths * CUBE_WIDTH
+        )
         return torch.where(
             (force_mag > 0.0) & ~cube_near_gz,
             torch.tensor(
@@ -948,6 +1065,9 @@ ALL_METRIC_STEPS: list[type[MetricStep]] = [
     IsSuccessPointAtCubeTerminalMetricStep,
     IsCubeInGripPositionMetricStep,
     IsCubeGrippedMetricStep,
+    CubeDistanceFromBaseMetricStep,
+    IsCubeOutOfRangeMetricStep,
+    IsGraspPositionTerminalMetricStep,
 ]
 
 # Maps each observable metric key to the number of columns it contributes
@@ -1080,6 +1200,10 @@ def build_reward_pipeline(cfg) -> RewardPipeline:
         steps.append(SafetyTouchTableTerminalRewardStep())
     if r.safety_touch_table.enabled:
         steps.append(SafetyTouchTableRewardStep())
+    if r.cube_out_of_range_terminal.enabled:
+        steps.append(CubeOutOfRangeTerminalRewardStep())
+    if r.grasp_position_terminal.enabled:
+        steps.append(GraspPositionTerminalRewardStep())
 
     # Phase-specific
     if r.approach_phase.enabled:

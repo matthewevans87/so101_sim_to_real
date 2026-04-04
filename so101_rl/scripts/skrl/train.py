@@ -324,9 +324,9 @@ def main(
     # specify directory for logging experiments
     log_root_path = os.path.abspath(os.path.join(args_cli.artifacts_dir, "skrl"))
     print(f"[INFO] Logging experiment in directory: {log_root_path}")
-    # Write directly into log_root_path — no experiment_name subdir
+    # Fix experiment_name to "agent" so skrl always creates skrl/agent/ (no timestamp suffix)
     agent_cfg["agent"]["experiment"]["directory"] = log_root_path
-    agent_cfg["agent"]["experiment"]["experiment_name"] = ""
+    agent_cfg["agent"]["experiment"]["experiment_name"] = "agent"
     agent_cfg["agent"]["experiment"]["write_interval"] = 100
 
     log_dir = log_root_path
