@@ -5,6 +5,7 @@
 
 import os
 
+from so101_rl.configurations.debug import VIS_MARKER_CFG
 from so101_rl.configurations.so101 import (
     SO101_CFG,
     GRIPPER_CONTACT_SENSOR_CFG,
@@ -94,7 +95,7 @@ class So101LiftCubeCfg(DirectRLEnvCfg):
     cube_cfg: RigidObjectCfg = DEX_CUBE_CFG.replace(prim_path="/World/envs/env_.*/Object")  # type: ignore
 
     camera_cfg: TiledCameraCfg = TILED_CAMERA_CFG.replace(  # type: ignore
-        prim_path="/World/envs/env_.*/Robot/gripper/gripper_camera",
+        prim_path="/World/envs/env_.*/Robot/gripper/mountscrew/camera_mount/CameraXframe/gripper_camera",
         height=_Y.sensors.camera.height,
         width=_Y.sensors.camera.width,
     )
@@ -117,6 +118,7 @@ class So101LiftCubeCfg(DirectRLEnvCfg):
     table_contact_sensor_cfg = TABLE_CONTACT_SENSOR_CFG.replace(  # type: ignore
         prim_path="/World/envs/env_.*/Table",
         filter_prim_paths_expr=[
+            "/World/envs/env_.*/Robot/shoulder",
             "/World/envs/env_.*/Robot/upper_arm",
             "/World/envs/env_.*/Robot/lower_arm",
             "/World/envs/env_.*/Robot/wrist",
@@ -132,9 +134,10 @@ class So101LiftCubeCfg(DirectRLEnvCfg):
         target_frames=[
             FrameTransformerCfg.FrameCfg(
                 prim_path="/World/envs/env_.*/Object", name="cube"
-            )
+            ),
         ],
         debug_vis=_Y.sensors.gripper_transform.debug_vis,
+        visualizer_cfg=VIS_MARKER_CFG,
     )
 
     # ── Distractor rigid object configs ─────────────────────────────────────

@@ -71,6 +71,7 @@ from isaaclab.sensors import Camera, TiledCamera, ContactSensor, FrameTransforme
 import isaaclab.utils.math as math_utils
 import isaaclab.sim as sim_utils
 
+
 # Sequence of hook calls
 # pre_physics_step
 #   |-- _pre_physics_step(action)
@@ -319,6 +320,7 @@ class So101LiftCube(DirectRLEnv):
         self.table = RigidObject(self.cfg.table_cfg)
         self.robot = Articulation(self.cfg.robot_cfg)
         self.cube = RigidObject(self.cfg.cube_cfg)
+
         self.camera = TiledCamera(self.cfg.camera_cfg)
         self.overhead_camera = (
             Camera(self.cfg.overhead_camera_cfg)

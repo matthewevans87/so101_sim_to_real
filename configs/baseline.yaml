@@ -27,7 +27,6 @@ gripper:
   ee_link_name: "gripper"
   grip_zone_rot: [1.0, 0.0, 0.0, 0.0]
   tip_offset: [0.015, 0.0, -0.1]
-  grip_zone_offset: [0.01, 0.0, -0.09]
   open_target: 0.8
   closed_target: 0.15
 
@@ -158,6 +157,9 @@ rewards:
     far_distance_threshold: 0.20
     scale: 1.0
   keep_camera_upright:
+    enabled: false
+    scale: -1.0
+  avoid_bumping_cube:
     enabled: false
     scale: -1.0
 

@@ -6,7 +6,7 @@ from isaaclab.markers.config import (
 from isaaclab.sensors import CameraCfg, TiledCameraCfg
 import isaaclab.sim as sim_utils
 
-FRAME_CFG = VisualizationMarkersCfg(
+VIS_MARKER_CFG = VisualizationMarkersCfg(
     prim_path="/Visuals/GripZoneTransformer",
     markers={
         "frame": sim_utils.UsdFileCfg(

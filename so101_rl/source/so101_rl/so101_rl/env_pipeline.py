@@ -9,7 +9,6 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import omni.usd  # type: ignore
-from so101_rl.configurations.so101 import X_DIST_TO_GRIPPER_TOOTH
 import torch
 from pxr import Gf, UsdGeom, UsdLux, UsdShade  # type: ignore
 
@@ -25,7 +24,11 @@ from so101_rl.configurations.camera import (
     CAMERA_ROTATION_QUAT_WXYZ,
     CAMERA_TRANSLATE_VEC,
 )
-from so101_rl.configurations.cube import CUBE_DEFAULT_DIMS, CUBE_RESTING_HEIGHT
+from so101_rl.configurations.cube import (
+    CUBE_DEFAULT_DIMS,
+    CUBE_RESTING_HEIGHT,
+    CUBE_WIDTH,
+)
 from so101_rl.helpers.utils import assert_tensor
 
 if TYPE_CHECKING:
@@ -563,7 +566,7 @@ class GripperLookAtCubeRewardStep(RewardStep):
         env = ctx.env
         eps = 1e-6
 
-        gripper_pos = env.gripper_tf.data.source_pos_w
+        gripper_pos = env.robot.data.body_pos_w[:, env._ee_body_idx[0], :]
         gripper_quat = env.robot.data.body_quat_w[:, env._ee_body_idx[0], :]
 
         camera_offset = (
@@ -894,6 +897,27 @@ class ApproachPhaseRewardStep(RewardStep):
         )
 
 
+class AvoidBumpingCubeRewardStep(RewardStep):
+    name = "rew_avoid_bumping_cube"
+    requires_metrics = frozenset(
+        {"gripper_cube_contact_force_magnitude", "grip_zone_cube_distance"}
+    )
+
+    def compute(self, ctx: StepContext) -> torch.Tensor:
+        env = ctx.env
+        force_mag = ctx.metrics["gripper_cube_contact_force_magnitude"]
+        cube_near_gz = ctx.metrics["grip_zone_cube_distance"] < (CUBE_WIDTH / 2)
+        return torch.where(
+            (force_mag > 0.0) & ~cube_near_gz,
+            torch.tensor(
+                env.cfg.rewards.avoid_bumping_cube.scale,
+                device=env.device,
+                dtype=torch.float32,
+            ),
+            torch.tensor(0.0, device=env.device, dtype=torch.float32),
+        )
+
+
 # ---------------------------------------------------------------------------
 # Complete catalog of all available metric step classes (order irrelevant).
 # MetricPipeline will topologically sort any subset passed to it.
@@ -1051,6 +1075,8 @@ def build_reward_pipeline(cfg) -> RewardPipeline:
     # Phase-specific
     if r.approach_phase.enabled:
         steps.append(ApproachPhaseRewardStep())
+    if r.avoid_bumping_cube.enabled:
+        steps.append(AvoidBumpingCubeRewardStep())
 
     return RewardPipeline(steps)
 
@@ -1356,7 +1382,7 @@ class CameraPoseDRStep(DRStep):
                 (3,),
                 device="cpu",
             )
-            camera_prim_path = f"/World/envs/env_{env_id}/Robot/gripper/gripper_camera"
+            camera_prim_path = f"/World/envs/env_{env_id}/Robot/gripper/mountscrew/camera_mount/CameraXframe"
             try:
                 camera_prim = stage.GetPrimAtPath(camera_prim_path)
                 if not camera_prim.IsValid():
@@ -1749,58 +1775,87 @@ class CubeDimsEnvMetricStep(EnvMetricStep):
         ).expand(-1, 3)
 
 
+# Fixed clearance (metres) added above the tooth surface when placing the cube centroid.
+_GZ_CLEARANCE: float = 0.001
+
+
 class GripZoneOffsetEnvMetricStep(EnvMetricStep):
-    """Computes the grip-zone offset vector for each env, scaled by the
-    per-episode DR cube scale sampled by :class:`CubeDimsEnvMetricStep`.
+    """Computes the grip-zone offset in gripper EE frame using the ``gripperframe``
+    XForm prim (located at the exact center of the tooth surface).
+
+    ``gripperframe``'s local transform relative to the ``gripper`` link is read
+    from the USD stage once on the first reset call and cached on the class.
+    This avoids any hardcoded offsets.
+
+    The grip zone is: gripperframe_origin_in_ee + tooth_normal_in_ee * offset_mag
+    where offset_mag = DR_cube_half_height + _GZ_CLEARANCE.
 
     Produces ``env.env_metrics["grip_zone_offset"]`` of shape ``(num_envs, 3)``.
-    This is an :class:`EnvMetricStep` (not a :class:`MetricStep`) because the
-    grip-zone offset only changes at episode reset (when the cube scale is
-    re-sampled), not on every physics step.
-
-    Reads ``env.env_metrics["dr_cube_scale"]`` (shape ``(num_envs, 3)``) and
-    multiplies the static ``env._grip_zone_offset`` element-wise.  When size DR
-    is disabled the scale is all-ones and the result equals the static config
-    value.
     """
 
     produces = frozenset({"grip_zone_offset"})
     depends_on = frozenset({"dr_cube_scale"})
 
+    # Class-level cache — computed once from USD, shared across all instances.
+    _gripperframe_pos_in_ee: torch.Tensor | None = None
+    _tooth_normal_in_ee: torch.Tensor | None = None
+
+    def _cache_gripperframe_transform(self, env) -> None:
+        """Read gripperframe's local USD transform and cache in gripper-EE coordinates."""
+        stage = omni.usd.get_context().get_stage()
+        meters_per_unit = float(UsdGeom.GetStageMetersPerUnit(stage))
+        prim = stage.GetPrimAtPath("/World/envs/env_0/Robot/gripper/gripperframe")
+        local_xform = UsdGeom.Xformable(prim).GetLocalTransformation()
+        t = local_xform.ExtractTranslation()
+        q = local_xform.ExtractRotationQuat()
+        qi = q.GetImaginary()
+        pos = torch.tensor(
+            [t[0] * meters_per_unit, t[1] * meters_per_unit, t[2] * meters_per_unit],
+            device=env.device,
+            dtype=torch.float32,
+        )
+        # Isaac Lab uses wxyz quaternion convention; USD Quatd stores (imaginary, real).
+        quat = torch.tensor(
+            [float(q.GetReal()), float(qi[0]), float(qi[1]), float(qi[2])],
+            device=env.device,
+            dtype=torch.float32,
+        )
+        quat = quat / quat.norm()
+        tooth_normal = quat_apply(
+            quat.unsqueeze(0),
+            torch.tensor([[0.0, 0.0, 1.0]], device=env.device, dtype=torch.float32),
+        ).squeeze(0)
+
+        GripZoneOffsetEnvMetricStep._gripperframe_pos_in_ee = pos
+        GripZoneOffsetEnvMetricStep._tooth_normal_in_ee = tooth_normal
+
     def apply(self, ctx: DRContext) -> None:
         env = ctx.env
         env_ids_t = torch.as_tensor(list(ctx.env_ids), device=env.device)
 
-        _grip_zone_offset = torch.tensor(
-            ctx.env.cfg.gripper.grip_zone_offset,
-            device=ctx.env.device,
-            dtype=torch.float32,
-        ).view(1, 3)
+        if GripZoneOffsetEnvMetricStep._gripperframe_pos_in_ee is None:
+            self._cache_gripperframe_transform(env)
 
         # Initialise full tensor on first call.
         if "grip_zone_offset" not in env.env_metrics:
-            env.env_metrics["grip_zone_offset"] = _grip_zone_offset.expand(
-                env.num_envs, -1
-            ).clone()
+            env.env_metrics["grip_zone_offset"] = torch.zeros(
+                env.num_envs, 3, device=env.device, dtype=torch.float32
+            )
 
-        cube_scale = env.env_metrics["dr_cube_scale"][env_ids_t]  # (len, 3)
+        # Per-episode DR height scale (isotropic DR, all dims equal; use Z axis).
+        height_scale = env.env_metrics["dr_cube_scale"][env_ids_t, 2]  # (len,)
+        offset_mag = (
+            height_scale * (CUBE_DEFAULT_DIMS[2] / 2.0) + _GZ_CLEARANCE
+        )  # (len,)
 
-        # Body diagonal of the scaled cube, shape (len,).
-        cube_dims = torch.tensor(
-            CUBE_DEFAULT_DIMS, device=env.device, dtype=torch.float32
-        )
-        d = torch.norm(cube_dims * cube_scale, dim=-1)  # (len,)
-
-        val = _grip_zone_offset.expand(len(env_ids_t), -1).clone()  # (len, 3)
-        val[:, 0] = val[:, 0] - X_DIST_TO_GRIPPER_TOOTH + d
+        val = GripZoneOffsetEnvMetricStep._gripperframe_pos_in_ee.unsqueeze(0).expand(
+            len(env_ids_t), -1
+        ) + GripZoneOffsetEnvMetricStep._tooth_normal_in_ee.unsqueeze(
+            0
+        ) * offset_mag.unsqueeze(
+            -1
+        )  # (len, 3)
         env.env_metrics["grip_zone_offset"][env_ids_t] = val
-
-        print(f"[GripZoneOffsetEnvMetricStep] cube_dims (base): {cube_dims.tolist()}")
-        print(
-            f"[GripZoneOffsetEnvMetricStep] cube_scale[0]:    {cube_scale[0].tolist()}"
-        )
-        print(f"[GripZoneOffsetEnvMetricStep] d[0]:             {d[0].item():.6f}")
-        print(f"[GripZoneOffsetEnvMetricStep] grip_zone_offset[0]: {val[0].tolist()}")
 
 
 ALL_ENV_METRIC_STEPS: list[type[EnvMetricStep]] = [

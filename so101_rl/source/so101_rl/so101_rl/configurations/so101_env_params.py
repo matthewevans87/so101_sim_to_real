@@ -149,7 +149,6 @@ class GripperCfg:
     ee_link_name: str
     grip_zone_rot: tuple[float, float, float, float]
     tip_offset: tuple[float, float, float]
-    grip_zone_offset: tuple[float, float, float]
     open_target: float
     closed_target: float
 
@@ -322,6 +321,12 @@ class ApproachPhaseRewardCfg:
 
 
 @dataclass
+class AvoidBumpingCubeRewardCfg:
+    enabled: bool
+    scale: float
+
+
+@dataclass
 class RewardsCfg:
     distance: RewardCfg
     grip_cube: GripCubeRewardCfg
@@ -343,6 +348,7 @@ class RewardsCfg:
     vantage: VantageRewardCfg
     keep_camera_upright: RewardCfg
     approach_phase: ApproachPhaseRewardCfg
+    avoid_bumping_cube: AvoidBumpingCubeRewardCfg
 
 
 # ---------------------------------------------------------------------------

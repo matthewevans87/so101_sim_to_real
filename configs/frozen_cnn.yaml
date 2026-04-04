@@ -27,7 +27,6 @@ gripper:
   ee_link_name: "gripper"
   grip_zone_rot: [1.0, 0.0, 0.0, 0.0]
   tip_offset: [0.015, 0.0, -0.1]
-  grip_zone_offset: [0.0, 0.0, -0.10]
   open_target: 0.8
   closed_target: 0.15
 
@@ -56,7 +55,7 @@ debug:
     post_processing:
       save: false
       interval: 10
-  enable_gripper_arrow_markers: true
+  enable_gripper_arrow_markers: false
   enable_camera_frame_markers: false
   enable_grip_zone_markers: true
   vision_debug:
@@ -84,8 +83,11 @@ rewards:
   approach_phase:
     enabled: true
     scale: 5.0
-
-# baseline reward components
+  
+# Punish touching the cube without being in the grip zone.
+  avoid_bumping_cube:
+    enabled: true
+    scale: -0.1
 
 # distance from gripper to cube (meters)
   distance:

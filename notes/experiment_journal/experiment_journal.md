@@ -302,3 +302,20 @@ Domain Randomization (DR) is applied to the cube. As such, the ideal gripping po
 To achieve this, we introduce the concept of `EnvMetricPipeline` and `EnvMetricStep`. `EnvMetricStep`s are compute when a given environment resets in `_reset_idx`.
 
 With these changes in place, we are now positioned to make further refinements to the phased rewards. 
+
+*Update*
+
+With the new EnvMetricPipeline, improved grip zone calculation, and **addition of a *avoid_bumping_cube*** penalty, the policy is learning to straddle the gripper around the cube within `< 50k` steps. 
+
+*Considerations*
+- Need to review the camera config settings and ensure we have proper simulated lens
+- The policy tends to move around a lot unnecessarily even after it has placed the cube in the grip zone. How can we reduce this extra motion--ideally to zero? Low pass filter?
+- We need to add a simulated camera mount rigid body so that the policy doesn't clip the camera through the floor
+- The policy tends to touch the tip of the gripper to the cube rather than fully straddling it. I am going to move the grip zone back 1cm and see if this helps. 
+
+
+## April 4, 2026
+The Robot Studio provides the stl file for the camera mount we are using: `assets/robots/SO-ARM101_camera_wrist_mount.stl`. We used Isaac Sim to generate a `.usd` file from this. We then add the camera mount usd to the robot's `assets/robots/so101_new_calib/so101_new_calib.usd`. We add an XForm to position the camera on the mount: `/so101_new_calib/gripper/mountscrew/camera_mount/CameraXframe`
+
+
+Additionally we discovered that there already exists an Xform for the gripper's tooth: `/so101_new_calib/gripper/gripperframe`
