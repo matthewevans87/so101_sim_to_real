@@ -510,7 +510,12 @@ class DistanceRewardStep(RewardStep):
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
         env = ctx.env
-        grip_zone_dist = 1 - (1.0 / torch.exp(ctx.metrics["grip_zone_cube_distance"]))
+        grip_zone_dist = 1 - (
+            torch.exp(
+                -env.cfg.rewards.distance.distance_pressure
+                * ctx.metrics["grip_zone_cube_distance"]
+            )
+        )
         return grip_zone_dist * env.cfg.rewards.distance.scale
 
 
@@ -880,11 +885,15 @@ class ApproachPhaseRewardStep(RewardStep):
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
         env = ctx.env
-        grip_zone_dist = 1.0 / torch.exp(ctx.metrics["grip_zone_cube_distance"])
+
+        grip_zone_dist = torch.exp(
+            -env.cfg.rewards.approach_phase.distance_pressure
+            * ctx.metrics["grip_zone_cube_distance"]
+        )
 
         gripper_pos = env.joint_pos[:, env._ee_body_idx]
-        gripper_close_error = 1.0 / torch.exp(
-            torch.abs(gripper_pos - env.cfg.rewards.close_gripper.max_open)
+        gripper_close_error = torch.exp(
+            -torch.abs(gripper_pos - env.cfg.rewards.close_gripper.max_open)
         ).squeeze(-1)
 
         alignment = ctx.metrics["gripper_cube_alignment"]

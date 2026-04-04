@@ -319,3 +319,7 @@ The Robot Studio provides the stl file for the camera mount we are using: `asset
 
 
 Additionally we discovered that there already exists an Xform for the gripper's tooth: `/so101_new_calib/gripper/gripperframe`
+
+*Distance Pressure*
+We are working in cm but the world units are meters. This means that distances on the final approach of the gripper to the target position are `<1.0`. By adding a coefficient to the distance value, we can add pressure to push the policy into the final position. Using this technique, we see the policy find the cube within a mere 3000 training steps.
+

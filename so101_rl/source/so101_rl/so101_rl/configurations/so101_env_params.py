@@ -260,6 +260,11 @@ class RewardCfg:
 
 
 @dataclass
+class DistanceRewardCfg(RewardCfg):
+    distance_pressure: float
+
+
+@dataclass
 class GripCubeRewardCfg:
     enabled: bool
     scale: float
@@ -318,6 +323,7 @@ class VantageRewardCfg:
 class ApproachPhaseRewardCfg:
     enabled: bool
     scale: float
+    distance_pressure: float
 
 
 @dataclass
@@ -328,7 +334,7 @@ class AvoidBumpingCubeRewardCfg:
 
 @dataclass
 class RewardsCfg:
-    distance: RewardCfg
+    distance: DistanceRewardCfg
     grip_cube: GripCubeRewardCfg
     lift_cube: RewardCfg
     gripper_cube_alignment: RewardCfg
