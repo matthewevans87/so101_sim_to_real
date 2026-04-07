@@ -559,18 +559,87 @@ class IsCubeOutOfRangeMetricStep(MetricStep):
         ctx.metrics["is_cube_out_of_range"] = val
 
 
-class IsGraspPositionTerminalMetricStep(MetricStep):
-    produces = frozenset({"is_grasp_position_terminal"})
-    depends_on = frozenset({"grip_zone_cube_distance"})
+class ApproachPhaseMetricStep(MetricStep):
+    produces = frozenset({"approach_phase"})
+    depends_on = frozenset({"grip_zone_cube_distance", "gripper_cube_alignment"})
 
     def compute(self, ctx: StepContext) -> None:
         env = ctx.env
-        val = (
-            ctx.metrics["grip_zone_cube_distance"]
-            < env.cfg.rewards.grasp_position_terminal.distance_threshold
-        ).bool()
-        assert_tensor(val, (env.num_envs,), torch.bool)
-        ctx.metrics["is_grasp_position_terminal"] = val
+
+        distance_z = torch.exp(
+            env.cfg.rewards.approach_phase.distance_pressure
+            * -ctx.metrics["grip_zone_cube_distance"]
+        ) ** (env.cfg.rewards.approach_phase.distance_weight)
+
+        gripper_pos = env.joint_pos[:, env._gripper_joint_idx]
+        print("gripper_pos_target", env.cfg.rewards.approach_phase.gripper_pos_target)
+        print("gripper_pos", gripper_pos[0, 0])
+        gripper_pos_delta = torch.abs(
+            gripper_pos - env.cfg.rewards.approach_phase.gripper_pos_target
+        )
+        print("gripper_delta", gripper_pos_delta[0, 0])
+        pose_z = torch.exp(
+            env.cfg.rewards.approach_phase.gripper_pos_pressure
+            * -gripper_pos_delta
+            / env.cfg.rewards.approach_phase.gripper_pos_target
+        ).squeeze(-1) ** (env.cfg.rewards.approach_phase.gripper_pos_weight)
+        print("gripper_close_error", pose_z[0])
+
+        alignment_z = torch.exp(
+            -1 - (ctx.metrics["gripper_cube_alignment"] + 1) / 2
+        ) ** (env.cfg.rewards.approach_phase.alignment_weight)
+        approach_phase = distance_z * alignment_z * pose_z
+
+        assert_tensor(approach_phase, (env.num_envs,), torch.float32)
+        ctx.metrics["approach_phase"] = approach_phase
+
+
+class GraspPhaseMetricStep(MetricStep):
+    produces = frozenset({"grasp_phase"})
+    depends_on = frozenset({"gripper_cube_contact_force_magnitude", "approach_phase"})
+
+    def compute(self, ctx: StepContext) -> None:
+        env = ctx.env
+        grasp_phase = torch.exp(
+            -env.cfg.rewards.grasp_phase.grip_force_pressure
+            * torch.abs(
+                ctx.metrics["gripper_cube_contact_force_magnitude"]
+                - env.cfg.rewards.grasp_phase.grip_force_target
+            )
+        )
+
+        assert_tensor(grasp_phase, (env.num_envs,), torch.float32)
+        ctx.metrics["grasp_phase"] = grasp_phase
+
+
+class ApproachPhaseTerminalMetricStep(MetricStep):
+    produces = frozenset({"approach_phase_terminal"})
+    depends_on = frozenset({"approach_phase"})
+
+    def compute(self, ctx: StepContext) -> None:
+        env = ctx.env
+        approach_phase_terminal = (
+            ctx.metrics["approach_phase"]
+            > env.cfg.rewards.approach_phase_terminal.threshold
+        )
+
+        assert_tensor(approach_phase_terminal, (env.num_envs,), torch.bool)
+        ctx.metrics["approach_phase_terminal"] = approach_phase_terminal
+
+
+class GraspPhaseTerminalMetricStep(MetricStep):
+    produces = frozenset({"grasp_phase_terminal"})
+    depends_on = frozenset({"grasp_phase", "approach_phase_terminal"})
+
+    def compute(self, ctx: StepContext) -> None:
+        env = ctx.env
+        grasp_phase_terminal = torch.logical_and(
+            ctx.metrics["approach_phase_terminal"],
+            ctx.metrics["grasp_phase"] > env.cfg.rewards.grasp_phase_terminal.threshold,
+        )
+
+        assert_tensor(grasp_phase_terminal, (env.num_envs,), torch.bool)
+        ctx.metrics["grasp_phase_terminal"] = grasp_phase_terminal
 
 
 # ---------------------------------------------------------------------------
@@ -710,7 +779,7 @@ class CloseGripperRewardStep(RewardStep):
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
         env = ctx.env
-        gripper_pos = env.joint_pos[:, env._ee_body_idx]
+        gripper_pos = env.joint_pos[:, env._gripper_joint_idx]
         gripper_close_error = torch.abs(
             gripper_pos - env.cfg.rewards.close_gripper.close_target
         )
@@ -975,50 +1044,53 @@ class CubeOutOfRangeTerminalRewardStep(TerminalRewardStep):
         return ctx.metrics["is_cube_out_of_range"]
 
 
-class GraspPositionTerminalRewardStep(TerminalRewardStep):
-    name = "rew_grasp_position_terminal"
-    requires_metrics = frozenset({"is_grasp_position_terminal"})
+class ApproachPhaseTerminalRewardStep(TerminalRewardStep):
+    name = "rew_approach_phase_terminal"
+    requires_metrics = frozenset({"approach_phase_terminal"})
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
         env = ctx.env
-        flag = ctx.metrics["is_grasp_position_terminal"]
-        return flag.float() * env.cfg.rewards.grasp_position_terminal.scale
+        flag = ctx.metrics["approach_phase_terminal"]
+        return flag.float() * env.cfg.rewards.approach_phase_terminal.scale
 
     def done(self, ctx: StepContext) -> torch.Tensor:
-        return ctx.metrics["is_grasp_position_terminal"]
+        env = ctx.env
+        flag = ctx.metrics["approach_phase_terminal"]
+        return flag
+
+
+class GraspPhaseTerminalRewardStep(TerminalRewardStep):
+    name = "rew_grasp_phase_terminal"
+    requires_metrics = frozenset({"grasp_phase_terminal", "approach_phase_terminal"})
+
+    def compute(self, ctx: StepContext) -> torch.Tensor:
+        env = ctx.env
+        flag = torch.logical_and(
+            ctx.metrics["approach_phase_terminal"], ctx.metrics["grasp_phase_terminal"]
+        )
+        return flag.float() * env.cfg.rewards.grasp_phase_terminal.scale
+
+    def done(self, ctx: StepContext) -> torch.Tensor:
+        env = ctx.env
+        flag = torch.logical_and(
+            ctx.metrics["approach_phase_terminal"],
+            ctx.metrics["grasp_phase_terminal"],
+        )
+        return flag
 
 
 # ---------------------------------------------------------------------------
-# (Novel) Reward: Approach Phase
+# Reward: Approach Phase
 # ---------------------------------------------------------------------------
 
 
 class ApproachPhaseRewardStep(RewardStep):
     name = "rew_approach_phase"
-    requires_metrics = frozenset({"grip_zone_cube_distance", "gripper_cube_alignment"})
+    requires_metrics = frozenset({"approach_phase"})
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
         env = ctx.env
-
-        grip_zone_dist = torch.exp(
-            -env.cfg.rewards.approach_phase.distance_pressure
-            * ctx.metrics["grip_zone_cube_distance"]
-        )
-
-        gripper_pos = env.joint_pos[:, env._ee_body_idx]
-        gripper_close_error = torch.exp(
-            -env.cfg.rewards.approach_phase.gripper_pos_distance_pressure
-            * torch.abs(gripper_pos - env.cfg.rewards.approach_phase.gripper_pos_target)
-        ).squeeze(-1)
-
-        alignment = ctx.metrics["gripper_cube_alignment"]
-
-        return (
-            grip_zone_dist
-            * gripper_close_error
-            * alignment
-            * env.cfg.rewards.approach_phase.scale
-        )
+        return ctx.metrics["approach_phase"] * env.cfg.rewards.approach_phase.scale
 
 
 class AvoidBumpingCubeRewardStep(RewardStep):
@@ -1045,6 +1117,25 @@ class AvoidBumpingCubeRewardStep(RewardStep):
 
 
 # ---------------------------------------------------------------------------
+# Reward: Grasp Phase
+# ---------------------------------------------------------------------------
+
+
+class GraspPhaseRewardStep(RewardStep):
+    name = "rew_grasp_phase"
+    requires_metrics = frozenset({"grasp_phase", "approach_phase_terminal"})
+
+    def compute(self, ctx: StepContext) -> torch.Tensor:
+        env = ctx.env
+        grasp_phase = ctx.metrics["grasp_phase"]
+        return (
+            ctx.metrics["approach_phase_terminal"].float()
+            * grasp_phase
+            * env.cfg.rewards.grasp_phase.scale
+        )
+
+
+# ---------------------------------------------------------------------------
 # Complete catalog of all available metric step classes (order irrelevant).
 # MetricPipeline will topologically sort any subset passed to it.
 # ---------------------------------------------------------------------------
@@ -1067,7 +1158,10 @@ ALL_METRIC_STEPS: list[type[MetricStep]] = [
     IsCubeGrippedMetricStep,
     CubeDistanceFromBaseMetricStep,
     IsCubeOutOfRangeMetricStep,
-    IsGraspPositionTerminalMetricStep,
+    ApproachPhaseMetricStep,
+    GraspPhaseMetricStep,
+    ApproachPhaseTerminalMetricStep,
+    GraspPhaseTerminalMetricStep,
 ]
 
 # Maps each observable metric key to the number of columns it contributes
@@ -1202,14 +1296,18 @@ def build_reward_pipeline(cfg) -> RewardPipeline:
         steps.append(SafetyTouchTableRewardStep())
     if r.cube_out_of_range_terminal.enabled:
         steps.append(CubeOutOfRangeTerminalRewardStep())
-    if r.grasp_position_terminal.enabled:
-        steps.append(GraspPositionTerminalRewardStep())
+    if r.approach_phase_terminal.enabled:
+        steps.append(ApproachPhaseTerminalRewardStep())
+    if r.grasp_phase_terminal.enabled:
+        steps.append(GraspPhaseTerminalRewardStep())
 
     # Phase-specific
     if r.approach_phase.enabled:
         steps.append(ApproachPhaseRewardStep())
     if r.avoid_bumping_cube.enabled:
         steps.append(AvoidBumpingCubeRewardStep())
+    if r.grasp_phase.enabled:
+        steps.append(GraspPhaseRewardStep())
 
     return RewardPipeline(steps)
 
@@ -1740,7 +1838,7 @@ class DistractorsDRStep(DRStep):
 
     Handles default-state reset, colour randomisation, optional size
     randomisation, and position randomisation with an active/inactive mask
-    (inactive distractors are hidden 10 m below ground).
+    (inactive distractors are hidden via USD visibility toggle).
     """
 
     requires_metrics: frozenset[str] = frozenset()
@@ -1822,6 +1920,11 @@ class DistractorsDRStep(DRStep):
 
             if len(active_env_ids) > 0:
                 num_active = len(active_env_ids)
+                for env_id in active_env_ids.tolist():
+                    prim_path = f"/World/envs/env_{env_id}/{distractor_name}"
+                    prim = stage.GetPrimAtPath(prim_path)
+                    if prim.IsValid():
+                        UsdGeom.Imageable(prim).MakeVisible()
                 pos_cfg = env.cfg.distractors.position
                 obj_x = sample_uniform(
                     pos_cfg.x_range[0],
@@ -1854,15 +1957,11 @@ class DistractorsDRStep(DRStep):
                 distractor.write_root_velocity_to_sim(root_state[:, 7:], active_env_ids)
 
             if len(inactive_env_ids) > 0:
-                hidden_state = distractor.data.default_root_state[
-                    inactive_env_ids
-                ].clone()
-                hidden_state[:, :3] = env.scene.env_origins[inactive_env_ids]
-                hidden_state[:, 2] -= 10.0
-                distractor.write_root_pose_to_sim(hidden_state[:, :7], inactive_env_ids)
-                distractor.write_root_velocity_to_sim(
-                    hidden_state[:, 7:], inactive_env_ids
-                )
+                for env_id in inactive_env_ids.tolist():
+                    prim_path = f"/World/envs/env_{env_id}/{distractor_name}"
+                    prim = stage.GetPrimAtPath(prim_path)
+                    if prim.IsValid():
+                        UsdGeom.Imageable(prim).MakeInvisible()
 
 
 # ---------------------------------------------------------------------------

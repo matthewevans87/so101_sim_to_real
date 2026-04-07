@@ -324,8 +324,19 @@ class ApproachPhaseRewardCfg:
     enabled: bool
     scale: float
     distance_pressure: float
-    gripper_pos_distance_pressure: float
+    gripper_pos_pressure: float
     gripper_pos_target: float
+    distance_weight: float
+    gripper_pos_weight: float
+    alignment_weight: float
+
+
+@dataclass
+class GraspPhaseRewardCfg:
+    enabled: bool
+    scale: float
+    grip_force_pressure: float
+    grip_force_target: float
 
 
 @dataclass
@@ -345,12 +356,17 @@ class CubeOutOfRangeTerminalRewardCfg:
 
 
 @dataclass
-class GraspPositionTerminalRewardCfg:
+class ApproachPhaseTerminalRewardCfg:
     enabled: bool
     scale: float
-    distance_threshold: (
-        float  # metres; grip-zone–to–cube distance below which terminal fires
-    )
+    threshold: float
+
+
+@dataclass
+class GraspPhaseTerminalRewardCfg:
+    enabled: bool
+    scale: float
+    threshold: float
 
 
 @dataclass
@@ -375,9 +391,11 @@ class RewardsCfg:
     vantage: VantageRewardCfg
     keep_camera_upright: RewardCfg
     approach_phase: ApproachPhaseRewardCfg
+    grasp_phase: GraspPhaseRewardCfg
     avoid_bumping_cube: AvoidBumpingCubeRewardCfg
     cube_out_of_range_terminal: CubeOutOfRangeTerminalRewardCfg
-    grasp_position_terminal: GraspPositionTerminalRewardCfg
+    approach_phase_terminal: ApproachPhaseTerminalRewardCfg
+    grasp_phase_terminal: GraspPhaseTerminalRewardCfg
 
 
 # ---------------------------------------------------------------------------

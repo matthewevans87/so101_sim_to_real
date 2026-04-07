@@ -99,6 +99,9 @@ class So101LiftCube(DirectRLEnv):
         self._dof_idx, _ = self.robot.find_joints(self.cfg.joints.active)
         self._all_joint_idx, _ = self.robot.find_joints(self.cfg.joints.all)
         self._ee_body_idx, _ = self.robot.find_bodies(self.cfg.gripper.ee_link_name)
+        self._gripper_joint_idx, _ = self.robot.find_joints(
+            [self.cfg.gripper.ee_link_name]
+        )
 
         # tip offset as tensor
         self._tip_offset = torch.tensor(

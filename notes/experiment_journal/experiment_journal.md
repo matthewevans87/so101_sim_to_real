@@ -311,7 +311,7 @@ With the new EnvMetricPipeline, improved grip zone calculation, and **addition o
 - Need to review the camera config settings and ensure we have proper simulated lens
 - The policy tends to move around a lot unnecessarily even after it has placed the cube in the grip zone. How can we reduce this extra motion--ideally to zero? Low pass filter?
 - We need to add a simulated camera mount rigid body so that the policy doesn't clip the camera through the floor
-- The policy tends to touch the tip of the gripper to the cube rather than fully straddling it. I am going to move the grip zone back 1cm and see if this helps. 
+- The policy tends to touch the tip of the gripper to the cube rather than fully straddling it. I am going to move the grip zone back 1cm and see if this helps.
 
 
 ## April 4, 2026
@@ -323,3 +323,13 @@ Additionally we discovered that there already exists an Xform for the gripper's 
 *Distance Pressure*
 We are working in cm but the world units are meters. This means that distances on the final approach of the gripper to the target position are `<1.0`. By adding a coefficient to the distance value, we can add pressure to push the policy into the final position. Using this technique, we see the policy find the cube within a mere 3000 training steps.
 
+## April 5, 2026
+Think about how to start work on the grip phase. 
+
+*Hypothesis*
+The `gripper_close_error` isn't needed for the approach phase, the model can learn to open the gripper so as to minimize distance without nudging.
+
+If this holds, then we can easly apply an additional reward to encourage grasping once in position. 
+
+*Results*
+After 100k steps, getting similar performance to the 

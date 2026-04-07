@@ -1,5 +1,5 @@
 decimation: 2
-episode_length_s: 10.0
+episode_length_s: 7.0
 sim:
   dt: 0.008333333333333333
 scene:
@@ -82,10 +82,19 @@ rewards:
 # Phased approach:
   approach_phase:
     enabled: true
-    distance_pressure: 20.0
     scale: 5.0
-    gripper_pos_distance_pressure: 20.0
+    distance_pressure: 20.0
+    gripper_pos_pressure: 5.0
     gripper_pos_target: 1.7453292519943295
+    distance_weight: 1.0
+    gripper_pos_weight: 1.0
+    alignment_weight: 1.0
+
+  grasp_phase:
+    enabled: false
+    scale: 10.0
+    grip_force_pressure: 20.0
+    grip_force_target: 2.2 # 4.448 =~1 lbf in Newtons
   
 # Punish touching the cube without being in the grip zone.
   avoid_bumping_cube:
@@ -95,13 +104,19 @@ rewards:
 # terminal when cube is pushed out of reach of the robot base (no reward penalty)
   cube_out_of_range_terminal:
     enabled: true
-    scale: 0.0
-    distance_threshold: 0.40
+    scale: -100.0
+    distance_threshold: 0.45
 # terminal reward for near-perfect grasping position (cube centroid within d of grip zone)
-  grasp_position_terminal:
+  approach_phase_terminal:
     enabled: true
     scale: 500.0
-    distance_threshold: 0.005
+    threshold: 0.95
+
+  grasp_phase_terminal:
+    enabled: false
+    scale: 500.0
+    threshold: 0.95
+
 
 # distance from gripper to cube (meters)
   distance:
