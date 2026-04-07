@@ -322,13 +322,13 @@ class VantageRewardCfg:
 @dataclass
 class ApproachPhaseRewardCfg:
     enabled: bool
-    scale: float
-    distance_pressure: float
-    gripper_pos_pressure: float
     gripper_pos_target: float
-    distance_weight: float
-    gripper_pos_weight: float
-    alignment_weight: float
+    distance_pressure: float
+    alignment_pressure: float
+    gripper_pos_pressure: float
+    distance_scale: float
+    alignment_scale: float
+    gripper_open_scale: float
 
 
 @dataclass

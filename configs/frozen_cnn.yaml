@@ -82,13 +82,13 @@ rewards:
 # Phased approach:
   approach_phase:
     enabled: true
-    scale: 5.0
-    distance_pressure: 20.0
-    gripper_pos_pressure: 5.0
     gripper_pos_target: 1.7453292519943295
-    distance_weight: 1.0
-    gripper_pos_weight: 1.0
-    alignment_weight: 1.0
+    distance_pressure: 20.0
+    alignment_pressure: 2.0
+    gripper_pos_pressure: 5.0
+    distance_scale: 5.0
+    alignment_scale: 2.0
+    gripper_open_scale: 2.0
 
   grasp_phase:
     enabled: false
