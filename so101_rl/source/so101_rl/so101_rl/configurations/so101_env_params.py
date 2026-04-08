@@ -10,7 +10,7 @@ import dataclasses
 import os
 import types
 import typing
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import get_type_hints
 
@@ -84,6 +84,16 @@ def _from_dict(cls: type, data: dict) -> object:
             kwargs[f.name] = None if val is None else _from_dict(inner_dc, val)
         elif getattr(ft, "__origin__", None) is tuple and isinstance(val, list):
             kwargs[f.name] = tuple(val)
+        elif getattr(ft, "__origin__", None) is list and isinstance(val, list):
+            inner_args = getattr(ft, "__args__", None)
+            if (
+                inner_args
+                and len(inner_args) == 1
+                and dataclasses.is_dataclass(inner_args[0])
+            ):
+                kwargs[f.name] = [_from_dict(inner_args[0], item) for item in val]
+            else:
+                kwargs[f.name] = val
         else:
             kwargs[f.name] = val
 
@@ -254,69 +264,68 @@ class BehaviorCfg:
 
 
 @dataclass
-class RewardCfg:
-    enabled: bool
-    scale: float
+class GateCfg:
+    """A single gate condition: reward fires only when ``metric op threshold``.
+
+    Exactly one of ``gt`` / ``gte`` / ``lt`` / ``lte`` / ``eq`` must be set.
+    Multiple :class:`GateCfg` on a reward step are conjunctive (ALL must pass).
+    """
+
+    metric: str
+    gt: float | None = None
+    gte: float | None = None
+    lt: float | None = None
+    lte: float | None = None
+    eq: float | None = None
+
+    def __post_init__(self) -> None:
+        ops = [
+            x for x in (self.gt, self.gte, self.lt, self.lte, self.eq) if x is not None
+        ]
+        if len(ops) != 1:
+            raise ValueError(
+                f"GateCfg for metric '{self.metric}' must declare exactly one "
+                f"operator (gt/gte/lt/lte/eq); got {len(ops)}."
+            )
 
 
 @dataclass
+class RewardCfg:
+    enabled: bool
+    scale: float
+    mode: str = "absolute"
+    """Reward computation mode: 'absolute' (current value) or 'progressive'
+    (improvement delta from previous step, clamped to min=0)."""
+    gates: list[GateCfg] = field(default_factory=list)
+    """Optional gate conditions. Reward (and termination for terminal steps) is
+    suppressed for any environment where a gate condition is not met."""
+
+
+@dataclass(kw_only=True)
 class DistanceRewardCfg(RewardCfg):
     distance_pressure: float
 
 
-@dataclass
-class GripCubeRewardCfg:
-    enabled: bool
-    scale: float
+@dataclass(kw_only=True)
+class GripCubeRewardCfg(RewardCfg):
     distance_threshold: float
+    touch_force_threshold: float
 
 
-@dataclass
-class CloseGripperRewardCfg:
-    enabled: bool
-    scale: float
+@dataclass(kw_only=True)
+class CloseGripperRewardCfg(RewardCfg):
     close_target: float
     max_open: float
 
 
-@dataclass
-class GripperForceRewardCfg:
-    enabled: bool
-    scale: float
-    force_target: float
-
-
-@dataclass
-class EeLinearSpeedRewardCfg:
-    enabled: bool
-    scale: float
+@dataclass(kw_only=True)
+class EeLinearSpeedRewardCfg(RewardCfg):
     safe_speed: float
 
 
-@dataclass
-class SuccessLiftFractionRewardCfg:
-    enabled: bool
-    scale: float
+@dataclass(kw_only=True)
+class SuccessLiftFractionRewardCfg(RewardCfg):
     height_threshold: float
-
-
-@dataclass
-class SuccessTouchTerminalRewardCfg:
-    enabled: bool
-    scale: float
-    touch_force_threshold: float
-
-
-@dataclass
-class VantageRewardCfg:
-    enabled: bool
-    scale: float
-    ideal_distance: float
-    ideal_distance_sigma: float
-    ideal_height: float
-    ideal_height_sigma: float
-    min_distance_threshold: float
-    far_distance_threshold: float
 
 
 @dataclass
@@ -355,41 +364,31 @@ class MetricsCfg:
     approach_phase: ApproachPhaseMetricCfg
 
 
-@dataclass
-class GraspPhaseRewardCfg:
-    enabled: bool
-    scale: float
+@dataclass(kw_only=True)
+class GraspPhaseRewardCfg(RewardCfg):
     grip_force_pressure: float
     grip_force_target: float
 
 
-@dataclass
-class AvoidBumpingCubeRewardCfg:
-    enabled: bool
-    scale: float
+@dataclass(kw_only=True)
+class AvoidBumpingCubeRewardCfg(RewardCfg):
     cube_widths: float  # multiplier on CUBE_WIDTH to define "near cube" region
 
 
-@dataclass
-class CubeOutOfRangeTerminalRewardCfg:
-    enabled: bool
-    scale: float
+@dataclass(kw_only=True)
+class CubeOutOfRangeTerminalRewardCfg(RewardCfg):
     distance_threshold: (
         float  # metres; cube further than this from robot base triggers termination
     )
 
 
-@dataclass
-class ApproachPhaseTerminalRewardCfg:
-    enabled: bool
-    scale: float
+@dataclass(kw_only=True)
+class ApproachPhaseTerminalRewardCfg(RewardCfg):
     threshold: float
 
 
-@dataclass
-class GraspPhaseTerminalRewardCfg:
-    enabled: bool
-    scale: float
+@dataclass(kw_only=True)
+class GraspPhaseTerminalRewardCfg(RewardCfg):
     threshold: float
 
 
@@ -399,21 +398,13 @@ class RewardsCfg:
     grip_cube: GripCubeRewardCfg
     lift_cube: RewardCfg
     gripper_cube_alignment: RewardCfg
-    camera_cube_alignment: RewardCfg
     close_gripper: CloseGripperRewardCfg
-    gripper_force: GripperForceRewardCfg
-    gripper_look_at_cube: RewardCfg
     action: RewardCfg
     ee_linear_speed: EeLinearSpeedRewardCfg
     joint_speed: RewardCfg
-    ee_height_safety: RewardCfg
     safety_touch_table: RewardCfg
     success_lift_fraction_terminal: SuccessLiftFractionRewardCfg
-    success_touch_terminal: SuccessTouchTerminalRewardCfg
-    success_point_at_cube_terminal: RewardCfg
     safety_touch_table_terminal: RewardCfg
-    vantage: VantageRewardCfg
-    keep_camera_upright: RewardCfg
     approach_distance: RewardCfg
     approach_alignment: RewardCfg
     approach_gripper_pose: RewardCfg

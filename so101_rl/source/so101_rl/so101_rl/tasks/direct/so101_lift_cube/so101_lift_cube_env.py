@@ -56,6 +56,7 @@ from so101_rl.env_pipeline import (
     build_env_metric_pipeline,
     build_metric_pipeline,
     build_reward_pipeline,
+    validate_gate_metrics,
     KEY_OBS_DIMS,
 )
 import torch
@@ -183,6 +184,9 @@ class So101LiftCube(DirectRLEnv):
                 }
             ),
             env_metric_pipeline=self.env_metric_pipeline,
+        )
+        validate_gate_metrics(
+            self.reward_pipeline, self.metric_pipeline, self.env_metric_pipeline
         )
         self.dr_pipeline: DRPipeline = build_dr_pipeline(self.cfg)
         _dr_feed = self.cfg.domain_randomization.camera.feed
@@ -568,8 +572,22 @@ class So101LiftCube(DirectRLEnv):
         # Domain Randomization
         self.dr_pipeline.apply(DRContext(env=self, env_ids=env_ids))
 
+        # Compute post-reset metrics and initialize prev_metrics for the reset envs so
+        # that progressive rewards see a delta of 0 on the first step of each episode.
+        self.metric_pipeline.compute(self._step_ctx)
+        self.step_metrics = self._step_ctx.metrics
+        for key, val in self._step_ctx.metrics.items():
+            if key in self._step_ctx.prev_metrics:
+                self._step_ctx.prev_metrics[key][env_ids] = val[env_ids].clone()
+            else:
+                self._step_ctx.prev_metrics[key] = val.clone()
+
     def _compute_step_metrics(self) -> None:
         """Compute custom metrics at each step for logging purposes."""
+        # Snapshot the current metrics as prev_metrics before the pipeline clears and
+        # repopulates ctx.metrics. This gives progressive reward steps their delta baseline.
+        for key, val in self._step_ctx.metrics.items():
+            self._step_ctx.prev_metrics[key] = val.clone()
         self.metric_pipeline.compute(self._step_ctx)
         self.step_metrics = self._step_ctx.metrics
 

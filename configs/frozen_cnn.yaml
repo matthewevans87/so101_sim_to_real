@@ -3,7 +3,7 @@ episode_length_s: 7.0
 sim:
   dt: 0.008333333333333333
 scene:
-  num_envs: 512
+  num_envs: 256
   env_spacing: 2.0
   replicate_physics: true
 
@@ -97,13 +97,20 @@ metrics:
     gripper_pos_target: 0.8753292519943295
 
 rewards:
+# mode: absolute (default) — reward the current metric value each step.
+# mode: progressive        — reward only the improvement delta vs the previous step
+#                            (clamped to min=0; regressions are not penalized).
 # Phased approach:
   approach_distance:
     enabled: true
     scale: 5.0
+    mode: progressive
   approach_alignment:
     enabled: true
     scale: 1.0
+    gates:
+      - metric: grip_zone_cube_distance
+        lte: 0.02
   approach_gripper_pose:
     enabled: false
     scale: 1.0
@@ -151,6 +158,7 @@ rewards:
     enabled: false
     scale: 2.0
     distance_threshold: 0.02
+    touch_force_threshold: 0.001
 # fraction lifted (to threshold)
   lift_cube:
     enabled: false
@@ -173,21 +181,11 @@ rewards:
   gripper_cube_alignment:
     enabled: false
     scale: 1.0
-  camera_cube_alignment:
-    enabled: false
-    scale: 1.0
   close_gripper:
     enabled: false
     scale: 10.0
     close_target: 0.17453292519943295
     max_open: 1.7453292519943295
-  gripper_force:
-    enabled: false
-    scale: 10.0
-    force_target: 1.0
-  gripper_look_at_cube:
-    enabled: false
-    scale: 1.0
   ee_linear_speed:
     enabled: false
     scale: -0.01
@@ -195,28 +193,6 @@ rewards:
   joint_speed:
     enabled: false
     scale: -0.01
-  ee_height_safety:
-    enabled: false
-    scale: -100.0
-  success_touch_terminal:
-    enabled: false
-    scale: 500.0
-    touch_force_threshold: 0.001
-  success_point_at_cube_terminal:
-    enabled: false
-    scale: 2000.0
-  vantage:
-    enabled: false
-    ideal_distance: 0.15
-    ideal_distance_sigma: 0.10
-    ideal_height: 0.10
-    ideal_height_sigma: 0.15
-    min_distance_threshold: 0.08
-    far_distance_threshold: 0.20
-    scale: 1.0
-  keep_camera_upright:
-    enabled: false
-    scale: -1.0
 
 domain_randomization:
   camera:
