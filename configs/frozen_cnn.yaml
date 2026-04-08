@@ -14,7 +14,7 @@ joints:
   starting_position: [null, null, -25.0, 65.0, -90.0, null]
   starting_position_noise:
     enabled: true
-    range: [-0.05, 0.05]
+    range: [-0.4, 0.4]
 
 control:
   action_scale: 1.0
@@ -82,14 +82,18 @@ rewards:
 # Phased approach:
   approach_phase:
     enabled: true
-    gripper_pos_target: 1.7453292519943295
+    gripper_pos_target: .8753292519943295
+    # gripper_pos_target: 1.7453292519943295
     distance_pressure: 20.0
     alignment_pressure: 2.0
-    gripper_pos_pressure: 5.0
+    gripper_pos_pressure: 1.0
     distance_scale: 5.0
     alignment_scale: 2.0
-    gripper_open_scale: 2.0
-
+    gripper_open_scale: 2.0    
+    distance_max: 0.40
+    distance_linear_weight: 5.0
+    alignment_linear_weight: 5.0
+    gripper_linear_weight: 5.0
   grasp_phase:
     enabled: false
     scale: 10.0
@@ -105,12 +109,12 @@ rewards:
   cube_out_of_range_terminal:
     enabled: true
     scale: -100.0
-    distance_threshold: 0.45
+    distance_threshold: 0.40
 # terminal reward for near-perfect grasping position (cube centroid within d of grip zone)
   approach_phase_terminal:
     enabled: true
     scale: 500.0
-    threshold: 0.95
+    threshold: 0.90
 
   grasp_phase_terminal:
     enabled: false
@@ -120,7 +124,7 @@ rewards:
 
 # distance from gripper to cube (meters)
   distance:
-    enabled: true
+    enabled: false
     distance_pressure: 20.0
     scale: -5.0
 # binary reward for touching a properly positioned cube with the gripper

@@ -574,35 +574,40 @@ class ApproachPhaseMetricStep(MetricStep):
         env = ctx.env
         cfg = env.cfg.rewards.approach_phase
 
-        approach_distance = torch.exp(
-            -cfg.distance_pressure * ctx.metrics["grip_zone_cube_distance"]
-        )
+        d = ctx.metrics["grip_zone_cube_distance"]
+        dist_exp = torch.exp(-cfg.distance_pressure * d)
+        dist_linear = (1.0 - d / cfg.distance_max).clamp(min=0.0)
+        approach_distance = dist_exp + cfg.distance_linear_weight * dist_linear
         assert_tensor(approach_distance, (env.num_envs,), torch.float32)
         ctx.metrics["approach_distance"] = approach_distance
 
         # alignment in [-1, 1]; delta of 0 = perfect, delta of 2 = worst
-        approach_alignment = torch.exp(
-            -cfg.alignment_pressure * (1.0 - ctx.metrics["gripper_cube_alignment"])
-        )
+        # linear term: (1 + alignment) / 2 maps [-1,1] → [0,1]
+        a = ctx.metrics["gripper_cube_alignment"]
+        align_exp = torch.exp(-cfg.alignment_pressure * (1.0 - a))
+        align_linear = (1.0 + a) / 2.0
+        approach_alignment = align_exp + cfg.alignment_linear_weight * align_linear
         assert_tensor(approach_alignment, (env.num_envs,), torch.float32)
         ctx.metrics["approach_alignment"] = approach_alignment
 
         gripper_pos = env.joint_pos[:, env._gripper_joint_idx]
         gripper_pos_delta = torch.abs(gripper_pos - cfg.gripper_pos_target).squeeze(-1)
-        approach_gripper_open = torch.exp(
-            -cfg.gripper_pos_pressure * gripper_pos_delta / cfg.gripper_pos_target
-        )
+        delta_norm = gripper_pos_delta / cfg.gripper_pos_target
+        gripper_exp = torch.exp(-cfg.gripper_pos_pressure * delta_norm)
+        gripper_linear = (1.0 - delta_norm).clamp(min=0.0)
+        approach_gripper_open = gripper_exp + cfg.gripper_linear_weight * gripper_linear
         assert_tensor(approach_gripper_open, (env.num_envs,), torch.float32)
         ctx.metrics["approach_gripper_open"] = approach_gripper_open
 
-        approach_phase = approach_distance * approach_alignment * approach_gripper_open
+        # approach_phase uses pure exp terms so the terminal threshold (0.95) remains valid
+        approach_phase = dist_exp * align_exp * gripper_exp
         assert_tensor(approach_phase, (env.num_envs,), torch.float32)
         ctx.metrics["approach_phase"] = approach_phase
 
 
 class GraspPhaseMetricStep(MetricStep):
     produces = frozenset({"grasp_phase"})
-    depends_on = frozenset({"gripper_cube_contact_force_magnitude", "approach_phase"})
+    depends_on = frozenset({"gripper_cube_contact_force_magnitude"})
 
     def compute(self, ctx: StepContext) -> None:
         env = ctx.env
@@ -897,7 +902,8 @@ class ActionRewardStep(RewardStep):
         env = ctx.env
         if env.actions is None:
             return torch.zeros(env.num_envs, device=env.device)
-        return env.cfg.rewards.action.scale * torch.sum(torch.abs(env.actions), dim=-1)
+        delta = env.actions - env.prev_actions
+        return env.cfg.rewards.action.scale * torch.sum(torch.abs(delta), dim=-1)
 
 
 class EELinearSpeedRewardStep(RewardStep):

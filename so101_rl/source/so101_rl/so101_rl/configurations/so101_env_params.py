@@ -329,6 +329,10 @@ class ApproachPhaseRewardCfg:
     distance_scale: float
     alignment_scale: float
     gripper_open_scale: float
+    distance_max: float
+    distance_linear_weight: float
+    alignment_linear_weight: float
+    gripper_linear_weight: float
 
 
 @dataclass

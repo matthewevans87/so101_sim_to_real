@@ -332,4 +332,36 @@ The `gripper_close_error` isn't needed for the approach phase, the model can lea
 If this holds, then we can easly apply an additional reward to encourage grasping once in position. 
 
 *Results*
-After 100k steps, getting similar performance to the 
+After 100k steps, getting similar performance.
+
+## April 7, 2026
+The approach phase reward now is accompanied by three component rewards, each with its own backing metric. 
+`ApproachPhaseMetricStep` produces 
+- `approach_distance`
+- `approach_alignment`
+- `approach_gripper_open`
+- `approach_phase` (the product of the other `approach_*` metrics)
+
+We then have the component rewards
+- `ApproachDistanceRewardStep`
+- `ApproachAlignmentRewardStep`
+- `ApproachGripperOpenRewardStep`
+and a terminal reward
+- `ApproachPhaseTerminalRewardStep` when `approach_phase` > threshold
+
+The three components are inverse exponential functions, `exp(-kx)` where k is a "pressure" exponential term driving behavior at the "last mile" of the policy's approach. 
+
+*Hypothesis*
+I'm going to try introducing a linear reward term to drive initial behaviors, while keeping the inverse exponential to provide sharp signal on the final approach. My hypothesis is that this will cause faster convergence. `Total Reward` will increase, but the test will be if `approach_phase` approaches `1.0` more quickly.
+
+
+*Possbile Breakthrough: Actions Penalty*
+I was incorrectly penalizing "actions". Rather than penalizing large movements, I was penalizing the actions based on their joint position value. Larger numerical positions resulted in larger penalties, which is obviously wrong. The correct behavior is to penalize large movements from the _previous_ position to the _next_.
+
+
+## April 8, 2026
+Ran 1M step training. The policy does a decent job of getting into position. It doesn't get into "perfect" position, but get's close, and hovers there. It's sufficient such that, if a grasp was triggered, it would indeed grab the cube. 
+
+That said, there are two observed issues:
+1. It tends to perform a lot of unnecessary movement, even when in a good approach position.
+2. The gripper pose reward pushes the policy to focus less on "getting into a good position in which to grasp the cube" and more on "hold this specific pose". 

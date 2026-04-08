@@ -164,6 +164,7 @@ class So101LiftCube(DirectRLEnv):
             device=self.device,
             dtype=torch.float32,
         )  # type: ignore
+        self.prev_actions = torch.zeros_like(self.actions)
 
         self.step_metrics: dict[str, torch.Tensor] = None  # type: ignore
         self.env_metrics: dict[str, torch.Tensor] = {}
@@ -379,6 +380,7 @@ class So101LiftCube(DirectRLEnv):
 
         actions = torch.clamp(actions, -1.0, 1.0)
         t = 0.5 * (actions + 1.0)  # (num_envs, num_actions)
+        self.prev_actions = self.actions.clone()
         self.actions = actions.clone()
 
         if self.cfg.behavior.binary_gripper_action.enabled:
@@ -553,6 +555,7 @@ class So101LiftCube(DirectRLEnv):
         # Write changes back to simulation
         self.joint_pos[env_ids] = joint_pos
         self.joint_vel[env_ids] = joint_vel
+        self.prev_actions[env_ids] = 0.0
 
         self.robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
         self.robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
