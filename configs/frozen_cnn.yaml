@@ -3,7 +3,7 @@ episode_length_s: 7.0
 sim:
   dt: 0.008333333333333333
 scene:
-  num_envs: 8
+  num_envs: 512
   env_spacing: 2.0
   replicate_physics: true
 
@@ -78,22 +78,38 @@ behavior:
   binary_gripper_action:
     enabled: false
 
+metrics:
+  approach_distance:
+    pressure: 20.0
+    distance_max: 0.40
+    linear_weight: 5.0
+  approach_alignment:
+    pressure: 1.0
+    linear_weight: 5.0
+  approach_gripper_pose:
+    gripper_pos_target: 0.8753292519943295
+    pressure: 1.0
+    linear_weight: 5.0
+  approach_phase:
+    distance_pressure: 20.0
+    alignment_pressure: 1.0
+    gripper_pos_pressure: 1.0
+    gripper_pos_target: 0.8753292519943295
+
 rewards:
 # Phased approach:
-  approach_phase:
+  approach_distance:
     enabled: true
-    gripper_pos_target: .8753292519943295
-    # gripper_pos_target: 1.7453292519943295
-    distance_pressure: 20.0
-    alignment_pressure: 2.0
-    gripper_pos_pressure: 1.0
-    distance_scale: 5.0
-    alignment_scale: 2.0
-    gripper_open_scale: 2.0    
-    distance_max: 0.40
-    distance_linear_weight: 5.0
-    alignment_linear_weight: 5.0
-    gripper_linear_weight: 5.0
+    scale: 5.0
+  approach_alignment:
+    enabled: true
+    scale: 1.0
+  approach_gripper_pose:
+    enabled: false
+    scale: 1.0
+  approach_phase:
+    enabled: false
+    scale: 1.0
   grasp_phase:
     enabled: false
     scale: 10.0
@@ -103,14 +119,17 @@ rewards:
 # Punish touching the cube without being in the grip zone.
   avoid_bumping_cube:
     enabled: true
-    scale: -0.025
+    scale: -0.1
     cube_widths: 0.25
-# terminal when cube is pushed out of reach of the robot base (no reward penalty)
+# terminal when cube is pushed out of reach of the robot base 
   cube_out_of_range_terminal:
     enabled: true
-    scale: -100.0
+    scale: 0.0
     distance_threshold: 0.40
-# terminal reward for near-perfect grasping position (cube centroid within d of grip zone)
+  safety_touch_table_terminal:
+    enabled: true
+    scale: 0.0
+# terminal reward for near-perfect grasping position
   approach_phase_terminal:
     enabled: true
     scale: 500.0
@@ -139,7 +158,7 @@ rewards:
 # sum of actions
   action:
     enabled: true
-    scale: -0.001
+    scale: -0.02
 # binary penalty for touching the table
   safety_touch_table:
     enabled: true
@@ -186,9 +205,6 @@ rewards:
   success_point_at_cube_terminal:
     enabled: false
     scale: 2000.0
-  safety_touch_table_terminal:
-    enabled: false
-    scale: -2000.0
   vantage:
     enabled: false
     ideal_distance: 0.15

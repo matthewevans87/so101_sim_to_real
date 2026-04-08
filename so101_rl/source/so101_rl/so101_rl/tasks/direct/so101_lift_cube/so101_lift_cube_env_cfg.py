@@ -173,6 +173,7 @@ class So101LiftCubeCfg(DirectRLEnvCfg):
     distractors = _Y.distractors
     debug = _Y.debug
     behavior = _Y.behavior
+    metrics = _Y.metrics
     rewards = _Y.rewards
     domain_randomization = _Y.domain_randomization
     observations = _Y.observations

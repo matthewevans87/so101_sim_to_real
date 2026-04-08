@@ -365,3 +365,22 @@ Ran 1M step training. The policy does a decent job of getting into position. It 
 That said, there are two observed issues:
 1. It tends to perform a lot of unnecessary movement, even when in a good approach position.
 2. The gripper pose reward pushes the policy to focus less on "getting into a good position in which to grasp the cube" and more on "hold this specific pose". 
+
+
+---
+
+For the unnecessary movement, I'm increasing the rew_action penalty from `-0.001` to `-0.02`. 
+
+For the gripper pose, I'm going to try simply disabling the gripper pose component of the approach phase rewards. The goal is to find find a good approach pose, which includes moving the gripper, so perhaps the gripper pose-specific component is unneeded.
+
+---
+
+*Regarding table touch safety*
+Currently, even with a (small) penalty, the robot touches the work surface in sim. This is unacceptable in a physical robot.
+
+
+---
+
+We're still having a lot of trouble in the approach phase. I think the multiplicative `approach_phase` reward is crushing the learning signal. I'm going to disable it. Also, I'm going to implement a tier approach that unlocks different reward signals at different phases. Also, I want to add a reward for a better approach vector: the axis alignment when grasping the cube matters.
+Also, I want to try moving away from a pure "distance" metric and try using a "improvement" metric: you only get more rewards if you next step moves you closer to the cube; no hovering to milk the rewards.
+

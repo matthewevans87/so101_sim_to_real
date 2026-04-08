@@ -320,19 +320,39 @@ class VantageRewardCfg:
 
 
 @dataclass
-class ApproachPhaseRewardCfg:
-    enabled: bool
+class ApproachDistanceMetricCfg:
+    pressure: float
+    distance_max: float
+    linear_weight: float
+
+
+@dataclass
+class ApproachAlignmentMetricCfg:
+    pressure: float
+    linear_weight: float
+
+
+@dataclass
+class ApproachGripperPoseMetricCfg:
     gripper_pos_target: float
+    pressure: float
+    linear_weight: float
+
+
+@dataclass
+class ApproachPhaseMetricCfg:
     distance_pressure: float
     alignment_pressure: float
     gripper_pos_pressure: float
-    distance_scale: float
-    alignment_scale: float
-    gripper_open_scale: float
-    distance_max: float
-    distance_linear_weight: float
-    alignment_linear_weight: float
-    gripper_linear_weight: float
+    gripper_pos_target: float
+
+
+@dataclass
+class MetricsCfg:
+    approach_distance: ApproachDistanceMetricCfg
+    approach_alignment: ApproachAlignmentMetricCfg
+    approach_gripper_pose: ApproachGripperPoseMetricCfg
+    approach_phase: ApproachPhaseMetricCfg
 
 
 @dataclass
@@ -394,7 +414,10 @@ class RewardsCfg:
     safety_touch_table_terminal: RewardCfg
     vantage: VantageRewardCfg
     keep_camera_upright: RewardCfg
-    approach_phase: ApproachPhaseRewardCfg
+    approach_distance: RewardCfg
+    approach_alignment: RewardCfg
+    approach_gripper_pose: RewardCfg
+    approach_phase: RewardCfg
     grasp_phase: GraspPhaseRewardCfg
     avoid_bumping_cube: AvoidBumpingCubeRewardCfg
     cube_out_of_range_terminal: CubeOutOfRangeTerminalRewardCfg
@@ -612,6 +635,7 @@ class So101EnvParams:
     distractors: DistractorsCfg
     debug: DebugCfg
     behavior: BehaviorCfg
+    metrics: MetricsCfg
     rewards: RewardsCfg
     domain_randomization: DomainRandomizationCfg
     sensors: SensorsCfg
