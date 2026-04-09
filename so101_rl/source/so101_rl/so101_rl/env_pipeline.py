@@ -63,6 +63,7 @@ from so101_rl.reward_pipeline import (
     ApproachPhaseRewardStep,
     AvoidBumpingCubeRewardStep,
     GraspPhaseRewardStep,
+    WristRollPoseRewardStep,
     build_reward_pipeline,
     validate_gate_metrics,
 )
@@ -141,6 +142,7 @@ __all__ = [
     "ApproachPhaseRewardStep",
     "AvoidBumpingCubeRewardStep",
     "GraspPhaseRewardStep",
+    "WristRollPoseRewardStep",
     "build_reward_pipeline",
     "validate_gate_metrics",
     # DR pipeline

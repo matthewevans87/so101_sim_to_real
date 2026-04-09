@@ -97,102 +97,126 @@ metrics:
     gripper_pos_target: 0.8753292519943295
 
 rewards:
-# mode: absolute (default) — reward the current metric value each step.
-# mode: progressive        — reward only the improvement delta vs the previous step
-#                            (clamped to min=0; regressions are not penalized).
-# Phased approach:
-  approach_distance:
+  # mode: absolute (default) — reward the current metric value each step.
+  # mode: progressive        — reward only the improvement delta vs the previous step
+  #                            (clamped to min=0; regressions are not penalized).
+
+  # Phased approach:
+  - type: approach_distance
     enabled: true
     scale: 5.0
     mode: progressive
-  approach_alignment:
+
+  - type: approach_alignment
     enabled: true
     scale: 1.0
     gates:
       - metric: grip_zone_cube_distance
         lte: 0.02
-  approach_gripper_pose:
+
+  - type: approach_gripper_pose
     enabled: false
     scale: 1.0
-  approach_phase:
+
+  - type: approach_phase
     enabled: false
     scale: 1.0
-  grasp_phase:
+
+  - type: grasp_phase
     enabled: false
     scale: 10.0
     grip_force_pressure: 20.0
-    grip_force_target: 2.2 # 4.448 =~1 lbf in Newtons
-  
-# Punish touching the cube without being in the grip zone.
-  avoid_bumping_cube:
+    grip_force_target: 2.2  # 4.448 =~1 lbf in Newtons
+
+  # shaping reward for keeping wrist roll at -90° (ideal for top-down and side grasps)
+  - type: wrist_roll_pose
+    enabled: true
+    scale: 1.0
+    target_rad: -1.5707963267948966  # -90 degrees
+    pressure: 1.0
+    gates:
+      - metric: grip_zone_cube_distance
+        lte: 0.03
+
+  # Punish touching the cube without being in the grip zone.
+  - type: avoid_bumping_cube
     enabled: true
     scale: -0.1
     cube_widths: 0.25
-# terminal when cube is pushed out of reach of the robot base 
-  cube_out_of_range_terminal:
+
+  # terminal when cube is pushed out of reach of the robot base
+  - type: cube_out_of_range_terminal
     enabled: true
     scale: 0.0
     distance_threshold: 0.40
-  safety_touch_table_terminal:
+
+  - type: safety_touch_table_terminal
     enabled: true
     scale: 0.0
-# terminal reward for near-perfect grasping position
-  approach_phase_terminal:
+
+  # terminal reward for near-perfect grasping position
+  - type: approach_phase_terminal
     enabled: true
     scale: 500.0
     threshold: 0.90
 
-  grasp_phase_terminal:
+  - type: grasp_phase_terminal
     enabled: false
     scale: 500.0
     threshold: 0.95
 
-
-# distance from gripper to cube (meters)
-  distance:
+  # distance from gripper to cube (meters)
+  - type: distance
     enabled: false
-    distance_pressure: 20.0
     scale: -5.0
-# binary reward for touching a properly positioned cube with the gripper
-  grip_cube:
+    distance_pressure: 20.0
+
+  # binary reward for touching a properly positioned cube with the gripper
+  - type: grip_cube
     enabled: false
     scale: 2.0
     distance_threshold: 0.02
     touch_force_threshold: 0.001
-# fraction lifted (to threshold)
-  lift_cube:
+
+  # fraction lifted (to threshold)
+  - type: lift_cube
     enabled: false
     scale: 5.0
-# sum of actions
-  action:
-    enabled: true
-    scale: -0.02
-# binary penalty for touching the table
-  safety_touch_table:
-    enabled: true
-    scale: -1.0
-# terminal reward for successfully lifting the cube above the height threshold (meters)
-  success_lift_fraction_terminal:
-    enabled: false
-    scale: 100.0
-    height_threshold: 0.10
 
-
-  gripper_cube_alignment:
+  - type: gripper_cube_alignment
     enabled: false
     scale: 1.0
-  close_gripper:
+
+  - type: close_gripper
     enabled: false
     scale: 10.0
     close_target: 0.17453292519943295
     max_open: 1.7453292519943295
-  ee_linear_speed:
+
+  # sum of actions
+  - type: action
+    enabled: true
+    scale: -0.02
+
+  - type: ee_linear_speed
     enabled: false
     scale: -0.01
     safe_speed: 0.1
-  joint_speed:
+
+  - type: joint_speed
     enabled: false
     scale: -0.01
+
+  # binary penalty for touching the table
+  - type: safety_touch_table
+    enabled: true
+    scale: -1.0
+
+  # terminal reward for successfully lifting the cube above the height threshold (meters)
+  - type: success_lift_fraction_terminal
+    enabled: false
+    scale: 100.0
+    height_threshold: 0.10
 
 domain_randomization:
   camera:

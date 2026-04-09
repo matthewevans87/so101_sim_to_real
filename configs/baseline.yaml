@@ -79,71 +79,117 @@ behavior:
     enabled: false
 
 rewards:
-# mode: absolute (default) — reward the current metric value each step.
-# mode: progressive        — reward only the improvement delta vs the previous step
-#                            (clamped to min=0; regressions are not penalized).
-# baseline reward components
+  # mode: absolute (default) — reward the current metric value each step.
+  # mode: progressive        — reward only the improvement delta vs the previous step
+  #                            (clamped to min=0; regressions are not penalized).
 
-# distance from gripper to cube (meters)
-  distance:
+  # distance from gripper to cube (meters)
+  - type: distance
     enabled: true
     scale: -5.0
-# binary reward for touching a properly positioned cube with the gripper
-  grip_cube:
+    distance_pressure: 20.0
+
+  # binary reward for touching a properly positioned cube with the gripper
+  - type: grip_cube
     enabled: true
     scale: 2.0
     distance_threshold: 0.02
     touch_force_threshold: 0.001
-# fraction lifted (to threshold)
-  lift_cube:
+
+  # fraction lifted (to threshold)
+  - type: lift_cube
     enabled: true
     scale: 5.0
-# sum of actions
-  action:
+
+  # sum of actions
+  - type: action
     enabled: true
     scale: -0.001
-# binary penalty for touching the table
-  safety_touch_table:
+
+  # binary penalty for touching the table
+  - type: safety_touch_table
     enabled: true
     scale: -1.0
-# terminal reward for successfully lifting the cube above the height threshold (meters)
-  success_lift_fraction_terminal:
+
+  # terminal reward for successfully lifting the cube above the height threshold (meters)
+  - type: success_lift_fraction_terminal
     enabled: true
     scale: 100.0
     height_threshold: 0.10
 
+  # terminal when cube is pushed out of reach of the robot base (no reward penalty)
+  - type: cube_out_of_range_terminal
+    enabled: true
+    scale: 0.0
+    distance_threshold: 0.40
 
-  gripper_cube_alignment:
+  - type: gripper_cube_alignment
     enabled: false
     scale: 1.0
-  close_gripper:
+
+  - type: close_gripper
     enabled: false
     scale: 10.0
     close_target: 0.17453292519943295
     max_open: 1.7453292519943295
-  ee_linear_speed:
+
+  - type: ee_linear_speed
     enabled: false
     scale: -0.01
     safe_speed: 0.1
-  joint_speed:
+
+  - type: joint_speed
     enabled: false
     scale: -0.01
-  safety_touch_table_terminal:
+
+  - type: safety_touch_table_terminal
     enabled: false
     scale: -2000.0
-  avoid_bumping_cube:
+
+  - type: avoid_bumping_cube
     enabled: false
     scale: -1.0
-# terminal when cube is pushed out of reach of the robot base (no reward penalty)
-  cube_out_of_range_terminal:
-    enabled: true
-    scale: 0.0
-    distance_threshold: 0.40
-# terminal reward for near-perfect grasping position (cube centroid within d of grip zone)
-  grasp_position_terminal:
+    cube_widths: 0.25
+
+  - type: approach_phase_terminal
     enabled: false
     scale: 500.0
-    distance_threshold: 0.0025
+    threshold: 0.90
+
+  - type: grasp_phase_terminal
+    enabled: false
+    scale: 500.0
+    threshold: 0.95
+
+  - type: approach_distance
+    enabled: false
+    scale: 5.0
+    mode: progressive
+
+  - type: approach_alignment
+    enabled: false
+    scale: 1.0
+
+  - type: approach_gripper_pose
+    enabled: false
+    scale: 1.0
+
+  - type: approach_phase
+    enabled: false
+    scale: 1.0
+
+  - type: grasp_phase
+    enabled: false
+    scale: 10.0
+    grip_force_pressure: 20.0
+    grip_force_target: 2.2
+
+  # shaping reward for keeping wrist roll at -90° (ideal for top-down and side grasps)
+  - type: wrist_roll_pose
+    enabled: false
+    scale: 1.0
+    target_rad: -1.5707963267948966  # -90 degrees
+    pressure: 5.0
 
 domain_randomization:
   camera:

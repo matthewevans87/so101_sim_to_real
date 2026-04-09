@@ -30,6 +30,8 @@ from isaaclab.sensors import FrameTransformerCfg
 from isaaclab.sensors.frame_transformer.frame_transformer_cfg import OffsetCfg
 
 
+import types as _types
+
 from so101_rl.configurations.so101_env_params import So101EnvParams
 from so101_rl.env_pipeline import KEY_OBS_DIMS
 
@@ -178,3 +180,20 @@ class So101LiftCubeCfg(DirectRLEnvCfg):
     domain_randomization = _Y.domain_randomization
     observations = _Y.observations
     vision_encoder = _Y.vision_encoder
+
+    def get_reward_cfg(self, type_name: str) -> _types.SimpleNamespace:
+        """Return the first reward list entry with matching ``type`` as a namespace.
+
+        Mirrors :meth:`So101EnvParams.get_reward_cfg` so that metric steps can
+        access reward-type parameters via ``env.cfg.get_reward_cfg(type_name)``.
+        Raises ``KeyError`` if no entry with the given type is found.
+        """
+        for entry in self.rewards:
+            if entry.get("type") == type_name:
+                return _types.SimpleNamespace(
+                    **{k: v for k, v in entry.items() if k != "type"}
+                )
+        raise KeyError(
+            f"No reward list entry with type='{type_name}'. "
+            f"Present types: {[e.get('type') for e in self.rewards]}"
+        )

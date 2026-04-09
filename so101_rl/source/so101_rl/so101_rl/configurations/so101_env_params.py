@@ -392,28 +392,12 @@ class GraspPhaseTerminalRewardCfg(RewardCfg):
     threshold: float
 
 
-@dataclass
-class RewardsCfg:
-    distance: DistanceRewardCfg
-    grip_cube: GripCubeRewardCfg
-    lift_cube: RewardCfg
-    gripper_cube_alignment: RewardCfg
-    close_gripper: CloseGripperRewardCfg
-    action: RewardCfg
-    ee_linear_speed: EeLinearSpeedRewardCfg
-    joint_speed: RewardCfg
-    safety_touch_table: RewardCfg
-    success_lift_fraction_terminal: SuccessLiftFractionRewardCfg
-    safety_touch_table_terminal: RewardCfg
-    approach_distance: RewardCfg
-    approach_alignment: RewardCfg
-    approach_gripper_pose: RewardCfg
-    approach_phase: RewardCfg
-    grasp_phase: GraspPhaseRewardCfg
-    avoid_bumping_cube: AvoidBumpingCubeRewardCfg
-    cube_out_of_range_terminal: CubeOutOfRangeTerminalRewardCfg
-    approach_phase_terminal: ApproachPhaseTerminalRewardCfg
-    grasp_phase_terminal: GraspPhaseTerminalRewardCfg
+@dataclass(kw_only=True)
+class WristRollPoseRewardCfg(RewardCfg):
+    target_rad: float
+    """Target wrist roll joint position in radians. -1.5707963267948966 = -90°."""
+    pressure: float
+    """Exponential pressure: reward = exp(-pressure * |q - target_rad|) * scale."""
 
 
 # ---------------------------------------------------------------------------
@@ -627,11 +611,28 @@ class So101EnvParams:
     debug: DebugCfg
     behavior: BehaviorCfg
     metrics: MetricsCfg
-    rewards: RewardsCfg
+    rewards: list[dict]
     domain_randomization: DomainRandomizationCfg
     sensors: SensorsCfg
     observations: ObservationsCfg
     vision_encoder: VisionEncoderCfg
+
+    def get_reward_cfg(self, type_name: str) -> types.SimpleNamespace:
+        """Return the first reward list entry with matching ``type`` as a namespace.
+
+        Used by metric steps to access reward-type parameters (e.g. thresholds)
+        without requiring the reward step to be enabled.
+        Raises ``KeyError`` if no entry with the given type is found.
+        """
+        for entry in self.rewards:
+            if entry.get("type") == type_name:
+                return types.SimpleNamespace(
+                    **{k: v for k, v in entry.items() if k != "type"}
+                )
+        raise KeyError(
+            f"No reward list entry with type='{type_name}'. "
+            f"Present types: {[e.get('type') for e in self.rewards]}"
+        )
 
     @classmethod
     def load(cls, path: str | Path) -> "So101EnvParams":

@@ -5,7 +5,22 @@ from abc import ABC, abstractmethod
 import torch
 
 from so101_rl.configurations.cube import CUBE_WIDTH
-from so101_rl.configurations.so101_env_params import GateCfg
+from so101_rl.configurations.so101_env_params import (
+    GateCfg,
+    RewardCfg,
+    DistanceRewardCfg,
+    GripCubeRewardCfg,
+    CloseGripperRewardCfg,
+    EeLinearSpeedRewardCfg,
+    SuccessLiftFractionRewardCfg,
+    GraspPhaseRewardCfg,
+    AvoidBumpingCubeRewardCfg,
+    CubeOutOfRangeTerminalRewardCfg,
+    ApproachPhaseTerminalRewardCfg,
+    GraspPhaseTerminalRewardCfg,
+    WristRollPoseRewardCfg,
+    _from_dict,
+)
 from so101_rl.metric_pipeline import StepContext
 
 
@@ -28,8 +43,9 @@ class RewardStep(ABC):
     """Keys from ``env.env_metrics`` (produced by :class:`EnvMetricStep`) that
     this step reads during :meth:`compute`."""
 
-    def __init__(self, gates: list[GateCfg] | None = None) -> None:
-        self._gates: list[GateCfg] = gates if gates is not None else []
+    def __init__(self, cfg: RewardCfg) -> None:
+        self._cfg = cfg
+        self._gates: list[GateCfg] = cfg.gates
 
     def _prev(self, key: str, ctx: StepContext) -> torch.Tensor | None:
         """Return the previous-step value for *key* from ``ctx.prev_metrics``.
@@ -140,13 +156,19 @@ class RewardPipeline:
             env.extras["per_env_log"] = {}
 
         total = torch.zeros(env.num_envs, device=env.device)
+        totals_by_name: dict[str, torch.Tensor] = {}
         for step in self.steps:
             rew = step.compute(ctx)
             if step._gates:
                 rew = rew * self._evaluate_gate_mask(step._gates, ctx).float()
-            env.extras["log"][f"Episode_Reward/{step.name}"] = rew.mean()
-            env.extras["per_env_log"][f"Episode_Reward/{step.name}"] = rew
+            totals_by_name.setdefault(
+                step.name, torch.zeros(env.num_envs, device=env.device)
+            )
+            totals_by_name[step.name] = totals_by_name[step.name] + rew
             total += rew
+        for name, t in totals_by_name.items():
+            env.extras["log"][f"Episode_Reward/{name}"] = t.mean()
+            env.extras["per_env_log"][f"Episode_Reward/{name}"] = t
         return total
 
 
@@ -161,20 +183,19 @@ class DistanceRewardStep(RewardStep):
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
         env = ctx.env
-        if env.cfg.rewards.distance.mode == "progressive":
+        if self._cfg.mode == "progressive":
             prev = self._prev("grip_zone_cube_distance", ctx)
             if prev is None:
                 return torch.zeros(env.num_envs, device=env.device)
             # Improvement = reduction in distance; clamp so regression is not penalized.
             delta = (prev - ctx.metrics["grip_zone_cube_distance"]).clamp(min=0.0)
-            return delta * env.cfg.rewards.distance.scale
+            return delta * self._cfg.scale
         grip_zone_dist = 1 - (
             torch.exp(
-                -env.cfg.rewards.distance.distance_pressure
-                * ctx.metrics["grip_zone_cube_distance"]
+                -self._cfg.distance_pressure * ctx.metrics["grip_zone_cube_distance"]
             )
         )
-        return grip_zone_dist * env.cfg.rewards.distance.scale
+        return grip_zone_dist * self._cfg.scale
 
 
 class GripCubeRewardStep(RewardStep):
@@ -188,7 +209,7 @@ class GripCubeRewardStep(RewardStep):
         return (
             ctx.metrics["is_cube_in_grip_position"]
             * (ctx.metrics["gripper_cube_contact_force_magnitude"] > 0.0)
-            * env.cfg.rewards.grip_cube.scale
+            * self._cfg.scale
         )
 
 
@@ -198,13 +219,13 @@ class LiftCubeRewardStep(RewardStep):
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
         env = ctx.env
-        if env.cfg.rewards.lift_cube.mode == "progressive":
+        if self._cfg.mode == "progressive":
             prev = self._prev("cube_lift_fraction", ctx)
             if prev is None:
                 return torch.zeros(env.num_envs, device=env.device)
             delta = (ctx.metrics["cube_lift_fraction"] - prev).clamp(min=0.0)
-            return delta * env.cfg.rewards.lift_cube.scale
-        return ctx.metrics["cube_lift_fraction"] * env.cfg.rewards.lift_cube.scale
+            return delta * self._cfg.scale
+        return ctx.metrics["cube_lift_fraction"] * self._cfg.scale
 
 
 # ---------------------------------------------------------------------------
@@ -223,7 +244,7 @@ class GripperCubeAlignmentRewardStep(RewardStep):
                 ctx.metrics["is_cube_gripped"],
                 ctx.metrics["gripper_cube_alignment"],
             )
-            * env.cfg.rewards.gripper_cube_alignment.scale
+            * self._cfg.scale
         )
 
 
@@ -234,16 +255,14 @@ class CloseGripperRewardStep(RewardStep):
     def compute(self, ctx: StepContext) -> torch.Tensor:
         env = ctx.env
         gripper_pos = env.joint_pos[:, env._gripper_joint_idx]
-        gripper_close_error = torch.abs(
-            gripper_pos - env.cfg.rewards.close_gripper.close_target
+        gripper_close_error = torch.abs(gripper_pos - self._cfg.close_target)
+        fraction_to_target = 1.0 - (gripper_close_error / self._cfg.max_open).squeeze(
+            -1
         )
-        fraction_to_target = 1.0 - (
-            gripper_close_error / env.cfg.rewards.close_gripper.max_open
-        ).squeeze(-1)
         return (
             ctx.metrics["is_cube_in_grip_position"]
             * fraction_to_target
-            * env.cfg.rewards.close_gripper.scale
+            * self._cfg.scale
         )
 
 
@@ -261,7 +280,7 @@ class ActionRewardStep(RewardStep):
         if env.actions is None:
             return torch.zeros(env.num_envs, device=env.device)
         delta = env.actions - env.prev_actions
-        return env.cfg.rewards.action.scale * torch.sum(torch.abs(delta), dim=-1)
+        return self._cfg.scale * torch.sum(torch.abs(delta), dim=-1)
 
 
 class EELinearSpeedRewardStep(RewardStep):
@@ -272,9 +291,9 @@ class EELinearSpeedRewardStep(RewardStep):
         env = ctx.env
         ee_lin_vel_w = env.robot.data.body_lin_vel_w[:, env._ee_body_idx[0], :]
         speed = torch.linalg.norm(ee_lin_vel_w, dim=-1)
-        v_safe = env.cfg.rewards.ee_linear_speed.safe_speed
+        v_safe = self._cfg.safe_speed
         v_excess = torch.clamp(speed - v_safe, min=0.0)
-        return env.cfg.rewards.ee_linear_speed.scale * (v_excess + v_excess**2)
+        return self._cfg.scale * (v_excess + v_excess**2)
 
 
 class JointSpeedRewardStep(RewardStep):
@@ -284,7 +303,7 @@ class JointSpeedRewardStep(RewardStep):
     def compute(self, ctx: StepContext) -> torch.Tensor:
         env = ctx.env
         joint_speed = torch.abs(env.joint_vel[:, env._dof_idx])
-        return env.cfg.rewards.joint_speed.scale * torch.sum(joint_speed**2, dim=-1)
+        return self._cfg.scale * torch.sum(joint_speed**2, dim=-1)
 
 
 # ---------------------------------------------------------------------------
@@ -301,9 +320,7 @@ class SuccessLiftFractionTerminalRewardStep(TerminalRewardStep):
         flag = ctx.metrics["is_success_lift_fraction_terminal"]
         return torch.where(
             flag >= 1.0,
-            torch.full_like(
-                flag.float(), env.cfg.rewards.success_lift_fraction_terminal.scale
-            ),
+            torch.full_like(flag.float(), self._cfg.scale),
             torch.zeros(env.num_envs, device=env.device),
         )
 
@@ -320,7 +337,7 @@ class SafetyTouchTableTerminalRewardStep(TerminalRewardStep):
         return torch.where(
             ctx.metrics["is_table_touched"],
             torch.tensor(
-                env.cfg.rewards.safety_touch_table_terminal.scale,
+                self._cfg.scale,
                 device=env.device,
                 dtype=torch.float32,
             ),
@@ -340,7 +357,7 @@ class SafetyTouchTableRewardStep(RewardStep):
         return torch.where(
             ctx.metrics["is_table_touched"],
             torch.tensor(
-                env.cfg.rewards.safety_touch_table.scale,
+                self._cfg.scale,
                 device=env.device,
                 dtype=torch.float32,
             ),
@@ -354,10 +371,7 @@ class CubeOutOfRangeTerminalRewardStep(TerminalRewardStep):
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
         env = ctx.env
-        return (
-            ctx.metrics["is_cube_out_of_range"].float()
-            * env.cfg.rewards.cube_out_of_range_terminal.scale
-        )
+        return ctx.metrics["is_cube_out_of_range"].float() * self._cfg.scale
 
     def done(self, ctx: StepContext) -> torch.Tensor:
         return ctx.metrics["is_cube_out_of_range"]
@@ -370,7 +384,7 @@ class ApproachPhaseTerminalRewardStep(TerminalRewardStep):
     def compute(self, ctx: StepContext) -> torch.Tensor:
         env = ctx.env
         flag = ctx.metrics["approach_phase_terminal"]
-        return flag.float() * env.cfg.rewards.approach_phase_terminal.scale
+        return flag.float() * self._cfg.scale
 
     def done(self, ctx: StepContext) -> torch.Tensor:
         flag = ctx.metrics["approach_phase_terminal"]
@@ -386,7 +400,7 @@ class GraspPhaseTerminalRewardStep(TerminalRewardStep):
         flag = torch.logical_and(
             ctx.metrics["approach_phase_terminal"], ctx.metrics["grasp_phase_terminal"]
         )
-        return flag.float() * env.cfg.rewards.grasp_phase_terminal.scale
+        return flag.float() * self._cfg.scale
 
     def done(self, ctx: StepContext) -> torch.Tensor:
         flag = torch.logical_and(
@@ -407,15 +421,13 @@ class ApproachDistanceRewardStep(RewardStep):
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
         env = ctx.env
-        if env.cfg.rewards.approach_distance.mode == "progressive":
+        if self._cfg.mode == "progressive":
             prev = self._prev("approach_distance", ctx)
             if prev is None:
                 return torch.zeros(env.num_envs, device=env.device)
             delta = (ctx.metrics["approach_distance"] - prev).clamp(min=0.0)
-            return delta * env.cfg.rewards.approach_distance.scale
-        return (
-            ctx.metrics["approach_distance"] * env.cfg.rewards.approach_distance.scale
-        )
+            return delta * self._cfg.scale
+        return ctx.metrics["approach_distance"] * self._cfg.scale
 
 
 class ApproachAlignmentRewardStep(RewardStep):
@@ -424,15 +436,13 @@ class ApproachAlignmentRewardStep(RewardStep):
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
         env = ctx.env
-        if env.cfg.rewards.approach_alignment.mode == "progressive":
+        if self._cfg.mode == "progressive":
             prev = self._prev("approach_alignment", ctx)
             if prev is None:
                 return torch.zeros(env.num_envs, device=env.device)
             delta = (ctx.metrics["approach_alignment"] - prev).clamp(min=0.0)
-            return delta * env.cfg.rewards.approach_alignment.scale
-        return (
-            ctx.metrics["approach_alignment"] * env.cfg.rewards.approach_alignment.scale
-        )
+            return delta * self._cfg.scale
+        return ctx.metrics["approach_alignment"] * self._cfg.scale
 
 
 class ApproachGripperPoseRewardStep(RewardStep):
@@ -441,16 +451,13 @@ class ApproachGripperPoseRewardStep(RewardStep):
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
         env = ctx.env
-        if env.cfg.rewards.approach_gripper_pose.mode == "progressive":
+        if self._cfg.mode == "progressive":
             prev = self._prev("approach_gripper_pose", ctx)
             if prev is None:
                 return torch.zeros(env.num_envs, device=env.device)
             delta = (ctx.metrics["approach_gripper_pose"] - prev).clamp(min=0.0)
-            return delta * env.cfg.rewards.approach_gripper_pose.scale
-        return (
-            ctx.metrics["approach_gripper_pose"]
-            * env.cfg.rewards.approach_gripper_pose.scale
-        )
+            return delta * self._cfg.scale
+        return ctx.metrics["approach_gripper_pose"] * self._cfg.scale
 
 
 class ApproachPhaseRewardStep(RewardStep):
@@ -459,13 +466,13 @@ class ApproachPhaseRewardStep(RewardStep):
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
         env = ctx.env
-        if env.cfg.rewards.approach_phase.mode == "progressive":
+        if self._cfg.mode == "progressive":
             prev = self._prev("approach_phase", ctx)
             if prev is None:
                 return torch.zeros(env.num_envs, device=env.device)
             delta = (ctx.metrics["approach_phase"] - prev).clamp(min=0.0)
-            return delta * env.cfg.rewards.approach_phase.scale
-        return ctx.metrics["approach_phase"] * env.cfg.rewards.approach_phase.scale
+            return delta * self._cfg.scale
+        return ctx.metrics["approach_phase"] * self._cfg.scale
 
 
 class AvoidBumpingCubeRewardStep(RewardStep):
@@ -482,12 +489,12 @@ class AvoidBumpingCubeRewardStep(RewardStep):
         # so the proximity threshold tracks the actual cube size this episode.
         cube_width = ctx.env_metrics["dr_cube_scale"][:, 0] * CUBE_WIDTH
         cube_near_gz = ctx.metrics["grip_zone_cube_distance"] < (
-            env.cfg.rewards.avoid_bumping_cube.cube_widths * cube_width
+            self._cfg.cube_widths * cube_width
         )
         return torch.where(
             (force_mag > 0.0) & ~cube_near_gz,
             torch.tensor(
-                env.cfg.rewards.avoid_bumping_cube.scale,
+                self._cfg.scale,
                 device=env.device,
                 dtype=torch.float32,
             ),
@@ -507,7 +514,7 @@ class GraspPhaseRewardStep(RewardStep):
     def compute(self, ctx: StepContext) -> torch.Tensor:
         env = ctx.env
         grasp_phase = ctx.metrics["grasp_phase"]
-        if env.cfg.rewards.grasp_phase.mode == "progressive":
+        if self._cfg.mode == "progressive":
             prev = self._prev("grasp_phase", ctx)
             if prev is None:
                 return torch.zeros(env.num_envs, device=env.device)
@@ -515,88 +522,100 @@ class GraspPhaseRewardStep(RewardStep):
         return (
             ctx.metrics["approach_phase_terminal"].float()
             * grasp_phase
-            * env.cfg.rewards.grasp_phase.scale
+            * self._cfg.scale
         )
+
+
+# ---------------------------------------------------------------------------
+# Reward: Wrist roll pose
+# ---------------------------------------------------------------------------
+
+
+class WristRollPoseRewardStep(RewardStep):
+    """Rewards keeping the wrist roll joint at a target angle.
+
+    Uses an exponential kernel: ``exp(-pressure * |q - target_rad|) * scale``.
+    At the target the reward equals ``scale``; it decays sharply away from it.
+    The ideal value for both top-down and side grasps is -90° (≈ -1.5708 rad).
+    """
+
+    name = "rew_wrist_roll_pose"
+    requires_metrics = frozenset()
+
+    def compute(self, ctx: StepContext) -> torch.Tensor:
+        env = ctx.env
+        q = env.joint_pos[:, env._wrist_roll_joint_idx].squeeze(-1)
+        error = torch.abs(q - self._cfg.target_rad)
+        return torch.exp(-self._cfg.pressure * error) * self._cfg.scale
 
 
 # ---------------------------------------------------------------------------
 # Factory helper
 # ---------------------------------------------------------------------------
 
+REWARD_STEP_REGISTRY: dict[str, tuple[type[RewardStep], type[RewardCfg]]] = {
+    "distance": (DistanceRewardStep, DistanceRewardCfg),
+    "grip_cube": (GripCubeRewardStep, GripCubeRewardCfg),
+    "lift_cube": (LiftCubeRewardStep, RewardCfg),
+    "gripper_cube_alignment": (GripperCubeAlignmentRewardStep, RewardCfg),
+    "close_gripper": (CloseGripperRewardStep, CloseGripperRewardCfg),
+    "action": (ActionRewardStep, RewardCfg),
+    "ee_linear_speed": (EELinearSpeedRewardStep, EeLinearSpeedRewardCfg),
+    "joint_speed": (JointSpeedRewardStep, RewardCfg),
+    "success_lift_fraction_terminal": (
+        SuccessLiftFractionTerminalRewardStep,
+        SuccessLiftFractionRewardCfg,
+    ),
+    "safety_touch_table_terminal": (SafetyTouchTableTerminalRewardStep, RewardCfg),
+    "safety_touch_table": (SafetyTouchTableRewardStep, RewardCfg),
+    "cube_out_of_range_terminal": (
+        CubeOutOfRangeTerminalRewardStep,
+        CubeOutOfRangeTerminalRewardCfg,
+    ),
+    "approach_phase_terminal": (
+        ApproachPhaseTerminalRewardStep,
+        ApproachPhaseTerminalRewardCfg,
+    ),
+    "grasp_phase_terminal": (GraspPhaseTerminalRewardStep, GraspPhaseTerminalRewardCfg),
+    "approach_distance": (ApproachDistanceRewardStep, RewardCfg),
+    "approach_alignment": (ApproachAlignmentRewardStep, RewardCfg),
+    "approach_gripper_pose": (ApproachGripperPoseRewardStep, RewardCfg),
+    "approach_phase": (ApproachPhaseRewardStep, RewardCfg),
+    "avoid_bumping_cube": (AvoidBumpingCubeRewardStep, AvoidBumpingCubeRewardCfg),
+    "grasp_phase": (GraspPhaseRewardStep, GraspPhaseRewardCfg),
+    "wrist_roll_pose": (WristRollPoseRewardStep, WristRollPoseRewardCfg),
+}
+
 
 def build_reward_pipeline(cfg) -> RewardPipeline:
-    """Construct the reward pipeline, including only enabled steps.
+    """Construct the reward pipeline from ``cfg.rewards``.
+
+    ``cfg.rewards`` is an ordered list of dicts, each with a ``type`` key plus
+    any reward-specific parameters.  The same type may appear multiple times
+    with different params or gates.  Disabled entries (``enabled: false``) are
+    skipped entirely — their parameters are not validated.
 
     Args:
         cfg: The ``So101LiftCubeCfg`` instance (``env.cfg``).
     """
-    r = cfg.rewards
     steps: list[RewardStep] = []
-
-    # Primary
-    if r.distance.enabled:
-        steps.append(DistanceRewardStep(gates=r.distance.gates))
-    if r.grip_cube.enabled:
-        steps.append(GripCubeRewardStep(gates=r.grip_cube.gates))
-    if r.lift_cube.enabled:
-        steps.append(LiftCubeRewardStep(gates=r.lift_cube.gates))
-
-    # Shaping
-    if r.gripper_cube_alignment.enabled:
-        steps.append(
-            GripperCubeAlignmentRewardStep(gates=r.gripper_cube_alignment.gates)
-        )
-    if r.close_gripper.enabled:
-        steps.append(CloseGripperRewardStep(gates=r.close_gripper.gates))
-
-    # Smoothing
-    if r.action.enabled:
-        steps.append(ActionRewardStep(gates=r.action.gates))
-    if r.ee_linear_speed.enabled:
-        steps.append(EELinearSpeedRewardStep(gates=r.ee_linear_speed.gates))
-    if r.joint_speed.enabled:
-        steps.append(JointSpeedRewardStep(gates=r.joint_speed.gates))
-
-    # Terminal
-    if r.success_lift_fraction_terminal.enabled:
-        steps.append(
-            SuccessLiftFractionTerminalRewardStep(
-                gates=r.success_lift_fraction_terminal.gates
+    for entry in cfg.rewards:
+        type_name = entry.get("type")
+        if type_name is None:
+            raise ValueError(
+                f"Reward list entry missing required 'type' key: {entry!r}"
             )
-        )
-    if r.safety_touch_table_terminal.enabled:
-        steps.append(
-            SafetyTouchTableTerminalRewardStep(
-                gates=r.safety_touch_table_terminal.gates
+        params = {k: v for k, v in entry.items() if k != "type"}
+        if not params.get("enabled", True):
+            continue
+        if type_name not in REWARD_STEP_REGISTRY:
+            raise ValueError(
+                f"Unknown reward type '{type_name}'. "
+                f"Known types: {sorted(REWARD_STEP_REGISTRY)}"
             )
-        )
-    if r.safety_touch_table.enabled:
-        steps.append(SafetyTouchTableRewardStep(gates=r.safety_touch_table.gates))
-    if r.cube_out_of_range_terminal.enabled:
-        steps.append(
-            CubeOutOfRangeTerminalRewardStep(gates=r.cube_out_of_range_terminal.gates)
-        )
-    if r.approach_phase_terminal.enabled:
-        steps.append(
-            ApproachPhaseTerminalRewardStep(gates=r.approach_phase_terminal.gates)
-        )
-    if r.grasp_phase_terminal.enabled:
-        steps.append(GraspPhaseTerminalRewardStep(gates=r.grasp_phase_terminal.gates))
-
-    # Phase-specific
-    if r.approach_distance.enabled:
-        steps.append(ApproachDistanceRewardStep(gates=r.approach_distance.gates))
-    if r.approach_alignment.enabled:
-        steps.append(ApproachAlignmentRewardStep(gates=r.approach_alignment.gates))
-    if r.approach_gripper_pose.enabled:
-        steps.append(ApproachGripperPoseRewardStep(gates=r.approach_gripper_pose.gates))
-    if r.approach_phase.enabled:
-        steps.append(ApproachPhaseRewardStep(gates=r.approach_phase.gates))
-    if r.avoid_bumping_cube.enabled:
-        steps.append(AvoidBumpingCubeRewardStep(gates=r.avoid_bumping_cube.gates))
-    if r.grasp_phase.enabled:
-        steps.append(GraspPhaseRewardStep(gates=r.grasp_phase.gates))
-
+        step_cls, cfg_cls = REWARD_STEP_REGISTRY[type_name]
+        instance_cfg = _from_dict(cfg_cls, params)
+        steps.append(step_cls(cfg=instance_cfg))
     return RewardPipeline(steps)
 
 

@@ -310,7 +310,7 @@ class CubeLiftFractionMetricStep(MetricStep):
         env = ctx.env
         val = (
             ctx.metrics["cube_height_w"]
-            / env.cfg.rewards.success_lift_fraction_terminal.height_threshold
+            / env.cfg.get_reward_cfg("success_lift_fraction_terminal").height_threshold
         )
         assert_tensor(val, (env.num_envs,), torch.float32)
         ctx.metrics["cube_lift_fraction"] = val
@@ -336,7 +336,7 @@ class IsCubeInGripPositionMetricStep(MetricStep):
         env = ctx.env
         val = (
             ctx.metrics["grip_zone_cube_distance"]
-            < env.cfg.rewards.grip_cube.distance_threshold
+            < env.cfg.get_reward_cfg("grip_cube").distance_threshold
         ).bool()
         assert_tensor(val, (env.num_envs,), torch.bool)
         ctx.metrics["is_cube_in_grip_position"] = val
@@ -355,7 +355,7 @@ class IsCubeGrippedMetricStep(MetricStep):
             ctx.metrics["is_cube_in_grip_position"]
             & (
                 ctx.metrics["gripper_cube_contact_force_magnitude"]
-                > env.cfg.rewards.grip_cube.touch_force_threshold
+                > env.cfg.get_reward_cfg("grip_cube").touch_force_threshold
             )
         ).bool()
         assert_tensor(val, (env.num_envs,), torch.bool)
@@ -384,7 +384,7 @@ class IsCubeOutOfRangeMetricStep(MetricStep):
         env = ctx.env
         val = (
             ctx.metrics["cube_distance_from_base"]
-            > env.cfg.rewards.cube_out_of_range_terminal.distance_threshold
+            > env.cfg.get_reward_cfg("cube_out_of_range_terminal").distance_threshold
         ).bool()
         assert_tensor(val, (env.num_envs,), torch.bool)
         ctx.metrics["is_cube_out_of_range"] = val
@@ -457,11 +457,12 @@ class GraspPhaseMetricStep(MetricStep):
 
     def compute(self, ctx: StepContext) -> None:
         env = ctx.env
+        _grasp_cfg = env.cfg.get_reward_cfg("grasp_phase")
         grasp_phase = torch.exp(
-            -env.cfg.rewards.grasp_phase.grip_force_pressure
+            -_grasp_cfg.grip_force_pressure
             * torch.abs(
                 ctx.metrics["gripper_cube_contact_force_magnitude"]
-                - env.cfg.rewards.grasp_phase.grip_force_target
+                - _grasp_cfg.grip_force_target
             )
         )
 
@@ -477,7 +478,7 @@ class ApproachPhaseTerminalMetricStep(MetricStep):
         env = ctx.env
         approach_phase_terminal = (
             ctx.metrics["approach_phase"]
-            > env.cfg.rewards.approach_phase_terminal.threshold
+            > env.cfg.get_reward_cfg("approach_phase_terminal").threshold
         )
 
         assert_tensor(approach_phase_terminal, (env.num_envs,), torch.bool)
@@ -492,7 +493,8 @@ class GraspPhaseTerminalMetricStep(MetricStep):
         env = ctx.env
         grasp_phase_terminal = torch.logical_and(
             ctx.metrics["approach_phase_terminal"],
-            ctx.metrics["grasp_phase"] > env.cfg.rewards.grasp_phase_terminal.threshold,
+            ctx.metrics["grasp_phase"]
+            > env.cfg.get_reward_cfg("grasp_phase_terminal").threshold,
         )
 
         assert_tensor(grasp_phase_terminal, (env.num_envs,), torch.bool)
