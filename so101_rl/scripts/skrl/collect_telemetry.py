@@ -481,12 +481,16 @@ def _flush_shard(
         shard_path,
         rgb=np.stack(buffer["rgb"], axis=0).astype(np.uint8, copy=False),
         joint_pos=np.stack(buffer["joint_pos"], axis=0).astype(np.float32, copy=False),
-        is_cube_in_grip_position=np.asarray(
-            buffer["is_cube_in_grip_position"], dtype=np.bool_
+        cube_pos_gz=np.stack(buffer["cube_pos_gz"], axis=0).astype(
+            np.float32, copy=False
         ),
-        cube_quat_gripzone_wxyz=np.stack(
-            buffer["cube_quat_gripzone_wxyz"], axis=0
-        ).astype(np.float32, copy=False),
+        gripper_cube_alignment=np.asarray(
+            buffer["gripper_cube_alignment"], dtype=np.float32
+        ),
+        cube_rot6d_gz=np.stack(buffer["cube_rot6d_gz"], axis=0).astype(
+            np.float32, copy=False
+        ),
+        cube_height_w=np.asarray(buffer["cube_height_w"], dtype=np.float32),
         cube_in_camera_frame=np.asarray(buffer["cube_in_camera_frame"], dtype=np.bool_),
         env_id=np.asarray(buffer["env_id"], dtype=np.int32),
         episode_id=np.asarray(buffer["episode_id"], dtype=np.int32),
@@ -630,8 +634,10 @@ def main(
     buffer: dict[str, list] = {
         "rgb": [],
         "joint_pos": [],
-        "is_cube_in_grip_position": [],
-        "cube_quat_gripzone_wxyz": [],
+        "cube_pos_gz": [],
+        "gripper_cube_alignment": [],
+        "cube_rot6d_gz": [],
+        "cube_height_w": [],
         "cube_in_camera_frame": [],
         "env_id": [],
         "episode_id": [],
@@ -698,10 +704,18 @@ def main(
                 )
             if not hasattr(env.unwrapped, "step_metrics"):
                 raise RuntimeError("Environment does not expose step_metrics.")
-            if "is_cube_in_grip_position" not in env.unwrapped.step_metrics:
-                raise RuntimeError(
-                    "step_metrics is missing required key 'is_cube_in_grip_position'."
-                )
+            for _required_key in (
+                "cube_pos_gz",
+                "gripper_cube_alignment",
+                "cube_rot6d_gz",
+                "cube_height_w",
+            ):
+                if _required_key not in env.unwrapped.step_metrics:
+                    raise RuntimeError(
+                        f"step_metrics is missing required key {_required_key!r}. "
+                        "Ensure the env config includes this key in critic_obs_metrics "
+                        "or telemetry_metrics."
+                    )
             _startup_validated = True
 
         # Only pay the cost of camera tensor reads on steps where at least one env
@@ -719,12 +733,10 @@ def main(
             tiled_seg_info = _get_tiled_segmentation_info(gripper_cam.data.info)
 
             joint_pos_batch = env.unwrapped.joint_pos[:, env.unwrapped._dof_idx]
-            is_cube_in_grip_batch = env.unwrapped.step_metrics[
-                "is_cube_in_grip_position"
-            ]
-            cube_quat_batch = quat_unique(
-                env.unwrapped.grip_zone_tf.data.target_quat_source[:, 0, :]
-            )
+            cube_pos_gz_batch = env.unwrapped.step_metrics["cube_pos_gz"]
+            gripper_cube_alignment_batch = env.unwrapped.step_metrics["gripper_cube_alignment"]
+            cube_rot6d_gz_batch = env.unwrapped.step_metrics["cube_rot6d_gz"]
+            cube_height_w_batch = env.unwrapped.step_metrics["cube_height_w"]
 
             for env_idx in sampling_envs:
                 if env_idx not in cube_targets_by_env:
@@ -746,11 +758,17 @@ def main(
                 buffer["joint_pos"].append(
                     _to_numpy(joint_pos_batch[env_idx], dtype=np.float32)
                 )
-                buffer["is_cube_in_grip_position"].append(
-                    bool(_to_numpy(is_cube_in_grip_batch[env_idx], dtype=np.bool_))
+                buffer["cube_pos_gz"].append(
+                    _to_numpy(cube_pos_gz_batch[env_idx], dtype=np.float32)
                 )
-                buffer["cube_quat_gripzone_wxyz"].append(
-                    _to_numpy(cube_quat_batch[env_idx], dtype=np.float32)
+                buffer["gripper_cube_alignment"].append(
+                    float(gripper_cube_alignment_batch[env_idx].item())
+                )
+                buffer["cube_rot6d_gz"].append(
+                    _to_numpy(cube_rot6d_gz_batch[env_idx], dtype=np.float32)
+                )
+                buffer["cube_height_w"].append(
+                    float(cube_height_w_batch[env_idx].item())
                 )
                 buffer["cube_in_camera_frame"].append(bool(cube_in_frame))
                 buffer["env_id"].append(env_idx)
@@ -825,8 +843,10 @@ def main(
         "schema": {
             "rgb": "uint8 [S, H, W, 3]",
             "joint_pos": "float32 [S, num_active_joints]",
-            "is_cube_in_grip_position": "bool [S]",
-            "cube_quat_gripzone_wxyz": "float32 [S, 4]",
+            "cube_pos_gz": "float32 [S, 3]",
+            "gripper_cube_alignment": "float32 [S]",
+            "cube_rot6d_gz": "float32 [S, 6]",
+            "cube_height_w": "float32 [S]",
             "cube_in_camera_frame": "bool [S]",
             "env_id": "int32 [S]",
             "episode_id": "int32 [S]",

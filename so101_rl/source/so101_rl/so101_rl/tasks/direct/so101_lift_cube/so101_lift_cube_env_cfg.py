@@ -187,7 +187,17 @@ class So101LiftCubeCfg(DirectRLEnvCfg):
         Mirrors :meth:`So101EnvParams.get_reward_cfg` so that metric steps can
         access reward-type parameters via ``env.cfg.get_reward_cfg(type_name)``.
         Raises ``KeyError`` if no entry with the given type is found.
+        Supports both the new list format and the old named-map format for
+        backward compatibility with saved experiment configs.
         """
+        if isinstance(self.rewards, dict):
+            # Old named-map format.
+            if type_name in self.rewards:
+                return _types.SimpleNamespace(**self.rewards[type_name])
+            raise KeyError(
+                f"No reward entry with type='{type_name}'. "
+                f"Present types: {sorted(self.rewards)}"
+            )
         for entry in self.rewards:
             if entry.get("type") == type_name:
                 return _types.SimpleNamespace(

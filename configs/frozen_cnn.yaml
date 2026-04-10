@@ -3,7 +3,7 @@ episode_length_s: 7.0
 sim:
   dt: 0.008333333333333333
 scene:
-  num_envs: 256
+  num_envs: 128
   env_spacing: 2.0
   replicate_physics: true
 
@@ -93,7 +93,7 @@ metrics:
   approach_phase:
     distance_pressure: 20.0
     alignment_pressure: 1.0
-    gripper_pos_pressure: 1.0
+    gripper_pos_pressure: 0.0  # disabled: gripper state is for grasp phase, not approach
     gripper_pos_target: 0.8753292519943295
 
 rewards:
@@ -119,8 +119,12 @@ rewards:
     scale: 1.0
 
   - type: approach_phase
-    enabled: false
-    scale: 1.0
+    enabled: true
+    scale: 2.0
+  - type: approach_phase
+    enabled: true
+    scale: 3.0
+    mode: progressive
 
   - type: grasp_phase
     enabled: false
@@ -290,6 +294,8 @@ observations:
     - cube_height_w
     - gripper_cube_contact_force_magnitude
     - is_table_touched
+  telemetry_metrics:
+    - gripper_cube_alignment
 
 vision_encoder:
   # 'frozen_resnet18' — frozen pretrained ResNet18 + SpatialSoftmax (1024-D)

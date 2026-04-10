@@ -560,8 +560,9 @@ class PipelineOrchestrator:
             cmd += ["--samples-per-shard", str(collect["shard_size"])]
         if cfg.get("headless") and not self.force_display:
             cmd += ["--headless"]
-        if cfg.get("envs"):
-            cmd += ["--num_envs", str(cfg["envs"])]
+        envs = collect.get("envs") or cfg.get("envs")
+        if envs:
+            cmd += ["--num_envs", str(envs)]
         return cmd
 
     def _build_curate_cmd(self, input_dir: Path, output_dir: Path) -> List[str]:
@@ -654,8 +655,7 @@ class PipelineOrchestrator:
 
     # ── dry run ───────────────────────────────────────────────────────────────
     def _dry_run(self, steps_to_run: List[str]) -> None:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        preview_dir = self.project_root / "artifacts" / f"pipeline_{timestamp}"
+        preview_dir = self.pipeline_dir
         _header(f"DRY RUN — {len(steps_to_run)} step(s)")
         print(f"    Pipeline dir (preview): {preview_dir}")
         print()

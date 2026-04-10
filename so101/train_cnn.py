@@ -87,18 +87,34 @@ def _validate_config(cfg: dict) -> None:
     heads = cfg.get("heads")
     if heads is None:
         raise ValueError("cfg.heads section is required")
-    _require(heads, "grip_position", "orientation", "visibility", section="heads")
+    _require(
+        heads,
+        "cube_pos_gz",
+        "gripper_cube_alignment",
+        "cube_rot6d_gz",
+        "cube_height_w",
+        "cube_in_camera_frame",
+        section="heads",
+    )
 
     loss = cfg.get("loss")
     if loss is None:
         raise ValueError("cfg.loss section is required")
     _require(
         loss,
-        "weight_grip_position",
-        "weight_orientation",
-        "weight_visibility",
+        "weight_cube_pos_gz",
+        "weight_gripper_cube_alignment",
+        "weight_cube_rot6d_gz",
+        "weight_cube_height_w",
+        "weight_cube_in_camera_frame",
+        "huber_delta",
         section="loss",
     )
+
+    norm_section = cfg.get("normalization")
+    if norm_section is None:
+        raise ValueError("cfg.normalization section is required")
+    _require(norm_section, "pos_norm_scale", "height_norm_scale", section="normalization")
 
     train_cfg = cfg.get("training")
     if train_cfg is None:
@@ -197,14 +213,18 @@ def _run_epoch(
 
     accum_losses: dict[str, float] = {
         "total": 0.0,
-        "grip_position": 0.0,
-        "orientation": 0.0,
-        "visibility": 0.0,
+        "cube_pos_gz": 0.0,
+        "gripper_cube_alignment": 0.0,
+        "cube_rot6d_gz": 0.0,
+        "cube_height_w": 0.0,
+        "cube_in_camera_frame": 0.0,
     }
     accum_metrics: dict[str, float] = {
-        "grip_position_acc": 0.0,
-        "visibility_acc": 0.0,
-        "orientation_mse": 0.0,
+        "cube_pos_gz_mae": 0.0,
+        "gripper_cube_alignment_mae": 0.0,
+        "cube_rot6d_gz_mse": 0.0,
+        "cube_height_w_mae": 0.0,
+        "cube_in_camera_frame_acc": 0.0,
     }
     n_batches = 0
 
@@ -227,16 +247,26 @@ def _run_epoch(
                         "train/loss_total", losses["total"].item(), global_step
                     )
                     writer.add_scalar(
-                        "train/loss_grip", losses["grip_position"].item(), global_step
+                        "train/loss_cube_pos_gz", losses["cube_pos_gz"].item(), global_step
                     )
                     writer.add_scalar(
-                        "train/loss_orientation",
-                        losses["orientation"].item(),
+                        "train/loss_gripper_cube_alignment",
+                        losses["gripper_cube_alignment"].item(),
                         global_step,
                     )
                     writer.add_scalar(
-                        "train/loss_visibility",
-                        losses["visibility"].item(),
+                        "train/loss_cube_rot6d_gz",
+                        losses["cube_rot6d_gz"].item(),
+                        global_step,
+                    )
+                    writer.add_scalar(
+                        "train/loss_cube_height_w",
+                        losses["cube_height_w"].item(),
+                        global_step,
+                    )
+                    writer.add_scalar(
+                        "train/loss_cube_in_camera_frame",
+                        losses["cube_in_camera_frame"].item(),
                         global_step,
                     )
                 global_step += 1
@@ -335,6 +365,10 @@ def main() -> None:
     image_mean = norm_cfg["mean"] if norm_cfg else None
     image_std = norm_cfg["std"] if norm_cfg else None
 
+    target_norm_cfg = cfg["normalization"]
+    pos_norm_scale = float(target_norm_cfg["pos_norm_scale"])
+    height_norm_scale = float(target_norm_cfg["height_norm_scale"])
+
     # ── Datasets ──
     train_manifest = curated_dir / "train_manifest.json"
     val_manifest = curated_dir / "val_manifest.json"
@@ -353,8 +387,16 @@ def main() -> None:
         image_mean=image_mean,
         image_std=image_std,
         max_cached_shards=max_cached_shards,
+        pos_norm_scale=pos_norm_scale,
+        height_norm_scale=height_norm_scale,
     )
-    val_ds = TelemetryDataset(val_manifest, image_mean=image_mean, image_std=image_std)
+    val_ds = TelemetryDataset(
+        val_manifest,
+        image_mean=image_mean,
+        image_std=image_std,
+        pos_norm_scale=pos_norm_scale,
+        height_norm_scale=height_norm_scale,
+    )
     print(f"[train-cnn] Dataset sizes — train: {len(train_ds)}, val: {len(val_ds)}")
 
     # Reproducible DataLoader workers.
@@ -479,9 +521,11 @@ def main() -> None:
         print(
             f"[train-cnn] Epoch {epoch:4d}/{num_epochs} {marker} "
             f"val_loss={val_metrics.get('loss_total', 0):.4f}  "
-            f"grip_acc={val_metrics.get('grip_position_acc', 0):.3f}  "
-            f"vis_acc={val_metrics.get('visibility_acc', 0):.3f}  "
-            f"ori_mse={val_metrics.get('orientation_mse', 0):.4f}  "
+            f"pos_mae={val_metrics.get('cube_pos_gz_mae', 0):.4f}  "
+            f"align_mae={val_metrics.get('gripper_cube_alignment_mae', 0):.4f}  "
+            f"rot_mse={val_metrics.get('cube_rot6d_gz_mse', 0):.4f}  "
+            f"ht_mae={val_metrics.get('cube_height_w_mae', 0):.4f}  "
+            f"vis_acc={val_metrics.get('cube_in_camera_frame_acc', 0):.3f}  "
             f"{elapsed:.1f}s"
         )
 

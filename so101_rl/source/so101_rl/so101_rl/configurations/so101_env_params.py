@@ -562,6 +562,11 @@ class SensorsCfg:
 @dataclass
 class ObservationsCfg:
     critic_obs_metrics: list[str]
+    telemetry_metrics: list[str] = field(default_factory=list)
+    """Extra metric keys to include in the metric pipeline for telemetry collection.
+    Unlike critic_obs_metrics, these do not become part of the critic observation
+    vector — they are computed and exposed via step_metrics but not fed to the model.
+    Adding keys here does not change the observation space or invalidate checkpoints."""
 
 
 @dataclass
@@ -623,7 +628,18 @@ class So101EnvParams:
         Used by metric steps to access reward-type parameters (e.g. thresholds)
         without requiring the reward step to be enabled.
         Raises ``KeyError`` if no entry with the given type is found.
+        Supports both the new list format (``[{type: ..., ...}]``) and the old
+        named-map format (``{type_name: {...}}``) for backward compatibility with
+        saved experiment configs.
         """
+        if isinstance(self.rewards, dict):
+            # Old named-map format.
+            if type_name in self.rewards:
+                return types.SimpleNamespace(**self.rewards[type_name])
+            raise KeyError(
+                f"No reward entry with type='{type_name}'. "
+                f"Present types: {sorted(self.rewards)}"
+            )
         for entry in self.rewards:
             if entry.get("type") == type_name:
                 return types.SimpleNamespace(

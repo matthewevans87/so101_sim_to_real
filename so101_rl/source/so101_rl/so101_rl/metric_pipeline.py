@@ -450,6 +450,11 @@ class ApproachPhaseMetricStep(MetricStep):
         assert_tensor(approach_phase, (env.num_envs,), torch.float32)
         ctx.metrics["approach_phase"] = approach_phase
 
+        # Diagnostic sub-factors — logged automatically to Step_Metrics/ in TensorBoard
+        ctx.metrics["_dbg_approach_dist_exp"] = phase_dist_exp
+        ctx.metrics["_dbg_approach_align_exp"] = phase_align_exp
+        ctx.metrics["_dbg_approach_gripper_exp"] = phase_gripper_exp
+
 
 class GraspPhaseMetricStep(MetricStep):
     produces = frozenset({"grasp_phase"})

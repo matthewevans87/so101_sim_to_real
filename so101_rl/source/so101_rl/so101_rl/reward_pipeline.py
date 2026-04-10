@@ -599,7 +599,11 @@ def build_reward_pipeline(cfg) -> RewardPipeline:
         cfg: The ``So101LiftCubeCfg`` instance (``env.cfg``).
     """
     steps: list[RewardStep] = []
-    for entry in cfg.rewards:
+    rewards = cfg.rewards
+    # Migrate old named-map format (saved configs from before the list refactor).
+    if isinstance(rewards, dict):
+        rewards = [{"type": k, **v} for k, v in rewards.items()]
+    for entry in rewards:
         type_name = entry.get("type")
         if type_name is None:
             raise ValueError(

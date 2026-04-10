@@ -184,6 +184,8 @@ class So101LiftCube(DirectRLEnv):
                 {
                     # consumed by _get_observations (critic features)
                     *self.cfg.observations.critic_obs_metrics,
+                    # always computed for telemetry collection (does not affect obs space)
+                    *self.cfg.observations.telemetry_metrics,
                 }
             ),
             env_metric_pipeline=self.env_metric_pipeline,

@@ -4,21 +4,27 @@ Loss composition
 ----------------
 .. math::
 
-    L = w_{\\text{grip}} \\cdot L_{\\text{grip}}
-      + w_{\\text{ori}}  \\cdot L_{\\text{ori}}
-      + w_{\\text{vis}}  \\cdot L_{\\text{vis}}
+    L = w_{\\text{pos}}   \\cdot L_{\\text{pos}}
+      + w_{\\text{align}} \\cdot L_{\\text{align}}
+      + w_{\\text{rot}}   \\cdot L_{\\text{rot}}
+      + w_{\\text{ht}}    \\cdot L_{\\text{ht}}
+      + w_{\\text{vis}}   \\cdot L_{\\text{vis}}
 
 where:
 
-- :math:`L_{\\text{grip}}` — binary cross-entropy with logits against the
-  ``is_cube_in_grip_position`` target (float 0 or 1).
-- :math:`L_{\\text{ori}}`  — MSE between the L2-normalised predicted
-  quaternion and the unit-quaternion target ``cube_quat_gripzone_wxyz``.
-  Normalisation is controlled by ``loss_cfg["orientation_normalization"]``.
-- :math:`L_{\\text{vis}}`  — binary cross-entropy with logits against the
+- :math:`L_{\\text{pos}}`   — Huber loss between predicted and target
+  ``cube_pos_gz`` (normalised 3-D position in grip-zone frame).
+- :math:`L_{\\text{align}}` — MSE between predicted and target
+  ``gripper_cube_alignment`` scalar in ``[-1, 1]``.
+- :math:`L_{\\text{rot}}`   — MSE between predicted and target
+  ``cube_rot6d_gz`` rotation6D vector.
+- :math:`L_{\\text{ht}}`    — Huber loss between predicted and target
+  ``cube_height_w`` (normalised height above resting position).
+- :math:`L_{\\text{vis}}`   — binary cross-entropy with logits against the
   ``cube_in_camera_frame`` target (float 0 or 1).
 
 All losses are mean-reduced over the batch.
+The Huber delta is controlled by ``loss_cfg["huber_delta"]``.
 """
 
 from __future__ import annotations
@@ -35,46 +41,74 @@ def compute_multitask_loss(
     """Compute the weighted multi-task loss.
 
     Args:
-        predictions: Output of :meth:`PretrainCnn.forward`.
+        predictions: Output of :meth:`MultiTaskCnn.forward`.
         targets: Batch of target dicts from :class:`TelemetryDataset`.
         loss_cfg: The ``loss`` section of ``cnn_pretrain.yaml``.
 
     Returns:
-        Dict with keys ``total``, ``grip_position``, ``orientation``,
-        ``visibility``; all are scalar ``Tensor`` values with gradients.
+        Dict with keys ``total``, ``cube_pos_gz``, ``gripper_cube_alignment``,
+        ``cube_rot6d_gz``, ``cube_height_w``, ``cube_in_camera_frame``; all are
+        scalar ``Tensor`` values with gradients.
     """
-    w_grip = float(loss_cfg["weight_grip_position"])
-    w_orientation = float(loss_cfg["weight_orientation"])
-    w_visibility = float(loss_cfg["weight_visibility"])
-    normalize_quat = bool(loss_cfg.get("orientation_normalization", True))
+    for key in (
+        "weight_cube_pos_gz",
+        "weight_gripper_cube_alignment",
+        "weight_cube_rot6d_gz",
+        "weight_cube_height_w",
+        "weight_cube_in_camera_frame",
+        "huber_delta",
+    ):
+        if key not in loss_cfg or loss_cfg[key] is None:
+            raise ValueError(
+                f"loss_cfg['{key}'] must be set explicitly; no default is allowed."
+            )
 
-    # ── Grip position: BCE with logits ──
-    grip_logit = predictions["grip_position_logit"].squeeze(-1)  # (N,)
-    grip_target = targets["is_cube_in_grip_position"]  # (N,)
-    grip_loss = F.binary_cross_entropy_with_logits(grip_logit, grip_target)
+    w_pos = float(loss_cfg["weight_cube_pos_gz"])
+    w_align = float(loss_cfg["weight_gripper_cube_alignment"])
+    w_rot = float(loss_cfg["weight_cube_rot6d_gz"])
+    w_ht = float(loss_cfg["weight_cube_height_w"])
+    w_vis = float(loss_cfg["weight_cube_in_camera_frame"])
+    delta = float(loss_cfg["huber_delta"])
 
-    # ── Orientation: MSE on (optionally normalised) quaternion ──
-    orientation_pred = predictions["orientation_pred"]  # (N, 4)
-    if normalize_quat:
-        orientation_pred = F.normalize(orientation_pred, p=2, dim=-1)
-    orientation_target = targets["cube_quat_gripzone_wxyz"]  # (N, 4)
-    orientation_loss = F.mse_loss(orientation_pred, orientation_target)
+    # ── cube_pos_gz: Huber (dim 3, normalised metres) ──
+    pos_pred = predictions["cube_pos_gz_pred"]         # (N, 3)
+    pos_target = targets["cube_pos_gz"]                # (N, 3)
+    pos_loss = F.huber_loss(pos_pred, pos_target, delta=delta)
 
-    # ── Visibility: BCE with logits ──
-    vis_logit = predictions["visibility_logit"].squeeze(-1)  # (N,)
-    vis_target = targets["cube_in_camera_frame"]  # (N,)
-    visibility_loss = F.binary_cross_entropy_with_logits(vis_logit, vis_target)
+    # ── gripper_cube_alignment: MSE (scalar in [-1, 1]) ──
+    align_pred = predictions["gripper_cube_alignment_pred"].squeeze(-1)   # (N,)
+    align_target = targets["gripper_cube_alignment"]   # (N,)
+    align_loss = F.mse_loss(align_pred, align_target)
+
+    # ── cube_rot6d_gz: MSE (rotation6D in [-1, 1]) ──
+    rot_pred = predictions["cube_rot6d_gz_pred"]       # (N, 6)
+    rot_target = targets["cube_rot6d_gz"]              # (N, 6)
+    rot_loss = F.mse_loss(rot_pred, rot_target)
+
+    # ── cube_height_w: Huber (scalar, normalised metres) ──
+    ht_pred = predictions["cube_height_w_pred"].squeeze(-1)    # (N,)
+    ht_target = targets["cube_height_w"]               # (N,)
+    ht_loss = F.huber_loss(ht_pred, ht_target, delta=delta)
+
+    # ── cube_in_camera_frame: BCE with logits ──
+    vis_logit = predictions["cube_in_camera_frame_logit"].squeeze(-1)  # (N,)
+    vis_target = targets["cube_in_camera_frame"]       # (N,)
+    vis_loss = F.binary_cross_entropy_with_logits(vis_logit, vis_target)
 
     total = (
-        w_grip * grip_loss
-        + w_orientation * orientation_loss
-        + w_visibility * visibility_loss
+        w_pos * pos_loss
+        + w_align * align_loss
+        + w_rot * rot_loss
+        + w_ht * ht_loss
+        + w_vis * vis_loss
     )
     return {
         "total": total,
-        "grip_position": grip_loss,
-        "orientation": orientation_loss,
-        "visibility": visibility_loss,
+        "cube_pos_gz": pos_loss,
+        "gripper_cube_alignment": align_loss,
+        "cube_rot6d_gz": rot_loss,
+        "cube_height_w": ht_loss,
+        "cube_in_camera_frame": vis_loss,
     }
 
 
@@ -89,28 +123,45 @@ def compute_multitask_metrics(
     Returns:
         Dict with keys:
 
-        - ``grip_position_acc`` — binary accuracy of grip-position prediction.
-        - ``visibility_acc``    — binary accuracy of visibility prediction.
-        - ``orientation_mse``   — MSE between normalised predicted quaternion
-          and target quaternion.
+        - ``cube_pos_gz_mae``            — mean L1 distance in normalised units.
+        - ``gripper_cube_alignment_mae`` — mean absolute error of alignment scalar.
+        - ``cube_rot6d_gz_mse``          — MSE of rotation6D prediction.
+        - ``cube_height_w_mae``          — mean absolute error in normalised units.
+        - ``cube_in_camera_frame_acc``   — binary accuracy of visibility logit.
     """
     with torch.no_grad():
-        # Binary accuracy: threshold logit at 0 (equivalent to sigmoid > 0.5)
-        grip_pred = (predictions["grip_position_logit"].squeeze(-1) >= 0.0).float()
-        grip_acc = (
-            (grip_pred == targets["is_cube_in_grip_position"]).float().mean().item()
+        pos_mae = (
+            (predictions["cube_pos_gz_pred"] - targets["cube_pos_gz"])
+            .abs()
+            .mean()
+            .item()
         )
 
-        vis_pred = (predictions["visibility_logit"].squeeze(-1) >= 0.0).float()
-        vis_acc = (vis_pred == targets["cube_in_camera_frame"]).float().mean().item()
+        align_mae = (
+            (predictions["gripper_cube_alignment_pred"].squeeze(-1) - targets["gripper_cube_alignment"])
+            .abs()
+            .mean()
+            .item()
+        )
 
-        orientation_pred = F.normalize(predictions["orientation_pred"], p=2, dim=-1)
-        orientation_mse = F.mse_loss(
-            orientation_pred, targets["cube_quat_gripzone_wxyz"]
+        rot_mse = F.mse_loss(
+            predictions["cube_rot6d_gz_pred"], targets["cube_rot6d_gz"]
         ).item()
 
+        ht_mae = (
+            (predictions["cube_height_w_pred"].squeeze(-1) - targets["cube_height_w"])
+            .abs()
+            .mean()
+            .item()
+        )
+
+        vis_pred = (predictions["cube_in_camera_frame_logit"].squeeze(-1) >= 0.0).float()
+        vis_acc = (vis_pred == targets["cube_in_camera_frame"]).float().mean().item()
+
     return {
-        "grip_position_acc": grip_acc,
-        "visibility_acc": vis_acc,
-        "orientation_mse": orientation_mse,
+        "cube_pos_gz_mae": pos_mae,
+        "gripper_cube_alignment_mae": align_mae,
+        "cube_rot6d_gz_mse": rot_mse,
+        "cube_height_w_mae": ht_mae,
+        "cube_in_camera_frame_acc": vis_acc,
     }

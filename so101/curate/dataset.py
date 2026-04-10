@@ -6,8 +6,12 @@ Reads telemetry shards referenced in a curated manifest produced by
 - **image** — ``FloatTensor[C, H, W]`` in ``[0, 1]`` (optionally normalised).
 - **targets** — ``dict[str, Tensor]`` with keys:
 
-  - ``is_cube_in_grip_position`` — ``float32`` scalar, 0 or 1.
-  - ``cube_quat_gripzone_wxyz``  — ``float32 (4,)`` unit quaternion.
+  - ``cube_pos_gz``              — ``float32 (3,)`` cube position in grip-zone frame
+    (metres, divided by ``pos_norm_scale``).
+  - ``gripper_cube_alignment``   — ``float32`` scalar dot product in ``[-1, 1]``.
+  - ``cube_rot6d_gz``            — ``float32 (6,)`` rotation6D of cube in grip-zone frame.
+  - ``cube_height_w``            — ``float32`` scalar cube height above resting position
+    (metres, divided by ``height_norm_scale``).
   - ``cube_in_camera_frame``     — ``float32`` scalar, 0 or 1.
 
 Shards are loaded lazily on first access and held in an LRU cache bounded
@@ -50,6 +54,8 @@ class TelemetryDataset(Dataset):
     def __init__(
         self,
         manifest_path: str | Path,
+        pos_norm_scale: float,
+        height_norm_scale: float,
         image_mean: Optional[list[float]] = None,
         image_std: Optional[list[float]] = None,
         max_cached_shards: Optional[int] = None,
@@ -58,6 +64,19 @@ class TelemetryDataset(Dataset):
         if not manifest_path.exists():
             raise FileNotFoundError(f"Manifest not found: {manifest_path}")
         self._manifest_path = manifest_path.resolve()
+
+        if pos_norm_scale is None or pos_norm_scale <= 0:
+            raise ValueError(
+                "pos_norm_scale must be set explicitly and be > 0; "
+                f"got {pos_norm_scale!r}."
+            )
+        if height_norm_scale is None or height_norm_scale <= 0:
+            raise ValueError(
+                "height_norm_scale must be set explicitly and be > 0; "
+                f"got {height_norm_scale!r}."
+            )
+        self._pos_norm_scale = float(pos_norm_scale)
+        self._height_norm_scale = float(height_norm_scale)
 
         with open(manifest_path) as f:
             self._manifest: dict = json.load(f)
@@ -131,8 +150,10 @@ class TelemetryDataset(Dataset):
         data = np.load(shard_path, allow_pickle=False)
         self._shard_cache[shard_path] = {
             "rgb": data["rgb"],
-            "is_cube_in_grip_position": data["is_cube_in_grip_position"],
-            "cube_quat_gripzone_wxyz": data["cube_quat_gripzone_wxyz"],
+            "cube_pos_gz": data["cube_pos_gz"],
+            "gripper_cube_alignment": data["gripper_cube_alignment"],
+            "cube_rot6d_gz": data["cube_rot6d_gz"],
+            "cube_height_w": data["cube_height_w"],
             "cube_in_camera_frame": data["cube_in_camera_frame"],
         }
         if self._max_cached_shards is not None:
@@ -159,13 +180,20 @@ class TelemetryDataset(Dataset):
             img = (img - self._image_mean) / self._image_std  # type: ignore[operator]
 
         targets: dict[str, torch.Tensor] = {
-            "is_cube_in_grip_position": torch.tensor(
-                float(shard["is_cube_in_grip_position"][row]),
+            "cube_pos_gz": torch.from_numpy(
+                shard["cube_pos_gz"][row].copy()
+            ).float() / self._pos_norm_scale,
+            "gripper_cube_alignment": torch.tensor(
+                float(shard["gripper_cube_alignment"][row]),
                 dtype=torch.float32,
             ),
-            "cube_quat_gripzone_wxyz": torch.from_numpy(
-                shard["cube_quat_gripzone_wxyz"][row].copy()
+            "cube_rot6d_gz": torch.from_numpy(
+                shard["cube_rot6d_gz"][row].copy()
             ).float(),
+            "cube_height_w": torch.tensor(
+                float(shard["cube_height_w"][row]) / self._height_norm_scale,
+                dtype=torch.float32,
+            ),
             "cube_in_camera_frame": torch.tensor(
                 float(shard["cube_in_camera_frame"][row]),
                 dtype=torch.float32,
