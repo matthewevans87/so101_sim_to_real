@@ -180,9 +180,8 @@ class TelemetryDataset(Dataset):
             img = (img - self._image_mean) / self._image_std  # type: ignore[operator]
 
         targets: dict[str, torch.Tensor] = {
-            "cube_pos_gz": torch.from_numpy(
-                shard["cube_pos_gz"][row].copy()
-            ).float() / self._pos_norm_scale,
+            "cube_pos_gz": torch.from_numpy(shard["cube_pos_gz"][row].copy()).float()
+            / self._pos_norm_scale,
             "gripper_cube_alignment": torch.tensor(
                 float(shard["gripper_cube_alignment"][row]),
                 dtype=torch.float32,

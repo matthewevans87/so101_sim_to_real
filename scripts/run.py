@@ -775,6 +775,67 @@ def cmd_viz_pipeline(args) -> None:
     run_subprocess(cmd)
 
 
+def cmd_sweep(args) -> None:
+    resolve_x11(getattr(args, "display", None))
+    sys.path.insert(0, str(Path(__file__).parent))
+    from sweep import SweepOrchestrator
+
+    # For dry-runs, a missing/invalid ISAAC_LAB_PATH is non-fatal: the path
+    # is shown in the printed commands so the user can verify them without a
+    # live Isaac Lab installation.  For real runs require_isaac_lab() enforces
+    # the check strictly and exits on failure.
+    if args.dry_run:
+        isaac_lab_path = (
+            os.environ.get("ISAAC_LAB_PATH", "").strip() or "<ISAAC_LAB_PATH>"
+        )
+    else:
+        isaac_lab_path = require_isaac_lab()
+
+    if args.resume:
+        sweep_dir = Path(args.resume).resolve()
+        orchestrator = SweepOrchestrator.from_existing(
+            sweep_dir=sweep_dir,
+            isaac_lab_path=isaac_lab_path,
+            project_root=PROJECT_ROOT,
+        )
+    else:
+        if not args.sweep:
+            error("--sweep is required when not resuming with --resume")
+            sys.exit(1)
+        sweep_path = Path(args.sweep)
+        if not sweep_path.is_absolute():
+            sweep_path = PROJECT_ROOT / sweep_path
+        sweep_path = sweep_path.resolve()
+        if not sweep_path.is_file():
+            error(f"Sweep config not found: {sweep_path}")
+            sys.exit(1)
+        with open(sweep_path) as f:
+            import yaml as _yaml
+
+            config = _yaml.safe_load(f)
+
+        sweep_name = config.get("name", "sweep")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        base = (
+            Path(args.output).resolve()
+            if getattr(args, "output", None)
+            else PROJECT_ROOT / "sweeps"
+        )
+        sweep_dir = base / f"sweep_{sweep_name}_{timestamp}"
+        orchestrator = SweepOrchestrator(
+            config=config,
+            config_path=sweep_path,
+            sweep_dir=sweep_dir,
+            isaac_lab_path=isaac_lab_path,
+            project_root=PROJECT_ROOT,
+        )
+
+    orchestrator.run(
+        from_experiment=getattr(args, "from_experiment", None),
+        dry_run=args.dry_run,
+    )
+
+
 def cmd_pipeline(args) -> None:
     resolve_x11(getattr(args, "display", None))
     sys.path.insert(0, str(Path(__file__).parent))
@@ -1132,6 +1193,55 @@ def build_parser() -> argparse.ArgumentParser:
         help="Base output dir; pipeline dir created as <output>/pipeline_<timestamp>/ (default: artifacts/)",
     )
     p.set_defaults(func=cmd_pipeline)
+
+    # ── sweep ─────────────────────────────────────────────────────────────────
+    p = sub.add_parser(
+        "sweep",
+        help="Run a named sequence of Train+Eval experiments and summarise results",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "Runs a set of named experiments sequentially (train → eval).\n"
+            "Each experiment applies YAML overrides on top of base env/agent configs.\n"
+            "\n"
+            "New sweep:    --sweep configs/my_sweep.yaml [--output sweeps/]\n"
+            "Resume sweep: --resume sweeps/sweep_name_TS/ [--from-experiment NAME]\n"
+            "Dry run:      --sweep configs/my_sweep.yaml --dry-run\n"
+        ),
+    )
+    p.add_argument(
+        "--sweep",
+        metavar="PATH",
+        help="Sweep definition YAML (required for new sweeps)",
+    )
+    p.add_argument(
+        "--resume",
+        metavar="PATH",
+        help="Resume an existing sweep from its directory",
+    )
+    p.add_argument(
+        "--output",
+        metavar="PATH",
+        help="Base output dir; sweep dir created as <output>/sweep_<name>_<ts>/ (default: sweeps/)",
+    )
+    p.add_argument(
+        "--from-experiment",
+        metavar="NAME",
+        dest="from_experiment",
+        help="Start (or restart) from this named experiment; earlier done experiments are skipped",
+    )
+    p.add_argument(
+        "--dry-run",
+        action="store_true",
+        dest="dry_run",
+        help="Print resolved commands for each experiment without executing anything",
+    )
+    p.add_argument(
+        "--display",
+        type=int,
+        metavar="N",
+        help="X display socket number (e.g. 2 for DISPLAY=:2)",
+    )
+    p.set_defaults(func=cmd_sweep)
 
     return parser
 

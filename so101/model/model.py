@@ -252,11 +252,15 @@ class MultiTaskCnn(nn.Module):
             )
         latent = self.backbone(images)  # (N, output_dim)
         return {
-            "cube_pos_gz_pred": self.cube_pos_gz_head(latent),              # (N, 3)
-            "gripper_cube_alignment_pred": self.gripper_cube_alignment_head(latent),  # (N, 1)
-            "cube_rot6d_gz_pred": self.cube_rot6d_gz_head(latent),          # (N, 6)
-            "cube_height_w_pred": self.cube_height_w_head(latent),          # (N, 1)
-            "cube_in_camera_frame_logit": self.cube_in_camera_frame_head(latent),  # (N, 1)
+            "cube_pos_gz_pred": self.cube_pos_gz_head(latent),  # (N, 3)
+            "gripper_cube_alignment_pred": self.gripper_cube_alignment_head(
+                latent
+            ),  # (N, 1)
+            "cube_rot6d_gz_pred": self.cube_rot6d_gz_head(latent),  # (N, 6)
+            "cube_height_w_pred": self.cube_height_w_head(latent),  # (N, 1)
+            "cube_in_camera_frame_logit": self.cube_in_camera_frame_head(
+                latent
+            ),  # (N, 1)
         }
 
     def backbone_state_dict(self) -> dict[str, Any]:

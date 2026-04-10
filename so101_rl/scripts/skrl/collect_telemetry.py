@@ -734,7 +734,9 @@ def main(
 
             joint_pos_batch = env.unwrapped.joint_pos[:, env.unwrapped._dof_idx]
             cube_pos_gz_batch = env.unwrapped.step_metrics["cube_pos_gz"]
-            gripper_cube_alignment_batch = env.unwrapped.step_metrics["gripper_cube_alignment"]
+            gripper_cube_alignment_batch = env.unwrapped.step_metrics[
+                "gripper_cube_alignment"
+            ]
             cube_rot6d_gz_batch = env.unwrapped.step_metrics["cube_rot6d_gz"]
             cube_height_w_batch = env.unwrapped.step_metrics["cube_height_w"]
 

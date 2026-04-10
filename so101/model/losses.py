@@ -71,28 +71,28 @@ def compute_multitask_loss(
     delta = float(loss_cfg["huber_delta"])
 
     # ── cube_pos_gz: Huber (dim 3, normalised metres) ──
-    pos_pred = predictions["cube_pos_gz_pred"]         # (N, 3)
-    pos_target = targets["cube_pos_gz"]                # (N, 3)
+    pos_pred = predictions["cube_pos_gz_pred"]  # (N, 3)
+    pos_target = targets["cube_pos_gz"]  # (N, 3)
     pos_loss = F.huber_loss(pos_pred, pos_target, delta=delta)
 
     # ── gripper_cube_alignment: MSE (scalar in [-1, 1]) ──
-    align_pred = predictions["gripper_cube_alignment_pred"].squeeze(-1)   # (N,)
-    align_target = targets["gripper_cube_alignment"]   # (N,)
+    align_pred = predictions["gripper_cube_alignment_pred"].squeeze(-1)  # (N,)
+    align_target = targets["gripper_cube_alignment"]  # (N,)
     align_loss = F.mse_loss(align_pred, align_target)
 
     # ── cube_rot6d_gz: MSE (rotation6D in [-1, 1]) ──
-    rot_pred = predictions["cube_rot6d_gz_pred"]       # (N, 6)
-    rot_target = targets["cube_rot6d_gz"]              # (N, 6)
+    rot_pred = predictions["cube_rot6d_gz_pred"]  # (N, 6)
+    rot_target = targets["cube_rot6d_gz"]  # (N, 6)
     rot_loss = F.mse_loss(rot_pred, rot_target)
 
     # ── cube_height_w: Huber (scalar, normalised metres) ──
-    ht_pred = predictions["cube_height_w_pred"].squeeze(-1)    # (N,)
-    ht_target = targets["cube_height_w"]               # (N,)
+    ht_pred = predictions["cube_height_w_pred"].squeeze(-1)  # (N,)
+    ht_target = targets["cube_height_w"]  # (N,)
     ht_loss = F.huber_loss(ht_pred, ht_target, delta=delta)
 
     # ── cube_in_camera_frame: BCE with logits ──
     vis_logit = predictions["cube_in_camera_frame_logit"].squeeze(-1)  # (N,)
-    vis_target = targets["cube_in_camera_frame"]       # (N,)
+    vis_target = targets["cube_in_camera_frame"]  # (N,)
     vis_loss = F.binary_cross_entropy_with_logits(vis_logit, vis_target)
 
     total = (
@@ -138,7 +138,10 @@ def compute_multitask_metrics(
         )
 
         align_mae = (
-            (predictions["gripper_cube_alignment_pred"].squeeze(-1) - targets["gripper_cube_alignment"])
+            (
+                predictions["gripper_cube_alignment_pred"].squeeze(-1)
+                - targets["gripper_cube_alignment"]
+            )
             .abs()
             .mean()
             .item()
@@ -155,7 +158,9 @@ def compute_multitask_metrics(
             .item()
         )
 
-        vis_pred = (predictions["cube_in_camera_frame_logit"].squeeze(-1) >= 0.0).float()
+        vis_pred = (
+            predictions["cube_in_camera_frame_logit"].squeeze(-1) >= 0.0
+        ).float()
         vis_acc = (vis_pred == targets["cube_in_camera_frame"]).float().mean().item()
 
     return {

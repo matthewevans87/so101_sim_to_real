@@ -114,7 +114,9 @@ def _validate_config(cfg: dict) -> None:
     norm_section = cfg.get("normalization")
     if norm_section is None:
         raise ValueError("cfg.normalization section is required")
-    _require(norm_section, "pos_norm_scale", "height_norm_scale", section="normalization")
+    _require(
+        norm_section, "pos_norm_scale", "height_norm_scale", section="normalization"
+    )
 
     train_cfg = cfg.get("training")
     if train_cfg is None:
@@ -247,7 +249,9 @@ def _run_epoch(
                         "train/loss_total", losses["total"].item(), global_step
                     )
                     writer.add_scalar(
-                        "train/loss_cube_pos_gz", losses["cube_pos_gz"].item(), global_step
+                        "train/loss_cube_pos_gz",
+                        losses["cube_pos_gz"].item(),
+                        global_step,
                     )
                     writer.add_scalar(
                         "train/loss_gripper_cube_alignment",
