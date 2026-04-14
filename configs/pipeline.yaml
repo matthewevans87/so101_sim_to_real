@@ -53,7 +53,7 @@ collect:
 
   # Override num_envs for the collect step only.
   # More envs → faster collection. null inherits the value from env_config.
-  envs: 256
+  envs: 8
 
 # ── CNN parameters (curate + train-cnn) ──────────────────────────────────────
 

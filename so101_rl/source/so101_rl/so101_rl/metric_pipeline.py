@@ -177,22 +177,85 @@ class MetricPipeline:
 # ---------------------------------------------------------------------------
 
 
-class GripperContactForceMagnitudeMetricStep(MetricStep):
-    produces = frozenset({"gripper_cube_contact_force_magnitude"})
+def _pinch_axis_w(env) -> torch.Tensor:
+    """Unit vector pointing from the fixed jaw toward the moving jaw in world frame.
+
+    Shape: ``(num_envs, 3)``.  Computed from the two jaw body positions so it
+    adapts to any gripper configuration without requiring knowledge of the
+    joint axis in local frame.  Forces perpendicular to this axis (e.g. drag)
+    project to near-zero even when both jaws contact the cube.
+    """
+    fixed_pos = env.robot.data.body_pos_w[:, env._ee_body_idx[0], :]
+    moving_pos = env.robot.data.body_pos_w[:, env._moving_jaw_body_idx[0], :]
+    delta = moving_pos - fixed_pos
+    return delta / (delta.norm(dim=-1, keepdim=True) + 1e-6)
+
+
+class FixedJawContactForceMagnitudeMetricStep(MetricStep):
+    """Pinch-axis-projected force on the fixed jaw (``Robot/gripper``) against the cube.
+
+    Projects ``force_matrix_w[:, 0, 0, :]`` onto the dynamic pinch axis
+    (direction from fixed jaw to moving jaw in world frame) and takes the
+    absolute value.  Forces that are purely perpendicular to the pinch axis
+    — such as drag-induced friction — project to near-zero even when both
+    jaws contact the cube.
+
+    Produces ``fixed_jaw_cube_contact_force_magnitude`` (N).
+    """
+
+    produces = frozenset({"fixed_jaw_cube_contact_force_magnitude"})
     depends_on = frozenset()
+    obs_dim = 0  # not fed into observations directly
+
+    def compute(self, ctx: StepContext) -> None:
+        env = ctx.env
+        force_vec = env.gripper_contact_sensor.data.force_matrix_w[:, 0, 0, :].to(
+            env.device
+        )
+        pinch_axis = _pinch_axis_w(env)
+        val = torch.abs((force_vec * pinch_axis).sum(dim=-1))
+        assert_tensor(val, (env.num_envs,), torch.float32)
+        ctx.metrics["fixed_jaw_cube_contact_force_magnitude"] = val
+
+
+class MovingJawContactForceMagnitudeMetricStep(MetricStep):
+    """Pinch-axis-projected force on the movable jaw (``Robot/moving_jaw_so101_v1``) against the cube.
+
+    Same projection as :class:`FixedJawContactForceMagnitudeMetricStep` but
+    reading from ``env.moving_jaw_contact_sensor``.
+
+    Produces ``moving_jaw_cube_contact_force_magnitude`` (N).
+    """
+
+    produces = frozenset({"moving_jaw_cube_contact_force_magnitude"})
+    depends_on = frozenset()
+    obs_dim = 0  # not fed into observations directly
+
+    def compute(self, ctx: StepContext) -> None:
+        env = ctx.env
+        force_vec = env.moving_jaw_contact_sensor.data.force_matrix_w[:, 0, 0, :].to(
+            env.device
+        )
+        pinch_axis = _pinch_axis_w(env)
+        val = torch.abs((force_vec * pinch_axis).sum(dim=-1))
+        assert_tensor(val, (env.num_envs,), torch.float32)
+        ctx.metrics["moving_jaw_cube_contact_force_magnitude"] = val
+
+
+class GripperContactForceMagnitudeMetricStep(MetricStep):
+    """Backward-compat alias: re-exposes the fixed-jaw force under the original key.
+
+    Keeps ``gripper_cube_contact_force_magnitude`` available for critic
+    observations and any other consumers without requiring config changes.
+    """
+
+    produces = frozenset({"gripper_cube_contact_force_magnitude"})
+    depends_on = frozenset({"fixed_jaw_cube_contact_force_magnitude"})
     obs_dim = 1
 
     def compute(self, ctx: StepContext) -> None:
         env = ctx.env
-        val = (
-            torch.linalg.norm(
-                env.gripper_contact_sensor.data.force_matrix_w[:, 0, 0, :],
-                dim=-1,
-                keepdim=True,
-            )
-            .squeeze(-1)
-            .to(env.device)
-        )
+        val = ctx.metrics["fixed_jaw_cube_contact_force_magnitude"]
         assert_tensor(val, (env.num_envs,), torch.float32)
         ctx.metrics["gripper_cube_contact_force_magnitude"] = val
 
@@ -287,6 +350,37 @@ class GripZoneCubeDistanceMetricStep(MetricStep):
         val = ctx.metrics["cube_pos_gz"].norm(dim=-1, keepdim=True).squeeze(-1)
         assert_tensor(val, (env.num_envs,), torch.float32)
         ctx.metrics["grip_zone_cube_distance"] = val
+
+
+class NormalizedGripZoneCubeDistanceMetricStep(MetricStep):
+    """Maps ``grip_zone_cube_distance`` onto [0, 1] using per-env cube half-width as
+    the floor and ``cfg.behavior.max_cube_distance`` as the ceiling.
+
+    * ``d_norm = 0.0`` — cube surface just touching the grip zone center.
+    * ``d_norm = 1.0`` — cube centroid at or beyond ``max_cube_distance``.
+
+    Produces ``normalized_grip_zone_cube_distance`` of shape ``(num_envs,)``.
+    """
+
+    produces = frozenset({"normalized_grip_zone_cube_distance"})
+    depends_on = frozenset({"grip_zone_cube_distance"})
+    depends_on_env_metrics = frozenset({"env_min_cube_distance"})
+    obs_dim = 0  # not fed directly into observations
+
+    def compute(self, ctx: StepContext) -> None:
+        env = ctx.env
+        d = ctx.metrics["grip_zone_cube_distance"]  # (num_envs,)
+        d_min = ctx.env_metrics[
+            "env_min_cube_distance"
+        ]  # (num_envs,) per-episode DR half-width
+        d_max: float = env.cfg.behavior.max_cube_distance  # scalar ceiling
+        # Clamp d into [d_min, d_max] per-env, then normalise to [0, 1].
+        d_clamped = torch.min(d, torch.tensor(d_max, device=env.device)).clamp_min(
+            d_min
+        )
+        val = (d_clamped - d_min) / (d_max - d_min)
+        assert_tensor(val, (env.num_envs,), torch.float32)
+        ctx.metrics["normalized_grip_zone_cube_distance"] = val
 
 
 class CubeHeightWMetricStep(MetricStep):
@@ -399,7 +493,9 @@ class ApproachPhaseMetricStep(MetricStep):
             "approach_phase",
         }
     )
-    depends_on = frozenset({"grip_zone_cube_distance", "gripper_cube_alignment"})
+    depends_on = frozenset(
+        {"normalized_grip_zone_cube_distance", "gripper_cube_alignment"}
+    )
 
     def compute(self, ctx: StepContext) -> None:
         env = ctx.env
@@ -408,9 +504,9 @@ class ApproachPhaseMetricStep(MetricStep):
         g_cfg = env.cfg.metrics.approach_gripper_pose
         p_cfg = env.cfg.metrics.approach_phase
 
-        d = ctx.metrics["grip_zone_cube_distance"]
+        d = ctx.metrics["normalized_grip_zone_cube_distance"]
         dist_exp = torch.exp(-d_cfg.pressure * d)
-        dist_linear = (1.0 - d / d_cfg.distance_max).clamp(min=0.0)
+        dist_linear = (1.0 - d).clamp(min=0.0)
         approach_distance = dist_exp + d_cfg.linear_weight * dist_linear
         assert_tensor(approach_distance, (env.num_envs,), torch.float32)
         ctx.metrics["approach_distance"] = approach_distance
@@ -457,22 +553,61 @@ class ApproachPhaseMetricStep(MetricStep):
 
 
 class GraspPhaseMetricStep(MetricStep):
+    """Grasp quality metric based on the bilateral (geometric-mean) pinch force.
+
+    ``bilateral_force = sqrt(f_fixed * f_moving)``
+
+    Zero whenever either jaw has no contact with the cube (prevents single-jaw
+    knock/drag patterns from earning reward).  Mapped onto [0, 1] via a
+    saturation clamp:
+
+        grasp_phase = clamp(bilateral_force / grip_force_sat_threshold, 0, 1)
+
+    The metric rises linearly from 0 → 1 as force goes 0 → threshold, then
+    saturates at 1.  This is compatible with a stiff PD gripper: genuine jaw
+    closure immediately exceeds any reasonable threshold, earning full score,
+    while passive drag contact produces forces well below the threshold.
+
+    Debug metrics exposed for TensorBoard:
+    - ``_dbg_fixed_jaw_force``   — pinch-axis force on fixed jaw
+    - ``_dbg_moving_jaw_force``  — pinch-axis force on moving jaw
+    - ``_dbg_gripper_joint_pos`` — gripper joint position (open=0.8, closed=0.15)
+    """
+
     produces = frozenset({"grasp_phase"})
-    depends_on = frozenset({"gripper_cube_contact_force_magnitude"})
+    depends_on = frozenset(
+        {
+            "fixed_jaw_cube_contact_force_magnitude",
+            "moving_jaw_cube_contact_force_magnitude",
+        }
+    )
 
     def compute(self, ctx: StepContext) -> None:
         env = ctx.env
         _grasp_cfg = env.cfg.get_reward_cfg("grasp_phase")
-        grasp_phase = torch.exp(
-            -_grasp_cfg.grip_force_pressure
-            * torch.abs(
-                ctx.metrics["gripper_cube_contact_force_magnitude"]
-                - _grasp_cfg.grip_force_target
-            )
+
+        f_fixed = ctx.metrics["fixed_jaw_cube_contact_force_magnitude"].clamp(min=0.0)
+        f_moving = ctx.metrics["moving_jaw_cube_contact_force_magnitude"].clamp(min=0.0)
+
+        # Geometric mean: zero if either jaw has no contact.
+        bilateral_force = (f_fixed * f_moving).sqrt()
+
+        # Saturation clamp: rises 0→1 as force goes 0→threshold, then holds at 1.
+        # A stiff gripper immediately exceeds any reasonable threshold on genuine
+        # closure; drag/graze forces are far below it.
+        grasp_phase = (bilateral_force / _grasp_cfg.grip_force_sat_threshold).clamp(
+            0.0, 1.0
         )
 
         assert_tensor(grasp_phase, (env.num_envs,), torch.float32)
         ctx.metrics["grasp_phase"] = grasp_phase
+
+        # Diagnostics logged to Step_Metrics/ in TensorBoard.
+        ctx.metrics["_dbg_fixed_jaw_force"] = f_fixed
+        ctx.metrics["_dbg_moving_jaw_force"] = f_moving
+        ctx.metrics["_dbg_gripper_joint_pos"] = env.joint_pos[
+            :, env._gripper_joint_idx
+        ].squeeze(-1)
 
 
 class ApproachPhaseTerminalMetricStep(MetricStep):
@@ -512,6 +647,8 @@ class GraspPhaseTerminalMetricStep(MetricStep):
 # ---------------------------------------------------------------------------
 
 ALL_METRIC_STEPS: list[type[MetricStep]] = [
+    FixedJawContactForceMagnitudeMetricStep,
+    MovingJawContactForceMagnitudeMetricStep,
     GripperContactForceMagnitudeMetricStep,
     TableTouchedMetricStep,
     CubePosEEMetricStep,
@@ -519,6 +656,7 @@ ALL_METRIC_STEPS: list[type[MetricStep]] = [
     CubePosGZMetricStep,
     CubeRot6DGZMetricStep,
     GripZoneCubeDistanceMetricStep,
+    NormalizedGripZoneCubeDistanceMetricStep,
     CubeHeightWMetricStep,
     CubeLiftFractionMetricStep,
     IsSuccessLiftFractionTerminalMetricStep,

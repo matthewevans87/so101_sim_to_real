@@ -179,6 +179,7 @@ class PipelineOrchestrator:
         project_root: Path,
         ad_hoc_experiment: Optional[str] = None,
         ad_hoc_input: Optional[str] = None,
+        ad_hoc_cnn_checkpoint: Optional[str] = None,
         force_display: bool = False,
     ) -> None:
         self.config = config
@@ -191,6 +192,9 @@ class PipelineOrchestrator:
             Path(ad_hoc_experiment).resolve() if ad_hoc_experiment else None
         )
         self.ad_hoc_input = Path(ad_hoc_input).resolve() if ad_hoc_input else None
+        self.ad_hoc_cnn_checkpoint = (
+            Path(ad_hoc_cnn_checkpoint).resolve() if ad_hoc_cnn_checkpoint else None
+        )
         # When True, --headless is suppressed for Isaac steps (--display was supplied)
         self.force_display = force_display
         self._state: Optional[Dict[str, Any]] = None
@@ -530,6 +534,8 @@ class PipelineOrchestrator:
             cmd += ["--num_envs", str(cfg["envs"])]
         if cfg.get("seed") is not None:
             cmd += ["--seed", str(cfg["seed"])]
+        if self.ad_hoc_cnn_checkpoint:
+            cmd += ["--cnn_checkpoint", str(self.ad_hoc_cnn_checkpoint)]
         return cmd
 
     def _build_collect_cmd(
@@ -563,6 +569,8 @@ class PipelineOrchestrator:
         envs = collect.get("envs") or cfg.get("envs")
         if envs:
             cmd += ["--num_envs", str(envs)]
+        if self.ad_hoc_cnn_checkpoint:
+            cmd += ["--cnn_checkpoint", str(self.ad_hoc_cnn_checkpoint)]
         return cmd
 
     def _build_curate_cmd(self, input_dir: Path, output_dir: Path) -> List[str]:
@@ -785,9 +793,29 @@ class PipelineOrchestrator:
             elif step == "collect":
                 experiment_dir = self._resolve_step_input(step)
                 cmd = self._build_collect_cmd(experiment_dir, output_dir)
+                # SO101_ENV_CONFIG must point to the *experiment's* env_config.yaml
+                # (e.g. frozen_cnn), NOT to the pipeline config's env_config field
+                # (e.g. baseline.yaml with frozen_resnet18).  Using the wrong config
+                # causes @hydra_task_config in collect_telemetry.py to construct
+                # env_cfg with the wrong vision_encoder.type, so the CNN checkpoint
+                # wiring check silently fails and the policy receives garbage features
+                # from the fallback encoder — both produce 1024-D so no crash occurs.
+                collect_staged_cfg = staged_cfg  # fallback if experiment has no config
+                if experiment_dir is not None:
+                    exp_env_cfg = experiment_dir / "env_config.yaml"
+                    if exp_env_cfg.is_file():
+                        task = self.config["task"]
+                        dest_dir = (
+                            Path(self.isaac_lab_path) / "workspace" / task / "configs"
+                        )
+                        dest_dir.mkdir(parents=True, exist_ok=True)
+                        dest = dest_dir / "collect_env_config.yaml"
+                        shutil.copy2(exp_env_cfg, dest)
+                        collect_staged_cfg = dest
+                        _success(f"Collect env config staged from experiment: {dest}")
                 env = self._get_gui_env(
                     Path(self.isaac_lab_path) / "workspace" / self.config["task"],
-                    staged_cfg,
+                    collect_staged_cfg,
                 )
             elif step == "curate":
                 input_dir = self._resolve_step_input(step)
@@ -824,7 +852,10 @@ class PipelineOrchestrator:
                 )
                 self._write_state()
                 _success(f"Step '{step}' completed → {actual_output_dir}")
-            else:
+                # Auto-update pins after relevant steps.
+                from run import _update_auto_pin, _PIN_LATEST_EXPERIMENT, _PIN_LATEST_PIPELINE
+                if step == "train":
+                    _update_auto_pin(_PIN_LATEST_EXPERIMENT, actual_output_dir)            else:
                 self._state["steps"][step].update(
                     {
                         "status": "failed",
@@ -839,4 +870,5 @@ class PipelineOrchestrator:
                 sys.exit(rc)
 
         _success(f"Pipeline complete — {len(steps_to_run)} step(s) finished.")
-        _success(f"Pipeline dir: {self.pipeline_dir}")
+        _success(f"Pipeline dir: {self.pipeline_dir}")        from run import _update_auto_pin, _PIN_LATEST_PIPELINE
+        _update_auto_pin(_PIN_LATEST_PIPELINE, self.pipeline_dir)

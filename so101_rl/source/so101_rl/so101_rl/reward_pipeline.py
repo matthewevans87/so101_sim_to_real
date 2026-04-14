@@ -69,6 +69,26 @@ class TerminalRewardStep(RewardStep):
     the terminal mask returned by :meth:`RewardPipeline.get_dones`.
     """
 
+    def __init__(self, cfg: RewardCfg) -> None:
+        super().__init__(cfg)
+        self._fired: torch.Tensor | None = None
+        """Per-env bool tensor tracking whether this fire_once step has already
+        fired during the current episode.  Lazily initialised on first call."""
+
+    def _apply_fire_once(self, flag: torch.Tensor, env) -> torch.Tensor:
+        """Return a mask that is True only for the *first* step``flag`` is True
+        for each environment this episode.  Updates internal state."""
+        if self._fired is None:
+            self._fired = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
+        first_time = flag & ~self._fired
+        self._fired = self._fired | flag
+        return first_time
+
+    def reset_fired(self, env_ids) -> None:
+        """Clear the fire_once state for *env_ids* (called at episode reset)."""
+        if self._fired is not None:
+            self._fired[env_ids] = False
+
     @abstractmethod
     def done(self, ctx: StepContext) -> torch.Tensor:
         """Return a bool tensor of shape ``(num_envs,)`` — True for environments
@@ -132,21 +152,51 @@ class RewardPipeline:
                 mask = mask & (val == gate.eq)
         return mask
 
+    def get_done_reasons(self, ctx: StepContext) -> dict[str, torch.Tensor]:
+        """Return per-terminal-step done flags (float32, shape ``(num_envs,)``).
+
+        Includes **all** terminal steps (even those with ``terminate=False``) so
+        that milestone events (e.g. ``approach_phase_terminal``) are visible
+        alongside hard-stop conditions.  Gate conditions are applied, matching
+        the behaviour of :meth:`get_dones`.
+        """
+        reasons: dict[str, torch.Tensor] = {}
+        for step in self.terminal_steps:
+            done_flags = step.done(ctx)
+            if step._gates:
+                done_flags = done_flags & self._evaluate_gate_mask(step._gates, ctx)
+            reasons[step.name] = done_flags.float()
+        return reasons
+
     def get_dones(self, ctx: StepContext) -> torch.Tensor:
         """Return a bool tensor of shape ``(num_envs,)`` — True for any environment
         where at least one :class:`TerminalRewardStep` signals termination.
 
         Assumes metrics have already been computed for the current step.
         Gate conditions on terminal steps also suppress episode termination.
+        Steps with ``cfg.terminate=False`` fire their reward but never end the episode.
         """
         env = ctx.env
         terminal = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
         for step in self.terminal_steps:
+            if not step._cfg.terminate:
+                continue
             done_flags = step.done(ctx)
             if step._gates:
                 done_flags = done_flags & self._evaluate_gate_mask(step._gates, ctx)
             terminal = terminal | done_flags
         return terminal
+
+    def reset_idx(self, env_ids) -> None:
+        """Reset per-episode ``fire_once`` state for *env_ids*.
+
+        Must be called from the environment's ``_reset_idx`` after every
+        episode reset so that fire-once terminal steps can fire again in the
+        next episode.
+        """
+        for step in self.terminal_steps:
+            if step._cfg.fire_once:
+                step.reset_fired(env_ids)
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
         env = ctx.env
@@ -179,20 +229,23 @@ class RewardPipeline:
 
 class DistanceRewardStep(RewardStep):
     name = "rew_distance"
-    requires_metrics = frozenset({"grip_zone_cube_distance"})
+    requires_metrics = frozenset({"normalized_grip_zone_cube_distance"})
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
         env = ctx.env
         if self._cfg.mode == "progressive":
-            prev = self._prev("grip_zone_cube_distance", ctx)
+            prev = self._prev("normalized_grip_zone_cube_distance", ctx)
             if prev is None:
                 return torch.zeros(env.num_envs, device=env.device)
-            # Improvement = reduction in distance; clamp so regression is not penalized.
-            delta = (prev - ctx.metrics["grip_zone_cube_distance"]).clamp(min=0.0)
+            # Improvement = reduction in normalised distance; clamp so regression is not penalized.
+            delta = (prev - ctx.metrics["normalized_grip_zone_cube_distance"]).clamp(
+                min=0.0
+            )
             return delta * self._cfg.scale
         grip_zone_dist = 1 - (
             torch.exp(
-                -self._cfg.distance_pressure * ctx.metrics["grip_zone_cube_distance"]
+                -self._cfg.distance_pressure
+                * ctx.metrics["normalized_grip_zone_cube_distance"]
             )
         )
         return grip_zone_dist * self._cfg.scale
@@ -384,7 +437,11 @@ class ApproachPhaseTerminalRewardStep(TerminalRewardStep):
     def compute(self, ctx: StepContext) -> torch.Tensor:
         env = ctx.env
         flag = ctx.metrics["approach_phase_terminal"]
-        return flag.float() * self._cfg.scale
+        if self._cfg.fire_once:
+            active_flag = self._apply_fire_once(flag, env)
+        else:
+            active_flag = flag
+        return active_flag.float() * self._cfg.scale
 
     def done(self, ctx: StepContext) -> torch.Tensor:
         flag = ctx.metrics["approach_phase_terminal"]

@@ -14,7 +14,11 @@ a more user-friendly way.
 
 import argparse
 import copy
+import json
+import shutil
 import sys
+from datetime import datetime, timezone
+from pathlib import Path
 
 from isaaclab.app import AppLauncher
 
@@ -407,7 +411,22 @@ def main(
                 "--cnn_checkpoint requires vision_encoder.type == "
                 "'frozen_cnn'.  Switch to a frozen_cnn env config."
             )
-        env_cfg.vision_encoder.cnn_checkpoint = args_cli.cnn_checkpoint
+        # Embed a copy of the CNN checkpoint into the experiment directory so
+        # that collect_telemetry.py (and future tools) can locate it without
+        # any extra flags, and the experiment remains self-contained.
+        cnn_src = os.path.abspath(args_cli.cnn_checkpoint)
+        artifacts_path = Path(args_cli.artifacts_dir).resolve()
+        embedded_cnn = artifacts_path / "cnn_checkpoint.pt"
+        shutil.copy2(cnn_src, embedded_cnn)
+        provenance = {
+            "source_path": cnn_src,
+            "copied_at": datetime.now(timezone.utc).isoformat(),
+        }
+        (artifacts_path / "cnn_checkpoint_provenance.json").write_text(
+            json.dumps(provenance, indent=2)
+        )
+        print(f"[INFO] CNN checkpoint embedded: {embedded_cnn}")
+        env_cfg.vision_encoder.cnn_checkpoint = str(embedded_cnn)
 
     # create isaac environment
     env = gym.make(

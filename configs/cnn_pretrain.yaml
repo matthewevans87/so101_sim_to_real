@@ -46,6 +46,22 @@ curation:
   # change which episodes go into which split.
   split_seed: 0
 
+  # ── Distance-bin rebalancing ───────────────────────────────────────────────
+  # A second rebalancing pass (applied after step-bin rebalancing) that bins
+  # samples by grip-zone distance and caps over-represented mid-approach bins.
+  # This prevents the dominant ~10-25 mm hover zone from overwhelming the
+  # near-contact samples that are critical for accurate CNN predictions at
+  # small distances (cube_pos_gz, gripper_cube_alignment, etc.).
+  distance_rebalancing:
+    enabled: true
+    # Upper-bound edges of each distance bin (metres).  An implicit "+∞" bucket
+    # captures all samples beyond the last edge.
+    bin_edges_m: [0.010, 0.025, 0.060, 0.150, 0.400]
+    # Cap multiplier: bins with more than floor(median × cap_factor) samples
+    # are randomly downsampled.  More lenient than step-bin cap (1.5) to
+    # preserve natural distance variation while preventing dominance.
+    bin_cap_factor: 2.0
+
 # ── Image preprocessing ───────────────────────────────────────────────────────
 # Applied to RGB images (H, W, C) uint8 inside TelemetryDataset.__getitem__.
 # Step 1 (uint8_to_float_chw) is always applied; normalisation is optional.

@@ -384,3 +384,139 @@ Currently, even with a (small) penalty, the robot touches the work surface in si
 We're still having a lot of trouble in the approach phase. I think the multiplicative `approach_phase` reward is crushing the learning signal. I'm going to disable it. Also, I'm going to implement a tier approach that unlocks different reward signals at different phases. Also, I want to add a reward for a better approach vector: the axis alignment when grasping the cube matters.
 Also, I want to try moving away from a pure "distance" metric and try using a "improvement" metric: you only get more rewards if you next step moves you closer to the cube; no hovering to milk the rewards.
 
+## April 11, 2026
+
+We've changed a lot since last entry. Will have to look at the git logs. 
+
+Now have 
+- Gated rewards
+- Multiple instances of a reward (e.g., at different gate conditions)
+- Ability to set a terminal reward to not terminate
+- Ability to set a terminal reward to fire once per episode
+
+
+We're now working on trying to achieve grasp.
+
+---
+
+Suggested next consideration: Getting gripper to align with cube on axis.
+
+General Align + Distance is good, but `_dbg_approach_dist_exp` is struggling.
+Perhaps if we added axis alignment we could get the gripper into a better position. 
+
+Also, noticing that, when nearly in position, the policy still moves around a lot. Perhaps we could gate a stronger action penalty based on distance.
+
+## April 11, 2026 — Iterative CNN Bootstrap Plan
+
+Analysis of the CNN training data revealed that 0% of samples reach `approach_phase >= 0.90` (the terminal threshold), because the policy that collected the data never achieved it — `max(approach_phase) = 0.8999` across all 358k samples. The frozen CNN therefore has no representational coverage of near-contact distances, so the RL policy cannot learn to close the final 5mm gap regardless of reward shaping. The fix is an iterative bootstrap loop: lower the threshold to a value with training data coverage, run RL until the policy reliably hits it, re-collect, re-train the CNN on richer near-contact data, then raise the threshold again.
+
+### Checklist
+
+- [x] Diagnose root cause: confirm 0% training data coverage at `approach_phase >= 0.90` (see run `2026-04-11_10-13-14`)
+- [x] Lower `approach_phase_terminal.threshold` to `0.80` (30% training data coverage)
+- [x] Lower `grasp_phase` gate from `approach_phase >= 0.95` to `>= 0.80` to match
+- [x] Run RL training; confirm `_dbg_approach_dist_exp` now breaks past ~0.5 plateau
+- [x] Re-run `collect` step using new RL policy checkpoint to gather near-contact data
+- [x] Re-run `curate` + `train-cnn` on new dataset; verify `cube_pos_gz_mae` improves at short distances
+- [ ] Raise `approach_phase_terminal.threshold` back toward `0.90` and repeat if needed 
+
+
+*Side Note — `avoid_bumping_cube` threshold fix*
+`cube_widths` was set to `0.25`, which is impossible to satisfy without being *inside* the cube (minimum physical distance from centroid is `cube_width × 0.5 = 0.5`). Raised to `1.0` (= half cube-width radius from the surface). After restarting, `_dbg_approach_dist_exp` improved significantly faster.
+
+```yaml
+  - type: avoid_bumping_cube
+    enabled: true
+    scale: -0.1
+    cube_widths: 1.0  # was 0.25 — previously impossible without penetrating the cube
+```
+
+*Side Note — `grasp_phase_terminal` enabled*
+Enabled `grasp_phase_terminal` mirroring `approach_phase_terminal` (`terminate: false`, `fire_once: true`) to provide a 500-pt bonus for reaching `grasp_phase >= 0.80` without resetting the episode, allowing the lift phase to continue in the same rollout.
+
+```yaml
+  - type: grasp_phase_terminal
+    enabled: true
+    scale: 500.0
+    threshold: 0.80
+    terminate: false
+    fire_once: true
+```
+
+## April 12, 2026
+Trained CNN Gen2 based on Gen1. Gen2 uses better MLP head features; hoping to see improved perception at final approach. Were no CNN training examples sub-centimeter in Gen1, so, hoping to see improvements with Gen2, since such samples will be in distribution.
+
+## April 13, 2026
+
+With the Gen2 CNN, we're seeing improved performance; see `2026-04-13_08-08-52`. 
+
+- We need to see what is causing termination: timeout? cube out of range? etc.; it's certainly not (yet) lift. The `0` reward terminals need to be StepMetrics for logging purposes. 
+- Asymptotic behavior of `_dbg_approach_dist_exp` has moved from 0.5 to 0.6 upper bound. Concrete evidence of improvement. At `pressure=20` this implies distances ~0.025 on a 0.03 width cube. 
+
+Next things to try
+- Reduce distance pressure; see if a smoother gradient does better; I don't see why it would; I'd think a sharp gradient would be a very strong signal.
+- Include all termination events as metrics so we can see how episodes terminate in tensorboard
+- Reduce steps -> 50k, checkpoint interval -> 5k
+
+If reduced pressure shows improvement, do same for grasp phase. 
+
+Continue from April 11, 2026
+- [ ] Raise `approach_phase_terminal.threshold` back toward `0.90` and repeat if needed 
+
+
+*Critical Observation*
+The cube width is ~0.03. This means 0.03/2=0.015 is the lowest possible distance. Which means a distance of 0.025 is actually really close, It's only off by 1cm, and is perfectly suitable for grasping.
+
+We need to rework some of the reward computations:
+- Set `max_distance = 0.40`
+- Set `min_distance = CUBE_WIDTH/2`
+
+
+---
+
+As expected, reducing the distance pressure yields inferior results. with a distance pressure of `5` yielding distance asymptote at ~0.06. 
+
+Going to now fix the max/min distance described above and rerun. 
+
+---
+
+- Fixed max/min distance; updated metrics and rewards
+- Enhanced _get_dones() to log the cause of episode termination
+- Increased episode length back to 10 seconds; was seeing anecdotal visual behaviors that suggested a bit more time could result in better discovery.
+
+*Observations*
+- Seeing `grip_zone_cube_distance` drop more quickly that before! Which is good because we did **not** normalize this underlying value...
+  - Wait: now distance is *increasing*, not good.
+  - Changing pressure back to 20.
+
+With the newly normalized distance metrics, we need to fix this:
+
+```yaml
+  - type: grasp_phase
+    enabled: true
+    scale: 10.0
+    grip_force_pressure: 20.0
+    grip_force_target: 2.2  # 4.448 =~1 lbf in Newtons
+    mode: progressive
+    gates:
+      - metric: approach_phase
+        gte: 0.80
+      - metric: grip_zone_cube_distance
+        lte: 0.005 # <-- impossible
+```
+
+changing to
+
+```yaml
+  - type: grasp_phase
+    enabled: true
+    scale: 10.0
+    grip_force_pressure: 20.0
+    grip_force_target: 2.2  # 4.448 =~1 lbf in Newtons
+    mode: progressive
+    gates:
+      - metric: approach_phase
+        gte: 0.50 #lowering threshold
+      - metric: normalized_grip_zone_cube_distance
+        lte: 0.013 #0.5/(40-1.5) == ~0.5cm from cube edge in normalized units
+```

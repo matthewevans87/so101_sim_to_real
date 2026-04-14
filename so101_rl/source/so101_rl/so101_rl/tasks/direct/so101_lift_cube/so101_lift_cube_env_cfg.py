@@ -9,6 +9,7 @@ from so101_rl.configurations.debug import VIS_MARKER_CFG
 from so101_rl.configurations.so101 import (
     SO101_CFG,
     GRIPPER_CONTACT_SENSOR_CFG,
+    MOVING_JAW_CONTACT_SENSOR_CFG,
 )
 from so101_rl.configurations.cube import DEX_CUBE_CFG
 from so101_rl.configurations.camera import (
@@ -115,6 +116,12 @@ class So101LiftCubeCfg(DirectRLEnvCfg):
         prim_path="/World/envs/env_.*/Robot/gripper",
         filter_prim_paths_expr=["/World/envs/env_.*/Object"],
         debug_vis=_Y.sensors.gripper_contact.debug_vis,
+    )
+
+    moving_jaw_contact_sensor_cfg = MOVING_JAW_CONTACT_SENSOR_CFG.replace(  # type: ignore
+        prim_path="/World/envs/env_.*/Robot/moving_jaw_so101_v1",
+        filter_prim_paths_expr=["/World/envs/env_.*/Object"],
+        debug_vis=_Y.sensors.moving_jaw_contact.debug_vis,
     )
 
     table_contact_sensor_cfg = TABLE_CONTACT_SENSOR_CFG.replace(  # type: ignore

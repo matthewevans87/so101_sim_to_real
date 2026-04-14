@@ -99,6 +99,23 @@ def _validate_config(cfg: dict) -> None:
         raise ValueError("curation.step_bin_width must be >= 1")
     if float(cur["bin_cap_factor"]) <= 0:
         raise ValueError("curation.bin_cap_factor must be > 0")
+    dist_reb = cur.get("distance_rebalancing")
+    if dist_reb is not None and dist_reb.get("enabled", False):
+        _require(
+            dist_reb,
+            "bin_edges_m",
+            "bin_cap_factor",
+            section="curation.distance_rebalancing",
+        )
+        if (
+            not isinstance(dist_reb["bin_edges_m"], list)
+            or len(dist_reb["bin_edges_m"]) < 1
+        ):
+            raise ValueError(
+                "curation.distance_rebalancing.bin_edges_m must be a non-empty list of floats"
+            )
+        if float(dist_reb["bin_cap_factor"]) <= 0:
+            raise ValueError("curation.distance_rebalancing.bin_cap_factor must be > 0")
 
 
 # ── Shard index loading ───────────────────────────────────────────────────────
@@ -112,7 +129,9 @@ def _load_shard_index(metadata: dict, telemetry_dir: Path) -> list[dict]:
         {"shard_path": str, "row": int, "episode_step": int,
          "episode_id": int, "env_id": int}
 
-    Only the three integer arrays are loaded; full RGB is not read here.
+    Loaded columns: ``episode_step``, ``episode_id``, ``env_id``,
+    ``grip_zone_cube_distance`` (derived from ``cube_pos_gz``).  Full RGB is
+    not read here.
     """
     records: list[dict] = []
     _SHARD_SUBDIR = "telemetry_shards"
@@ -127,6 +146,10 @@ def _load_shard_index(metadata: dict, telemetry_dir: Path) -> list[dict]:
         episode_steps = data["episode_step"]  # (S,) int32
         episode_ids = data["episode_id"]  # (S,) int32
         env_ids = data["env_id"]  # (S,) int32
+        # cube_pos_gz is the 3-D cube position in the grip-zone frame (metres).
+        # Its L2 norm is grip_zone_cube_distance, used for distance-bin rebalancing.
+        cube_pos_gz = data["cube_pos_gz"]  # (S, 3) float32
+        grip_zone_distances = np.linalg.norm(cube_pos_gz, axis=-1)  # (S,) float32
         shard_path_str = str(shard_path)
         for row in range(len(episode_steps)):
             records.append(
@@ -136,6 +159,7 @@ def _load_shard_index(metadata: dict, telemetry_dir: Path) -> list[dict]:
                     "episode_step": int(episode_steps[row]),
                     "episode_id": int(episode_ids[row]),
                     "env_id": int(env_ids[row]),
+                    "grip_zone_cube_distance": float(grip_zone_distances[row]),
                 }
             )
     return records
@@ -233,6 +257,51 @@ def _rebalance_by_step_bin(
     return balanced
 
 
+def _rebalance_by_distance_bin(
+    records: list[dict],
+    bin_edges_m: list[float],
+    bin_cap_factor: float,
+    rng: random.Random,
+) -> list[dict]:
+    """Rebalance samples across grip-zone distance bins.
+
+    Bins are defined by *bin_edges_m* (a sorted list of upper-bound edges in
+    metres).  An implicit final bin captures all samples beyond the last edge.
+    Bins with more than ``floor(median_count × bin_cap_factor)`` samples are
+    randomly downsampled; bins below the cap are preserved intact.
+
+    This corrects for the natural over-representation of the mid-approach zone
+    (where the policy tends to hover) relative to near-contact samples that are
+    critical for the CNN heads — particularly ``cube_pos_gz`` — to represent
+    accurately at short distances.
+    """
+    sorted_edges = sorted(float(e) for e in bin_edges_m)
+
+    def _bin_idx(d: float) -> int:
+        for i, edge in enumerate(sorted_edges):
+            if d < edge:
+                return i
+        return len(sorted_edges)  # beyond the last edge
+
+    by_bin: dict[int, list[dict]] = defaultdict(list)
+    for rec in records:
+        by_bin[_bin_idx(rec["grip_zone_cube_distance"])].append(rec)
+    if not by_bin:
+        return records
+
+    bin_counts = [len(v) for v in by_bin.values()]
+    median_count = float(np.median(bin_counts))
+    cap = max(1, math.floor(median_count * bin_cap_factor))
+
+    balanced: list[dict] = []
+    for bin_recs in by_bin.values():
+        if len(bin_recs) > cap:
+            balanced.extend(rng.sample(bin_recs, cap))
+        else:
+            balanced.extend(bin_recs)
+    return balanced
+
+
 # ── Manifest construction ─────────────────────────────────────────────────────
 
 
@@ -272,6 +341,34 @@ def _step_histogram(records: list[dict], step_bin_width: int) -> dict[str, int]:
         bin_idx = rec["episode_step"] // step_bin_width
         hist[bin_idx] += 1
     return {str(k): v for k, v in sorted(hist.items())}
+
+
+def _distance_histogram(
+    records: list[dict], bin_edges_m: list[float]
+) -> dict[str, int]:
+    """Return a distance distribution histogram keyed by human-readable range strings.
+
+    Bin edges are in metres; keys are formatted as ``'0-10mm'``, ``'10-25mm'``, etc.,
+    with a final ``'Xmm+'`` bucket for samples beyond the last edge.
+    """
+    sorted_edges = sorted(float(e) for e in bin_edges_m)
+
+    def _label(d: float) -> str:
+        for i, edge in enumerate(sorted_edges):
+            if d < edge:
+                lo = 0.0 if i == 0 else sorted_edges[i - 1]
+                return f"{lo * 1000:.0f}-{edge * 1000:.0f}mm"
+        return f"{sorted_edges[-1] * 1000:.0f}mm+"
+
+    hist: dict[str, int] = defaultdict(int)
+    for rec in records:
+        hist[_label(rec["grip_zone_cube_distance"])] += 1
+    # Return in edge order, not insertion order.
+    ordered_keys = [
+        f"{(0.0 if i == 0 else sorted_edges[i - 1]) * 1000:.0f}-{e * 1000:.0f}mm"
+        for i, e in enumerate(sorted_edges)
+    ] + [f"{sorted_edges[-1] * 1000:.0f}mm+"]
+    return {k: int(hist.get(k, 0)) for k in ordered_keys}
 
 
 # ── Entrypoint ────────────────────────────────────────────────────────────────
@@ -346,6 +443,15 @@ def main() -> None:
 
     pre_hist_all = _step_histogram(all_records, step_bin_width)
 
+    dist_reb_cfg = cur.get("distance_rebalancing") or {}
+    dist_reb_enabled = bool(dist_reb_cfg.get("enabled", False))
+    dist_bin_edges_m: list[float] = [
+        float(e)
+        for e in dist_reb_cfg.get("bin_edges_m", [0.010, 0.025, 0.060, 0.150, 0.400])
+    ]
+    dist_bin_cap_factor: float = float(dist_reb_cfg.get("bin_cap_factor", 2.0))
+    pre_dist_hist_all = _distance_histogram(all_records, dist_bin_edges_m)
+
     print(
         f"[curate] Splitting episodes "
         f"(val={val_fraction}, test={test_fraction}, split_seed={split_seed}) …"
@@ -379,9 +485,26 @@ def main() -> None:
     )
 
     print(
-        f"[curate] Post-rebalance — train: {len(train_recs)}, "
+        f"[curate] Post-step-rebalance — train: {len(train_recs)}, "
         f"val: {len(val_recs)}, test: {len(test_recs)}"
     )
+
+    if dist_reb_enabled:
+        edges_str = ", ".join(f"{e * 1000:.0f}mm" for e in dist_bin_edges_m)
+        print(f"[curate] Applying distance-bin rebalancing (edges: {edges_str}) …")
+        train_recs = _rebalance_by_distance_bin(
+            train_recs, dist_bin_edges_m, dist_bin_cap_factor, rng
+        )
+        val_recs = _rebalance_by_distance_bin(
+            val_recs, dist_bin_edges_m, dist_bin_cap_factor, rng
+        )
+        test_recs = _rebalance_by_distance_bin(
+            test_recs, dist_bin_edges_m, dist_bin_cap_factor, rng
+        )
+        print(
+            f"[curate] Post-distance-rebalance — train: {len(train_recs)}, "
+            f"val: {len(val_recs)}, test: {len(test_recs)}"
+        )
 
     # ── Write manifests ──
     for split, recs in [("train", train_recs), ("val", val_recs), ("test", test_recs)]:
@@ -405,6 +528,8 @@ def main() -> None:
         "curation": {k: v for k, v in cur.items()},
         "raw_total_samples": total_raw,
         "step_histogram_pre_all": pre_hist_all,
+        "distance_histogram_pre_all": pre_dist_hist_all,
+        "distance_rebalancing_enabled": dist_reb_enabled,
         "splits": {
             "train": {
                 "episodes": len(train_eps),
@@ -413,6 +538,9 @@ def main() -> None:
                 ),
                 "samples_post_rebalance": len(train_recs),
                 "step_histogram_post": _step_histogram(train_recs, step_bin_width),
+                "distance_histogram_post": _distance_histogram(
+                    train_recs, dist_bin_edges_m
+                ),
             },
             "val": {
                 "episodes": len(val_eps),
@@ -421,6 +549,9 @@ def main() -> None:
                 ),
                 "samples_post_rebalance": len(val_recs),
                 "step_histogram_post": _step_histogram(val_recs, step_bin_width),
+                "distance_histogram_post": _distance_histogram(
+                    val_recs, dist_bin_edges_m
+                ),
             },
             "test": {
                 "episodes": len(test_eps),
@@ -429,6 +560,9 @@ def main() -> None:
                 ),
                 "samples_post_rebalance": len(test_recs),
                 "step_histogram_post": _step_histogram(test_recs, step_bin_width),
+                "distance_histogram_post": _distance_histogram(
+                    test_recs, dist_bin_edges_m
+                ),
             },
         },
     }

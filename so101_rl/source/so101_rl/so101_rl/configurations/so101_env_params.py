@@ -256,6 +256,7 @@ class BinaryGripperActionCfg:
 @dataclass
 class BehaviorCfg:
     binary_gripper_action: BinaryGripperActionCfg
+    max_cube_distance: float
 
 
 # ---------------------------------------------------------------------------
@@ -299,6 +300,16 @@ class RewardCfg:
     gates: list[GateCfg] = field(default_factory=list)
     """Optional gate conditions. Reward (and termination for terminal steps) is
     suppressed for any environment where a gate condition is not met."""
+    terminate: bool = True
+    """For terminal reward steps only: whether firing this step actually ends the
+    episode.  Set ``terminate: false`` to give a large one-off bonus without
+    resetting the environment, allowing subsequent phases (e.g. grasp_phase) to
+    continue in the same episode."""
+    fire_once: bool = False
+    """For terminal reward steps with ``terminate: false`` only: when ``True``,
+    the reward fires at most once per episode (on the first step the condition
+    becomes True).  Subsequent steps where the condition remains True yield no
+    additional reward.  Has no effect when ``terminate: true``."""
 
 
 @dataclass(kw_only=True)
@@ -331,7 +342,6 @@ class SuccessLiftFractionRewardCfg(RewardCfg):
 @dataclass
 class ApproachDistanceMetricCfg:
     pressure: float
-    distance_max: float
     linear_weight: float
 
 
@@ -366,8 +376,9 @@ class MetricsCfg:
 
 @dataclass(kw_only=True)
 class GraspPhaseRewardCfg(RewardCfg):
-    grip_force_pressure: float
-    grip_force_target: float
+    grip_force_sat_threshold: (
+        float  # bilateral pinch force (N) at which grasp_phase saturates to 1.0
+    )
 
 
 @dataclass(kw_only=True)
@@ -550,6 +561,7 @@ class TableContactSensorCfg:
 class SensorsCfg:
     camera: CameraSensorCfg
     gripper_contact: DebugVisCfg
+    moving_jaw_contact: DebugVisCfg
     table_contact: TableContactSensorCfg
     gripper_transform: DebugVisCfg
 

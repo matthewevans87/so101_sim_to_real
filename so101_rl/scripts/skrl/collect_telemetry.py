@@ -113,6 +113,16 @@ parser.add_argument(
         "--algorithm determines the default entry point."
     ),
 )
+parser.add_argument(
+    "--cnn_checkpoint",
+    type=str,
+    default=None,
+    help=(
+        "Path to a pretrained CNN backbone checkpoint (.pt). "
+        "If omitted, the script auto-detects cnn_checkpoint.pt inside the experiment directory. "
+        "Required when vision_encoder.type == 'frozen_cnn' and no embedded checkpoint exists."
+    ),
+)
 
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
@@ -549,6 +559,34 @@ def main(
     env_config_path = experiment_path / "env_config.yaml"
     if env_config_path.exists():
         os.environ["SO101_ENV_CONFIG"] = str(env_config_path)
+
+    # Resolve CNN checkpoint for frozen_cnn experiments.
+    # Priority: explicit --cnn_checkpoint flag > embedded cnn_checkpoint.pt in experiment dir.
+    cnn_checkpoint_path: Path | None = None
+    if args_cli.cnn_checkpoint:
+        cnn_checkpoint_path = Path(args_cli.cnn_checkpoint).resolve()
+        if not cnn_checkpoint_path.is_file():
+            raise FileNotFoundError(
+                f"--cnn_checkpoint not found: {cnn_checkpoint_path}"
+            )
+    else:
+        embedded = experiment_path / "cnn_checkpoint.pt"
+        if embedded.is_file():
+            cnn_checkpoint_path = embedded
+            print(
+                f"[INFO] Auto-detected embedded CNN checkpoint: {cnn_checkpoint_path}"
+            )
+
+    if cnn_checkpoint_path is not None:
+        vision_encoder = getattr(env_cfg, "vision_encoder", None)
+        if vision_encoder is not None and vision_encoder.type == "frozen_cnn":
+            env_cfg.vision_encoder.cnn_checkpoint = str(cnn_checkpoint_path)
+            print(f"[INFO] CNN checkpoint wired into env_cfg: {cnn_checkpoint_path}")
+        else:
+            print(
+                "[WARNING] --cnn_checkpoint supplied but vision_encoder.type != 'frozen_cnn'; "
+                "checkpoint will be ignored."
+            )
 
     env_cfg.scene.num_envs = (
         args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs

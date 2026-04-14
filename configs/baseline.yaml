@@ -77,11 +77,11 @@ debug:
 behavior:
   binary_gripper_action:
     enabled: false
+  max_cube_distance: 0.40
 
 metrics:
   approach_distance:
     pressure: 20.0
-    distance_max: 0.40
     linear_weight: 5.0
   approach_alignment:
     pressure: 1.0
@@ -129,8 +129,7 @@ rewards:
   - type: grasp_phase
     enabled: false
     scale: 10.0
-    grip_force_pressure: 20.0
-    grip_force_target: 2.2  # 4.448 =~1 lbf in Newtons
+    grip_force_sat_threshold: 5.0  # bilateral pinch force (N) to saturate
 
   # shaping reward for keeping wrist roll at -90° (ideal for top-down and side grasps)
   - type: wrist_roll_pose
@@ -280,6 +279,8 @@ sensors:
     height: 108
     width: 192
   gripper_contact:
+    debug_vis: false
+  moving_jaw_contact:
     debug_vis: false
   table_contact:
     track_pose: false

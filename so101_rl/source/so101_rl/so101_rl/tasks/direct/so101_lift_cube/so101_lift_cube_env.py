@@ -100,6 +100,7 @@ class So101LiftCube(DirectRLEnv):
         self._dof_idx, _ = self.robot.find_joints(self.cfg.joints.active)
         self._all_joint_idx, _ = self.robot.find_joints(self.cfg.joints.all)
         self._ee_body_idx, _ = self.robot.find_bodies(self.cfg.gripper.ee_link_name)
+        self._moving_jaw_body_idx, _ = self.robot.find_bodies("moving_jaw_so101_v1")
         self._gripper_joint_idx, _ = self.robot.find_joints(
             [self.cfg.gripper.ee_link_name]
         )
@@ -334,6 +335,9 @@ class So101LiftCube(DirectRLEnv):
             else None
         )
         self.gripper_contact_sensor = ContactSensor(self.cfg.gripper_contact_sensor_cfg)
+        self.moving_jaw_contact_sensor = ContactSensor(
+            self.cfg.moving_jaw_contact_sensor_cfg
+        )
         self.table_contact_sensor = ContactSensor(self.cfg.table_contact_sensor_cfg)
         self.gripper_tf = FrameTransformer(self.cfg.gripper_transforms_cfg)
 
@@ -351,6 +355,7 @@ class So101LiftCube(DirectRLEnv):
         if self.overhead_camera is not None:
             self.scene.sensors["overhead_camera"] = self.overhead_camera
         self.scene.sensors["gripper_contact_sensor"] = self.gripper_contact_sensor
+        self.scene.sensors["moving_jaw_contact_sensor"] = self.moving_jaw_contact_sensor
         self.scene.sensors["table_contact_sensor"] = self.table_contact_sensor
         self.scene.sensors["gripper_tf"] = self.gripper_tf
 
@@ -531,6 +536,15 @@ class So101LiftCube(DirectRLEnv):
 
         terminal = self.reward_pipeline.get_dones(self._step_ctx)
 
+        # Log per-reason termination signals for TensorBoard diagnostics.
+        self.extras["log"]["Termination/time_out"] = time_out.float().mean()
+        self.extras["per_env_log"]["Termination/time_out"] = time_out.float()
+        for name, flags in self.reward_pipeline.get_done_reasons(
+            self._step_ctx
+        ).items():
+            self.extras["log"][f"Termination/{name}"] = flags.mean()
+            self.extras["per_env_log"][f"Termination/{name}"] = flags
+
         return terminal, time_out
 
     def _reset_idx(self, env_ids: Sequence[int] | None):
@@ -586,6 +600,9 @@ class So101LiftCube(DirectRLEnv):
                 self._step_ctx.prev_metrics[key][env_ids] = val[env_ids].clone()
             else:
                 self._step_ctx.prev_metrics[key] = val.clone()
+
+        # Clear fire_once state for reset envs so terminal steps can fire again.
+        self.reward_pipeline.reset_idx(env_ids)
 
     def _compute_step_metrics(self) -> None:
         """Compute custom metrics at each step for logging purposes."""

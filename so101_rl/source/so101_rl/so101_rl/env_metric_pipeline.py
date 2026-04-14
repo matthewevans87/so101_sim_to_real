@@ -9,7 +9,7 @@ from pxr import UsdGeom  # type: ignore
 
 from isaaclab.utils.math import quat_apply
 
-from so101_rl.configurations.cube import CUBE_DEFAULT_DIMS
+from so101_rl.configurations.cube import CUBE_DEFAULT_DIMS, CUBE_WIDTH
 from so101_rl.dr_pipeline import DRContext
 
 
@@ -134,7 +134,7 @@ class CubeDimsEnvMetricStep(EnvMetricStep):
     consume the sampled values directly without re-sampling.
     """
 
-    produces = frozenset({"dr_cube_scale"})
+    produces = frozenset({"dr_cube_scale", "env_cube_width", "env_min_cube_distance"})
     depends_on = frozenset()
 
     def apply(self, ctx: DRContext) -> None:
@@ -142,10 +142,18 @@ class CubeDimsEnvMetricStep(EnvMetricStep):
         n = len(ctx.env_ids)
         env_ids_t = torch.as_tensor(list(ctx.env_ids), device=env.device)
 
-        # Initialise full tensor on first call (all-ones = no scale change).
+        # Initialise full tensors on first call.
         if "dr_cube_scale" not in env.env_metrics:
             env.env_metrics["dr_cube_scale"] = torch.ones(
                 env.num_envs, 3, device=env.device, dtype=torch.float32
+            )
+        if "env_cube_width" not in env.env_metrics:
+            env.env_metrics["env_cube_width"] = torch.zeros(
+                env.num_envs, device=env.device, dtype=torch.float32
+            )
+        if "env_min_cube_distance" not in env.env_metrics:
+            env.env_metrics["env_min_cube_distance"] = torch.zeros(
+                env.num_envs, device=env.device, dtype=torch.float32
             )
 
         size_range = env.cfg.domain_randomization.cube.size_range
@@ -157,6 +165,9 @@ class CubeDimsEnvMetricStep(EnvMetricStep):
         env.env_metrics["dr_cube_scale"][env_ids_t] = scalar_scales.unsqueeze(
             -1
         ).expand(-1, 3)
+        cube_widths = scalar_scales * CUBE_WIDTH  # (n,)
+        env.env_metrics["env_cube_width"][env_ids_t] = cube_widths
+        env.env_metrics["env_min_cube_distance"][env_ids_t] = cube_widths / 2.0
 
 
 # Fixed clearance (metres) added above the tooth surface when placing the cube centroid.
