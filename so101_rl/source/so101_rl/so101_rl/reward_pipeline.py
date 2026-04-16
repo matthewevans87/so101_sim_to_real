@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from typing import Any, Generic, TypeVar
 
 import torch
 
@@ -19,9 +20,12 @@ from so101_rl.configurations.so101_env_params import (
     ApproachPhaseTerminalRewardCfg,
     GraspPhaseTerminalRewardCfg,
     WristRollPoseRewardCfg,
+    ActionRewardCfg,
     _from_dict,
 )
 from so101_rl.metric_pipeline import StepContext
+
+CfgT = TypeVar("CfgT", bound=RewardCfg)
 
 
 # ---------------------------------------------------------------------------
@@ -29,7 +33,7 @@ from so101_rl.metric_pipeline import StepContext
 # ---------------------------------------------------------------------------
 
 
-class RewardStep(ABC):
+class RewardStep(ABC, Generic[CfgT]):
     """Computes a scalar reward contribution for every environment."""
 
     name: str
@@ -43,8 +47,8 @@ class RewardStep(ABC):
     """Keys from ``env.env_metrics`` (produced by :class:`EnvMetricStep`) that
     this step reads during :meth:`compute`."""
 
-    def __init__(self, cfg: RewardCfg) -> None:
-        self._cfg = cfg
+    def __init__(self, cfg: CfgT) -> None:
+        self._cfg: CfgT = cfg
         self._gates: list[GateCfg] = cfg.gates
 
     def _prev(self, key: str, ctx: StepContext) -> torch.Tensor | None:
@@ -61,7 +65,7 @@ class RewardStep(ABC):
         ...
 
 
-class TerminalRewardStep(RewardStep):
+class TerminalRewardStep(RewardStep[CfgT]):
     """A :class:`RewardStep` that also signals episode termination.
 
     Subclasses must implement both :meth:`compute` (inherited) and
@@ -69,7 +73,7 @@ class TerminalRewardStep(RewardStep):
     the terminal mask returned by :meth:`RewardPipeline.get_dones`.
     """
 
-    def __init__(self, cfg: RewardCfg) -> None:
+    def __init__(self, cfg: CfgT) -> None:
         super().__init__(cfg)
         self._fired: torch.Tensor | None = None
         """Per-env bool tensor tracking whether this fire_once step has already
@@ -227,8 +231,8 @@ class RewardPipeline:
 # ---------------------------------------------------------------------------
 
 
-class DistanceRewardStep(RewardStep):
-    name = "rew_distance"
+class DistanceRewardStep(RewardStep[DistanceRewardCfg]):
+    name = "distance"
     requires_metrics = frozenset({"normalized_grip_zone_cube_distance"})
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
@@ -251,8 +255,8 @@ class DistanceRewardStep(RewardStep):
         return grip_zone_dist * self._cfg.scale
 
 
-class GripCubeRewardStep(RewardStep):
-    name = "rew_grip_cube"
+class GripCubeRewardStep(RewardStep[GripCubeRewardCfg]):
+    name = "grip_cube"
     requires_metrics = frozenset(
         {"is_cube_in_grip_position", "gripper_cube_contact_force_magnitude"}
     )
@@ -266,8 +270,8 @@ class GripCubeRewardStep(RewardStep):
         )
 
 
-class LiftCubeRewardStep(RewardStep):
-    name = "rew_lift_cube"
+class LiftCubeRewardStep(RewardStep[RewardCfg]):
+    name = "lift_cube"
     requires_metrics = frozenset({"cube_lift_fraction"})
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
@@ -286,8 +290,8 @@ class LiftCubeRewardStep(RewardStep):
 # ---------------------------------------------------------------------------
 
 
-class GripperCubeAlignmentRewardStep(RewardStep):
-    name = "rew_gripper_cube_alignment"
+class GripperCubeAlignmentRewardStep(RewardStep[RewardCfg]):
+    name = "gripper_cube_alignment"
     requires_metrics = frozenset({"is_cube_gripped", "gripper_cube_alignment"})
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
@@ -301,8 +305,8 @@ class GripperCubeAlignmentRewardStep(RewardStep):
         )
 
 
-class CloseGripperRewardStep(RewardStep):
-    name = "rew_close_gripper"
+class CloseGripperRewardStep(RewardStep[CloseGripperRewardCfg]):
+    name = "close_gripper"
     requires_metrics = frozenset({"is_cube_in_grip_position"})
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
@@ -324,20 +328,39 @@ class CloseGripperRewardStep(RewardStep):
 # ---------------------------------------------------------------------------
 
 
-class ActionRewardStep(RewardStep):
-    name = "rew_action"
+class ActionRewardStep(RewardStep[ActionRewardCfg]):
+    name = "action"
     requires_metrics = frozenset()
+
+    def __init__(self, cfg: ActionRewardCfg) -> None:
+        super().__init__(cfg)
+        self._joint_indices: list[int] | None = None
+
+    def _resolve_indices(self, env) -> list[int]:
+        if self._joint_indices is None:
+            active = list(env.cfg.joints.active)
+            if self._cfg.joints:
+                missing = [j for j in self._cfg.joints if j not in active]
+                if missing:
+                    raise ValueError(
+                        f"ActionRewardStep: joints {missing} not found in active joints {active}"
+                    )
+                self._joint_indices = [active.index(j) for j in self._cfg.joints]
+            else:
+                self._joint_indices = list(range(len(active)))
+        return self._joint_indices
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
         env = ctx.env
         if env.actions is None:
             return torch.zeros(env.num_envs, device=env.device)
-        delta = env.actions - env.prev_actions
+        indices = self._resolve_indices(env)
+        delta = env.actions[:, indices] - env.prev_actions[:, indices]
         return self._cfg.scale * torch.sum(torch.abs(delta), dim=-1)
 
 
-class EELinearSpeedRewardStep(RewardStep):
-    name = "rew_ee_linear_speed"
+class EELinearSpeedRewardStep(RewardStep[EeLinearSpeedRewardCfg]):
+    name = "ee_linear_speed"
     requires_metrics = frozenset()
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
@@ -349,8 +372,8 @@ class EELinearSpeedRewardStep(RewardStep):
         return self._cfg.scale * (v_excess + v_excess**2)
 
 
-class JointSpeedRewardStep(RewardStep):
-    name = "rew_joint_speed"
+class JointSpeedRewardStep(RewardStep[RewardCfg]):
+    name = "joint_speed"
     requires_metrics = frozenset()
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
@@ -364,8 +387,10 @@ class JointSpeedRewardStep(RewardStep):
 # ---------------------------------------------------------------------------
 
 
-class SuccessLiftFractionTerminalRewardStep(TerminalRewardStep):
-    name = "rew_success_lift_fraction_terminal"
+class SuccessLiftFractionTerminalRewardStep(
+    TerminalRewardStep[SuccessLiftFractionRewardCfg]
+):
+    name = "success_lift_fraction_terminal"
     requires_metrics = frozenset({"is_success_lift_fraction_terminal"})
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
@@ -381,8 +406,8 @@ class SuccessLiftFractionTerminalRewardStep(TerminalRewardStep):
         return ctx.metrics["is_success_lift_fraction_terminal"]
 
 
-class SafetyTouchTableTerminalRewardStep(TerminalRewardStep):
-    name = "rew_safety_touch_table_terminal"
+class SafetyTouchTableTerminalRewardStep(TerminalRewardStep[RewardCfg]):
+    name = "safety_touch_table_terminal"
     requires_metrics = frozenset({"is_table_touched"})
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
@@ -401,8 +426,8 @@ class SafetyTouchTableTerminalRewardStep(TerminalRewardStep):
         return ctx.metrics["is_table_touched"]
 
 
-class SafetyTouchTableRewardStep(RewardStep):
-    name = "rew_safety_touch_table"
+class SafetyTouchTableRewardStep(RewardStep[RewardCfg]):
+    name = "safety_touch_table"
     requires_metrics = frozenset({"is_table_touched"})
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
@@ -418,8 +443,10 @@ class SafetyTouchTableRewardStep(RewardStep):
         )
 
 
-class CubeOutOfRangeTerminalRewardStep(TerminalRewardStep):
-    name = "rew_cube_out_of_range_terminal"
+class CubeOutOfRangeTerminalRewardStep(
+    TerminalRewardStep[CubeOutOfRangeTerminalRewardCfg]
+):
+    name = "cube_out_of_range_terminal"
     requires_metrics = frozenset({"is_cube_out_of_range"})
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
@@ -430,8 +457,10 @@ class CubeOutOfRangeTerminalRewardStep(TerminalRewardStep):
         return ctx.metrics["is_cube_out_of_range"]
 
 
-class ApproachPhaseTerminalRewardStep(TerminalRewardStep):
-    name = "rew_approach_phase_terminal"
+class ApproachPhaseTerminalRewardStep(
+    TerminalRewardStep[ApproachPhaseTerminalRewardCfg]
+):
+    name = "approach_phase_terminal"
     requires_metrics = frozenset({"approach_phase_terminal"})
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
@@ -448,8 +477,8 @@ class ApproachPhaseTerminalRewardStep(TerminalRewardStep):
         return flag
 
 
-class GraspPhaseTerminalRewardStep(TerminalRewardStep):
-    name = "rew_grasp_phase_terminal"
+class GraspPhaseTerminalRewardStep(TerminalRewardStep[GraspPhaseTerminalRewardCfg]):
+    name = "grasp_phase_terminal"
     requires_metrics = frozenset({"grasp_phase_terminal", "approach_phase_terminal"})
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
@@ -472,8 +501,8 @@ class GraspPhaseTerminalRewardStep(TerminalRewardStep):
 # ---------------------------------------------------------------------------
 
 
-class ApproachDistanceRewardStep(RewardStep):
-    name = "rew_approach_distance"
+class ApproachDistanceRewardStep(RewardStep[RewardCfg]):
+    name = "approach_distance"
     requires_metrics = frozenset({"approach_distance"})
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
@@ -487,8 +516,8 @@ class ApproachDistanceRewardStep(RewardStep):
         return ctx.metrics["approach_distance"] * self._cfg.scale
 
 
-class ApproachAlignmentRewardStep(RewardStep):
-    name = "rew_approach_alignment"
+class ApproachAlignmentRewardStep(RewardStep[RewardCfg]):
+    name = "approach_alignment"
     requires_metrics = frozenset({"approach_alignment"})
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
@@ -502,8 +531,8 @@ class ApproachAlignmentRewardStep(RewardStep):
         return ctx.metrics["approach_alignment"] * self._cfg.scale
 
 
-class ApproachGripperPoseRewardStep(RewardStep):
-    name = "rew_approach_gripper_pose"
+class ApproachGripperPoseRewardStep(RewardStep[RewardCfg]):
+    name = "approach_gripper_pose"
     requires_metrics = frozenset({"approach_gripper_pose"})
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
@@ -517,8 +546,8 @@ class ApproachGripperPoseRewardStep(RewardStep):
         return ctx.metrics["approach_gripper_pose"] * self._cfg.scale
 
 
-class ApproachPhaseRewardStep(RewardStep):
-    name = "rew_approach_phase"
+class ApproachPhaseRewardStep(RewardStep[RewardCfg]):
+    name = "approach_phase"
     requires_metrics = frozenset({"approach_phase"})
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
@@ -532,8 +561,8 @@ class ApproachPhaseRewardStep(RewardStep):
         return ctx.metrics["approach_phase"] * self._cfg.scale
 
 
-class AvoidBumpingCubeRewardStep(RewardStep):
-    name = "rew_avoid_bumping_cube"
+class AvoidBumpingCubeRewardStep(RewardStep[AvoidBumpingCubeRewardCfg]):
+    name = "avoid_bumping_cube"
     requires_metrics = frozenset(
         {"gripper_cube_contact_force_magnitude", "grip_zone_cube_distance"}
     )
@@ -564,8 +593,8 @@ class AvoidBumpingCubeRewardStep(RewardStep):
 # ---------------------------------------------------------------------------
 
 
-class GraspPhaseRewardStep(RewardStep):
-    name = "rew_grasp_phase"
+class GraspPhaseRewardStep(RewardStep[GraspPhaseRewardCfg]):
+    name = "grasp_phase"
     requires_metrics = frozenset({"grasp_phase", "approach_phase_terminal"})
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
@@ -588,7 +617,7 @@ class GraspPhaseRewardStep(RewardStep):
 # ---------------------------------------------------------------------------
 
 
-class WristRollPoseRewardStep(RewardStep):
+class WristRollPoseRewardStep(RewardStep[WristRollPoseRewardCfg]):
     """Rewards keeping the wrist roll joint at a target angle.
 
     Uses an exponential kernel: ``exp(-pressure * |q - target_rad|) * scale``.
@@ -596,7 +625,7 @@ class WristRollPoseRewardStep(RewardStep):
     The ideal value for both top-down and side grasps is -90° (≈ -1.5708 rad).
     """
 
-    name = "rew_wrist_roll_pose"
+    name = "wrist_roll_pose"
     requires_metrics = frozenset()
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
@@ -610,13 +639,13 @@ class WristRollPoseRewardStep(RewardStep):
 # Factory helper
 # ---------------------------------------------------------------------------
 
-REWARD_STEP_REGISTRY: dict[str, tuple[type[RewardStep], type[RewardCfg]]] = {
+REWARD_STEP_REGISTRY: dict[str, tuple[type[RewardStep[Any]], type[RewardCfg]]] = {
     "distance": (DistanceRewardStep, DistanceRewardCfg),
     "grip_cube": (GripCubeRewardStep, GripCubeRewardCfg),
     "lift_cube": (LiftCubeRewardStep, RewardCfg),
     "gripper_cube_alignment": (GripperCubeAlignmentRewardStep, RewardCfg),
     "close_gripper": (CloseGripperRewardStep, CloseGripperRewardCfg),
-    "action": (ActionRewardStep, RewardCfg),
+    "action": (ActionRewardStep, ActionRewardCfg),
     "ee_linear_speed": (EELinearSpeedRewardStep, EeLinearSpeedRewardCfg),
     "joint_speed": (JointSpeedRewardStep, RewardCfg),
     "success_lift_fraction_terminal": (

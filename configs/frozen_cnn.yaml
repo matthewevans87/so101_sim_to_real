@@ -101,7 +101,8 @@ rewards:
   # mode: progressive        — reward only the improvement delta vs the previous step
   #                            (clamped to min=0; regressions are not penalized).
 
-  # Approach Phase Rewards
+
+  # APPROACH
   - type: approach_distance
     enabled: true
     scale: 20.0
@@ -116,30 +117,6 @@ rewards:
     enabled: false
     scale: 1.0
 
-  # # distance from gripper to cube (meters)
-  # - type: distance
-  #   enabled: false
-  #   scale: -5.0
-  #   distance_pressure: 20.0
-
-  # shaping reward for keeping wrist roll at -90° (ideal for top-down and side grasps)
-  - type: wrist_roll_pose
-    enabled: true
-    scale: 1.0
-    target_rad: -1.5707963267948966  # -90 degrees
-    pressure: 1.0
-    mode: progressive
-    gates:
-      - metric: grip_zone_cube_distance
-        lte: 0.03
-
-  # Punish touching the cube without being in the grip zone.
-  # Note: Anything less than 0.5 is impossible, since it would require being _inside_ the cube
-  - type: avoid_bumping_cube
-    enabled: true
-    scale: -0.1
-    cube_widths: 1.0
-
   - type: approach_phase
     enabled: true
     scale: 5.0
@@ -148,90 +125,118 @@ rewards:
   - type: approach_phase
     enabled: true
     scale: 1.0
-    mode: absolute  # persistent per-step gradient through the 34mm→5mm dead zone
+    mode: absolute
 
-  # terminal reward for near-perfect grasping position
   - type: approach_phase_terminal
     enabled: true
     scale: 500.0
-    threshold: 0.80  # was 0.90; lowered to match CNN training data coverage (30% of samples >= 0.80 vs 0% >= 0.90)
-    terminate: false  # gives the bonus without resetting — lets grasp_phase run in the same episode
-    fire_once: true   # fires the 500-pt bonus only on the first step the condition is met per episode
+    threshold: 0.80
+    terminate: false
+    fire_once: true
 
-  # Grasp Phase Rewards
-
-  # force based
+  # GRASP
   - type: grasp_phase
     enabled: true
     scale: 10.0
-    grip_force_sat_threshold: 5.0  # bilateral pinch force (N) to saturate; far below genuine closure (~20N+), far above drag
+    grip_force_sat_threshold: 10.0  # bilateral pinch force (N) to saturate; far below genuine closure (~20N+), far above drag
     mode: progressive
     gates:
       - metric: approach_phase
         gte: 0.50
-      - metric: normalized_grip_zone_cube_distance
-        lte: 0.013  # ~0.5cm from cube edge in normalized units
+      - metric: grip_zone_cube_distance
+        lte: 0.04
 
-  # position based — acts as complementary gradient to close the jaw
-  - type: close_gripper
+  - type: grasp_phase
     enabled: true
     scale: 5.0
-    close_target: 0.17453292519943295
-    max_open: 1.7453292519943295
+    grip_force_sat_threshold: 10.0  # bilateral pinch force (N) to saturate; far below genuine closure (~20N+), far above drag
+    mode: absolute
     gates:
       - metric: approach_phase
         gte: 0.50
-
-  # binary reward for touching a properly positioned cube with the gripper
-  - type: grip_cube
-    enabled: false
-    scale: 2.0
-    distance_threshold: 0.02
-    touch_force_threshold: 0.001
+      - metric: grip_zone_cube_distance
+        lte: 0.04
 
   - type: grasp_phase_terminal
     enabled: true
     scale: 500.0
     threshold: 0.80
-    terminate: false  # lets the lift phase run in the same episode
-    fire_once: true   # fires the 500-pt bonus only on the first step the condition is met per episode
-
-  # Lift Phase Rewards
-
-  # fraction lifted (to threshold)
+    terminate: false
+    fire_once: true
+        
+  # LIFT
   - type: lift_cube
-    enabled: false
-    scale: 5.0
+    enabled: true
+    scale: 50.0
+    mode: progressive
     gates:
       - metric: approach_phase
-        gte: 0.90
+        gte: 0.8
       - metric: grasp_phase
-        gte: 0.90
+        gte: 0.7
 
+  - type: lift_cube
+    enabled: true
+    scale: 5.0
+    mode: absolute
+    gates:
+      - metric: approach_phase
+        gte: 0.8
+      - metric: grasp_phase
+        gte: 0.7
 
-  # terminal reward for successfully lifting the cube above the height threshold (meters)
   - type: success_lift_fraction_terminal
     enabled: true
     scale: 500.0
+    height_threshold: 0.05
+    terminate: false
+    fire_once: true
+
+  - type: success_lift_fraction_terminal
+    enabled: true
+    scale: 1000.0
     height_threshold: 0.10
+    terminate: false
+    fire_once: true
 
-  - type: gripper_cube_alignment
-    enabled: false
+  - type: success_lift_fraction_terminal
+    enabled: true
+    scale: 1500.0
+    height_threshold: 0.15
+    terminate: true
+    fire_once: true
+
+  # SHAPING
+
+  - type: wrist_roll_pose
+    enabled: true
     scale: 1.0
+    target_rad: -1.5707963267948966  # Keep wrist roll at -90° (ideal for top-down and side grasps)
+    pressure: 1.0
+    mode: progressive
+    gates:
+      - metric: grip_zone_cube_distance
+        lte: 0.03
+    
+  - type: avoid_bumping_cube
+    enabled: true
+    scale: -0.1
+    cube_widths: 1.0 # Anything less than 0.5 is impossible
 
-  # sum of actions
   - type: action
     enabled: true
     scale: -0.02
-
-  - type: ee_linear_speed
-    enabled: false
-    scale: -0.01
-    safe_speed: 0.1
-
-  - type: joint_speed
-    enabled: false
-    scale: -0.01
+    joints: ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"]
+    gates:
+      - metric: grasp_phase
+        lt: 0.7
+  - type: action
+    enabled: true
+    scale: -0.02
+    joints: ["shoulder_pan", "gripper"]
+    gates:
+      - metric: grasp_phase
+        gte: 0.7
 
   # binary penalty for touching the table
   - type: safety_touch_table
@@ -247,6 +252,44 @@ rewards:
   - type: safety_touch_table_terminal
     enabled: true
     scale: 0.0
+
+  # OTHER
+
+  # distance from gripper to cube (meters)
+  - type: distance
+    enabled: false
+    scale: -5.0
+    distance_pressure: 20.0
+
+  # position based — acts as complementary gradient to close the jaw
+  - type: close_gripper
+    enabled: false
+    scale: 5.0
+    close_target: 0.17453292519943295
+    max_open: 1.7453292519943295
+    gates:
+      - metric: approach_phase
+        gte: 0.50
+
+  # binary reward for touching a properly positioned cube with the gripper
+  - type: grip_cube
+    enabled: false
+    scale: 2.0
+    distance_threshold: 0.02
+    touch_force_threshold: 0.001
+        
+  - type: gripper_cube_alignment
+    enabled: false
+    scale: 1.0
+
+  - type: ee_linear_speed
+    enabled: false
+    scale: -0.01
+    safe_speed: 0.1
+
+  - type: joint_speed
+    enabled: false
+    scale: -0.01
 
 domain_randomization:
   camera:

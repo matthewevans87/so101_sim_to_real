@@ -614,6 +614,13 @@ def cmd_play(args) -> None:
                 experiment_dir / "skrl" / "agent" / "checkpoints" / "best_agent.pt"
             )
             info(f"Derived checkpoint: {checkpoint}")
+        if not args.cnn_checkpoint:
+            candidate = experiment_dir / "cnn_checkpoint.pt"
+            if candidate.is_file():
+                args.cnn_checkpoint = candidate
+                info(f"Derived cnn_checkpoint: {candidate}")
+            else:
+                warn(f"No cnn_checkpoint.pt found in experiment dir: {experiment_dir}")
         ckpt_root = experiment_dir
     else:
         # --checkpoint only: --config is required

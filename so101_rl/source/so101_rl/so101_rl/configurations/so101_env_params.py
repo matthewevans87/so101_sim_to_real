@@ -411,6 +411,13 @@ class WristRollPoseRewardCfg(RewardCfg):
     """Exponential pressure: reward = exp(-pressure * |q - target_rad|) * scale."""
 
 
+@dataclass(kw_only=True)
+class ActionRewardCfg(RewardCfg):
+    joints: list[str] = field(default_factory=list)
+    """Joint names to include in the action-smoothing penalty.
+    An empty list means all active joints are used."""
+
+
 # ---------------------------------------------------------------------------
 # Domain randomization
 # ---------------------------------------------------------------------------

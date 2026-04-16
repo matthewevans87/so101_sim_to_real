@@ -853,22 +853,30 @@ class PipelineOrchestrator:
                 self._write_state()
                 _success(f"Step '{step}' completed → {actual_output_dir}")
                 # Auto-update pins after relevant steps.
-                from run import _update_auto_pin, _PIN_LATEST_EXPERIMENT, _PIN_LATEST_PIPELINE
-                if step == "train":
-                    _update_auto_pin(_PIN_LATEST_EXPERIMENT, actual_output_dir)            else:
-                self._state["steps"][step].update(
-                    {
-                        "status": "failed",
-                        "completed_at": now,
-                        "return_code": rc,
-                    }
+                from run import (
+                    _update_auto_pin,
+                    _PIN_LATEST_EXPERIMENT,
+                    _PIN_LATEST_PIPELINE,
                 )
-                self._write_state()
-                _error(f"Step '{step}' failed (exit code {rc})")
-                _error(f"Log:            {log_path}")
-                _error(f"Pipeline state: {self.pipeline_dir / STATE_FILE}")
-                sys.exit(rc)
+
+                if step == "train":
+                    _update_auto_pin(_PIN_LATEST_EXPERIMENT, actual_output_dir)
+                else:
+                    self._state["steps"][step].update(
+                        {
+                            "status": "failed",
+                            "completed_at": now,
+                            "return_code": rc,
+                        }
+                    )
+                    self._write_state()
+                    _error(f"Step '{step}' failed (exit code {rc})")
+                    _error(f"Log:            {log_path}")
+                    _error(f"Pipeline state: {self.pipeline_dir / STATE_FILE}")
+                    sys.exit(rc)
 
         _success(f"Pipeline complete — {len(steps_to_run)} step(s) finished.")
-        _success(f"Pipeline dir: {self.pipeline_dir}")        from run import _update_auto_pin, _PIN_LATEST_PIPELINE
+        _success(f"Pipeline dir: {self.pipeline_dir}")
+        from run import _update_auto_pin, _PIN_LATEST_PIPELINE
+
         _update_auto_pin(_PIN_LATEST_PIPELINE, self.pipeline_dir)
