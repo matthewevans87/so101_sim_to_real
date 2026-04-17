@@ -495,7 +495,10 @@ class So101LiftCube(DirectRLEnv):
             print("Computing initial step metrics...")
             self._compute_step_metrics()
 
-        critic_obs = torch.cat(
+        critic_obs_parts: list[torch.Tensor] = []
+        if self.cfg.observations.critic_include_vision_features:
+            critic_obs_parts.append(visual_features)  # (N, vision_feature_dim)
+        critic_obs_parts.extend(
             [
                 q,  # (N, num_joints)
                 dq,  # (N, num_joints)
@@ -503,9 +506,9 @@ class So101LiftCube(DirectRLEnv):
                     self.step_metrics[key].reshape(self.num_envs, KEY_OBS_DIMS[key])
                     for key in self.cfg.observations.critic_obs_metrics
                 ],
-            ],
-            dim=-1,
-        )  # (N, state_space)
+            ]
+        )
+        critic_obs = torch.cat(critic_obs_parts, dim=-1)  # (N, state_space)
 
         observations = {"policy": actor_obs, "critic": critic_obs}
 

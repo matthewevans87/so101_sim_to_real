@@ -95,6 +95,19 @@ metrics:
     alignment_pressure: 1.0
     gripper_pos_pressure: 0.0  # disabled: gripper state is for grasp phase, not approach
     gripper_pos_target: 0.8753292519943295
+  grasp_phase:
+    grip_force_sat_threshold: 5.0  # bilateral pinch force (N) at which grasp_phase saturates to 1.0
+  grip_cube:
+    distance_threshold: 0.02  # grip-zone-to-cube distance (m) for is_cube_in_grip_position
+    touch_force_threshold: 0.001  # minimum contact force (N) for is_cube_gripped
+  cube_out_of_range:
+    distance_threshold: 0.40  # cube-to-base distance (m) beyond which episode may terminate
+  lift_cube:
+    height_threshold: 0.10  # cube height (m) at which cube_lift_fraction reaches 1.0
+  approach_phase_terminal:
+    threshold: 0.90  # approach_phase value above which approach_phase_terminal is True
+  grasp_phase_terminal:
+    threshold: 0.95  # grasp_phase value above which grasp_phase_terminal is True
 
 rewards:
   # mode: absolute (default) — reward the current metric value each step.
@@ -129,7 +142,6 @@ rewards:
   - type: grasp_phase
     enabled: false
     scale: 10.0
-    grip_force_sat_threshold: 5.0  # bilateral pinch force (N) to saturate
 
   # shaping reward for keeping wrist roll at -90° (ideal for top-down and side grasps)
   - type: wrist_roll_pose
@@ -151,7 +163,6 @@ rewards:
   - type: cube_out_of_range_terminal
     enabled: true
     scale: 0.0
-    distance_threshold: 0.40
 
   - type: safety_touch_table_terminal
     enabled: true
@@ -161,12 +172,10 @@ rewards:
   - type: approach_phase_terminal
     enabled: true
     scale: 500.0
-    threshold: 0.90
 
   - type: grasp_phase_terminal
     enabled: false
     scale: 500.0
-    threshold: 0.95
 
   # distance from gripper to cube (meters)
   - type: distance
@@ -178,8 +187,6 @@ rewards:
   - type: grip_cube
     enabled: false
     scale: 2.0
-    distance_threshold: 0.02
-    touch_force_threshold: 0.001
 
   # fraction lifted (to threshold)
   - type: lift_cube
@@ -219,7 +226,11 @@ rewards:
   - type: success_lift_fraction_terminal
     enabled: false
     scale: 100.0
-    height_threshold: 0.10
+    terminate: false
+    fire_once: true
+    gates:
+      - metric: cube_height_w
+        gte: 0.10
 
 domain_randomization:
   camera:
@@ -289,6 +300,7 @@ sensors:
     debug_vis: false
 
 observations:
+  critic_include_vision_features: false
   critic_obs_metrics:
     - cube_pos_gz
     - cube_rot6d_gz

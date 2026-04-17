@@ -306,21 +306,15 @@ class RewardCfg:
     resetting the environment, allowing subsequent phases (e.g. grasp_phase) to
     continue in the same episode."""
     fire_once: bool = False
-    """For terminal reward steps with ``terminate: false`` only: when ``True``,
-    the reward fires at most once per episode (on the first step the condition
-    becomes True).  Subsequent steps where the condition remains True yield no
-    additional reward.  Has no effect when ``terminate: true``."""
+    """When ``True``, the reward fires at most once per episode, on the first
+    step the (post-gate) reward is non-zero.  Subsequent steps yield no
+    additional reward.  Valid for any reward step type.  Use with ``gates`` to
+    express milestone bonuses (e.g. gate on ``cube_height_w >= 0.10``)."""
 
 
 @dataclass(kw_only=True)
 class DistanceRewardCfg(RewardCfg):
     distance_pressure: float
-
-
-@dataclass(kw_only=True)
-class GripCubeRewardCfg(RewardCfg):
-    distance_threshold: float
-    touch_force_threshold: float
 
 
 @dataclass(kw_only=True)
@@ -332,11 +326,6 @@ class CloseGripperRewardCfg(RewardCfg):
 @dataclass(kw_only=True)
 class EeLinearSpeedRewardCfg(RewardCfg):
     safe_speed: float
-
-
-@dataclass(kw_only=True)
-class SuccessLiftFractionRewardCfg(RewardCfg):
-    height_threshold: float
 
 
 @dataclass
@@ -367,40 +356,60 @@ class ApproachPhaseMetricCfg:
 
 
 @dataclass
+class GraspPhaseMetricCfg:
+    grip_force_sat_threshold: float
+    """Bilateral pinch force (N) at which grasp_phase saturates to 1.0."""
+
+
+@dataclass
+class GripCubeMetricCfg:
+    distance_threshold: float
+    """Grip-zone-to-cube distance (m) within which the cube is in grip position."""
+    touch_force_threshold: float
+    """Minimum gripper contact force (N) to count as a confirmed grip."""
+
+
+@dataclass
+class CubeOutOfRangeMetricCfg:
+    distance_threshold: float
+    """Cube-to-base distance (m) beyond which the cube is considered out of range."""
+
+
+@dataclass
+class LiftCubeMetricCfg:
+    height_threshold: float
+    """Cube height above resting position (m) at which cube_lift_fraction reaches 1.0."""
+
+
+@dataclass
+class ApproachPhaseTerminalMetricCfg:
+    threshold: float
+    """approach_phase value above which approach_phase_terminal is True."""
+
+
+@dataclass
+class GraspPhaseTerminalMetricCfg:
+    threshold: float
+    """grasp_phase value above which grasp_phase_terminal is True (when approach is also terminal)."""
+
+
+@dataclass
 class MetricsCfg:
     approach_distance: ApproachDistanceMetricCfg
     approach_alignment: ApproachAlignmentMetricCfg
     approach_gripper_pose: ApproachGripperPoseMetricCfg
     approach_phase: ApproachPhaseMetricCfg
-
-
-@dataclass(kw_only=True)
-class GraspPhaseRewardCfg(RewardCfg):
-    grip_force_sat_threshold: (
-        float  # bilateral pinch force (N) at which grasp_phase saturates to 1.0
-    )
+    grasp_phase: GraspPhaseMetricCfg
+    grip_cube: GripCubeMetricCfg
+    cube_out_of_range: CubeOutOfRangeMetricCfg
+    lift_cube: LiftCubeMetricCfg
+    approach_phase_terminal: ApproachPhaseTerminalMetricCfg
+    grasp_phase_terminal: GraspPhaseTerminalMetricCfg
 
 
 @dataclass(kw_only=True)
 class AvoidBumpingCubeRewardCfg(RewardCfg):
     cube_widths: float  # multiplier on CUBE_WIDTH to define "near cube" region
-
-
-@dataclass(kw_only=True)
-class CubeOutOfRangeTerminalRewardCfg(RewardCfg):
-    distance_threshold: (
-        float  # metres; cube further than this from robot base triggers termination
-    )
-
-
-@dataclass(kw_only=True)
-class ApproachPhaseTerminalRewardCfg(RewardCfg):
-    threshold: float
-
-
-@dataclass(kw_only=True)
-class GraspPhaseTerminalRewardCfg(RewardCfg):
-    threshold: float
 
 
 @dataclass(kw_only=True)
@@ -586,6 +595,10 @@ class ObservationsCfg:
     Unlike critic_obs_metrics, these do not become part of the critic observation
     vector — they are computed and exposed via step_metrics but not fed to the model.
     Adding keys here does not change the observation space or invalidate checkpoints."""
+    critic_include_vision_features: bool = False
+    """When True, prepend the same frozen vision features used by the actor into the
+    critic observation vector.  Default False preserves the privileged-state-only
+    critic and keeps backward compatibility with saved checkpoints."""
 
 
 @dataclass

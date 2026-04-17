@@ -95,6 +95,19 @@ metrics:
     alignment_pressure: 1.0
     gripper_pos_pressure: 0.0  # disabled: gripper state is for grasp phase, not approach
     gripper_pos_target: 0.8753292519943295
+  grasp_phase:
+    grip_force_sat_threshold: 10.0  # bilateral pinch force (N) at which grasp_phase saturates to 1.0
+  grip_cube:
+    distance_threshold: 0.02  # grip-zone-to-cube distance (m) for is_cube_in_grip_position
+    touch_force_threshold: 0.001  # minimum contact force (N) for is_cube_gripped
+  cube_out_of_range:
+    distance_threshold: 0.40  # cube-to-base distance (m) beyond which episode may terminate
+  lift_cube:
+    height_threshold: 0.05  # cube height (m) at which cube_lift_fraction reaches 1.0
+  approach_phase_terminal:
+    threshold: 0.80  # approach_phase value above which approach_phase_terminal is True
+  grasp_phase_terminal:
+    threshold: 0.80  # grasp_phase value above which grasp_phase_terminal is True
 
 rewards:
   # mode: absolute (default) — reward the current metric value each step.
@@ -130,7 +143,6 @@ rewards:
   - type: approach_phase_terminal
     enabled: true
     scale: 500.0
-    threshold: 0.80
     terminate: false
     fire_once: true
 
@@ -138,7 +150,6 @@ rewards:
   - type: grasp_phase
     enabled: true
     scale: 10.0
-    grip_force_sat_threshold: 10.0  # bilateral pinch force (N) to saturate; far below genuine closure (~20N+), far above drag
     mode: progressive
     gates:
       - metric: approach_phase
@@ -149,7 +160,6 @@ rewards:
   - type: grasp_phase
     enabled: true
     scale: 5.0
-    grip_force_sat_threshold: 10.0  # bilateral pinch force (N) to saturate; far below genuine closure (~20N+), far above drag
     mode: absolute
     gates:
       - metric: approach_phase
@@ -160,14 +170,13 @@ rewards:
   - type: grasp_phase_terminal
     enabled: true
     scale: 500.0
-    threshold: 0.80
     terminate: false
     fire_once: true
         
   # LIFT
   - type: lift_cube
     enabled: true
-    scale: 50.0
+    scale: 1000.0
     mode: progressive
     gates:
       - metric: approach_phase
@@ -185,26 +194,32 @@ rewards:
       - metric: grasp_phase
         gte: 0.7
 
-  - type: success_lift_fraction_terminal
+  - type: static
     enabled: true
     scale: 500.0
-    height_threshold: 0.05
-    terminate: false
     fire_once: true
+    terminate: false
+    gates:
+      - metric: cube_height_w
+        gte: 0.05
 
-  - type: success_lift_fraction_terminal
+  - type: static
     enabled: true
     scale: 1000.0
-    height_threshold: 0.10
-    terminate: false
     fire_once: true
+    terminate: false
+    gates:
+      - metric: cube_height_w
+        gte: 0.10
 
-  - type: success_lift_fraction_terminal
+  - type: static
     enabled: true
     scale: 1500.0
-    height_threshold: 0.15
     terminate: true
     fire_once: true
+    gates:
+      - metric: cube_height_w
+        gte: 0.15
 
   # SHAPING
 
@@ -247,7 +262,6 @@ rewards:
   - type: cube_out_of_range_terminal
     enabled: true
     scale: 0.0
-    distance_threshold: 0.40
 
   - type: safety_touch_table_terminal
     enabled: true
@@ -275,8 +289,6 @@ rewards:
   - type: grip_cube
     enabled: false
     scale: 2.0
-    distance_threshold: 0.02
-    touch_force_threshold: 0.001
         
   - type: gripper_cube_alignment
     enabled: false
@@ -359,12 +371,15 @@ sensors:
     debug_vis: false
 
 observations:
+  critic_include_vision_features: true
   critic_obs_metrics:
     - cube_pos_gz
     - cube_rot6d_gz
     - cube_height_w
     - gripper_cube_contact_force_magnitude
+    - fixed_jaw_cube_contact_force_magnitude
     - is_table_touched
+    - normalized_grip_zone_cube_distance
   telemetry_metrics:
     - gripper_cube_alignment
 

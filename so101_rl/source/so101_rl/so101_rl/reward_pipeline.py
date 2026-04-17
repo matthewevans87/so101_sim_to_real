@@ -10,15 +10,9 @@ from so101_rl.configurations.so101_env_params import (
     GateCfg,
     RewardCfg,
     DistanceRewardCfg,
-    GripCubeRewardCfg,
     CloseGripperRewardCfg,
     EeLinearSpeedRewardCfg,
-    SuccessLiftFractionRewardCfg,
-    GraspPhaseRewardCfg,
     AvoidBumpingCubeRewardCfg,
-    CubeOutOfRangeTerminalRewardCfg,
-    ApproachPhaseTerminalRewardCfg,
-    GraspPhaseTerminalRewardCfg,
     WristRollPoseRewardCfg,
     ActionRewardCfg,
     _from_dict,
@@ -50,6 +44,23 @@ class RewardStep(ABC, Generic[CfgT]):
     def __init__(self, cfg: CfgT) -> None:
         self._cfg: CfgT = cfg
         self._gates: list[GateCfg] = cfg.gates
+        self._fired: torch.Tensor | None = None
+        """Per-env bool tensor tracking whether this fire_once step has already
+        fired during the current episode.  Lazily initialised on first call."""
+
+    def _apply_fire_once(self, flag: torch.Tensor, env) -> torch.Tensor:
+        """Return a mask that is True only for the first step ``flag`` is True
+        for each environment this episode.  Updates internal state."""
+        if self._fired is None:
+            self._fired = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
+        first_time = flag & ~self._fired
+        self._fired = self._fired | flag
+        return first_time
+
+    def reset_fired(self, env_ids) -> None:
+        """Clear the fire_once state for *env_ids* (called at episode reset)."""
+        if self._fired is not None:
+            self._fired[env_ids] = False
 
     def _prev(self, key: str, ctx: StepContext) -> torch.Tensor | None:
         """Return the previous-step value for *key* from ``ctx.prev_metrics``.
@@ -72,26 +83,6 @@ class TerminalRewardStep(RewardStep[CfgT]):
     :meth:`done`.  :class:`RewardPipeline` uses :meth:`done` to build
     the terminal mask returned by :meth:`RewardPipeline.get_dones`.
     """
-
-    def __init__(self, cfg: CfgT) -> None:
-        super().__init__(cfg)
-        self._fired: torch.Tensor | None = None
-        """Per-env bool tensor tracking whether this fire_once step has already
-        fired during the current episode.  Lazily initialised on first call."""
-
-    def _apply_fire_once(self, flag: torch.Tensor, env) -> torch.Tensor:
-        """Return a mask that is True only for the *first* step``flag`` is True
-        for each environment this episode.  Updates internal state."""
-        if self._fired is None:
-            self._fired = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
-        first_time = flag & ~self._fired
-        self._fired = self._fired | flag
-        return first_time
-
-    def reset_fired(self, env_ids) -> None:
-        """Clear the fire_once state for *env_ids* (called at episode reset)."""
-        if self._fired is not None:
-            self._fired[env_ids] = False
 
     @abstractmethod
     def done(self, ctx: StepContext) -> torch.Tensor:
@@ -198,7 +189,7 @@ class RewardPipeline:
         episode reset so that fire-once terminal steps can fire again in the
         next episode.
         """
-        for step in self.terminal_steps:
+        for step in self.steps:
             if step._cfg.fire_once:
                 step.reset_fired(env_ids)
 
@@ -215,6 +206,8 @@ class RewardPipeline:
             rew = step.compute(ctx)
             if step._gates:
                 rew = rew * self._evaluate_gate_mask(step._gates, ctx).float()
+            if step._cfg.fire_once:
+                rew = rew * step._apply_fire_once(rew != 0, env).float()
             totals_by_name.setdefault(
                 step.name, torch.zeros(env.num_envs, device=env.device)
             )
@@ -229,6 +222,28 @@ class RewardPipeline:
 # ---------------------------------------------------------------------------
 # Reward steps — Primary
 # ---------------------------------------------------------------------------
+
+
+class StaticRewardStep(TerminalRewardStep[RewardCfg]):
+    """Emits ``scale`` every step, unconditionally.
+
+    Use ``gates`` to restrict to specific conditions, or ``fire_once: true``
+    to award the bonus only on the first qualifying step per episode.
+    Set ``terminate: true`` to end the episode when the (gated) condition fires.
+    """
+
+    name = "static"
+    requires_metrics: frozenset[str] = frozenset()
+
+    def compute(self, ctx: StepContext) -> torch.Tensor:
+        env = ctx.env
+        return torch.full(
+            (env.num_envs,), self._cfg.scale, device=env.device, dtype=torch.float32
+        )
+
+    def done(self, ctx: StepContext) -> torch.Tensor:
+        env = ctx.env
+        return torch.ones(env.num_envs, device=env.device, dtype=torch.bool)
 
 
 class DistanceRewardStep(RewardStep[DistanceRewardCfg]):
@@ -255,7 +270,7 @@ class DistanceRewardStep(RewardStep[DistanceRewardCfg]):
         return grip_zone_dist * self._cfg.scale
 
 
-class GripCubeRewardStep(RewardStep[GripCubeRewardCfg]):
+class GripCubeRewardStep(RewardStep[RewardCfg]):
     name = "grip_cube"
     requires_metrics = frozenset(
         {"is_cube_in_grip_position", "gripper_cube_contact_force_magnitude"}
@@ -387,9 +402,7 @@ class JointSpeedRewardStep(RewardStep[RewardCfg]):
 # ---------------------------------------------------------------------------
 
 
-class SuccessLiftFractionTerminalRewardStep(
-    TerminalRewardStep[SuccessLiftFractionRewardCfg]
-):
+class SuccessLiftFractionTerminalRewardStep(TerminalRewardStep[RewardCfg]):
     name = "success_lift_fraction_terminal"
     requires_metrics = frozenset({"is_success_lift_fraction_terminal"})
 
@@ -443,9 +456,7 @@ class SafetyTouchTableRewardStep(RewardStep[RewardCfg]):
         )
 
 
-class CubeOutOfRangeTerminalRewardStep(
-    TerminalRewardStep[CubeOutOfRangeTerminalRewardCfg]
-):
+class CubeOutOfRangeTerminalRewardStep(TerminalRewardStep[RewardCfg]):
     name = "cube_out_of_range_terminal"
     requires_metrics = frozenset({"is_cube_out_of_range"})
 
@@ -457,27 +468,18 @@ class CubeOutOfRangeTerminalRewardStep(
         return ctx.metrics["is_cube_out_of_range"]
 
 
-class ApproachPhaseTerminalRewardStep(
-    TerminalRewardStep[ApproachPhaseTerminalRewardCfg]
-):
+class ApproachPhaseTerminalRewardStep(TerminalRewardStep[RewardCfg]):
     name = "approach_phase_terminal"
     requires_metrics = frozenset({"approach_phase_terminal"})
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
-        env = ctx.env
-        flag = ctx.metrics["approach_phase_terminal"]
-        if self._cfg.fire_once:
-            active_flag = self._apply_fire_once(flag, env)
-        else:
-            active_flag = flag
-        return active_flag.float() * self._cfg.scale
+        return ctx.metrics["approach_phase_terminal"].float() * self._cfg.scale
 
     def done(self, ctx: StepContext) -> torch.Tensor:
-        flag = ctx.metrics["approach_phase_terminal"]
-        return flag
+        return ctx.metrics["approach_phase_terminal"]
 
 
-class GraspPhaseTerminalRewardStep(TerminalRewardStep[GraspPhaseTerminalRewardCfg]):
+class GraspPhaseTerminalRewardStep(TerminalRewardStep[RewardCfg]):
     name = "grasp_phase_terminal"
     requires_metrics = frozenset({"grasp_phase_terminal", "approach_phase_terminal"})
 
@@ -593,7 +595,7 @@ class AvoidBumpingCubeRewardStep(RewardStep[AvoidBumpingCubeRewardCfg]):
 # ---------------------------------------------------------------------------
 
 
-class GraspPhaseRewardStep(RewardStep[GraspPhaseRewardCfg]):
+class GraspPhaseRewardStep(RewardStep[RewardCfg]):
     name = "grasp_phase"
     requires_metrics = frozenset({"grasp_phase", "approach_phase_terminal"})
 
@@ -640,8 +642,9 @@ class WristRollPoseRewardStep(RewardStep[WristRollPoseRewardCfg]):
 # ---------------------------------------------------------------------------
 
 REWARD_STEP_REGISTRY: dict[str, tuple[type[RewardStep[Any]], type[RewardCfg]]] = {
+    "static": (StaticRewardStep, RewardCfg),
     "distance": (DistanceRewardStep, DistanceRewardCfg),
-    "grip_cube": (GripCubeRewardStep, GripCubeRewardCfg),
+    "grip_cube": (GripCubeRewardStep, RewardCfg),
     "lift_cube": (LiftCubeRewardStep, RewardCfg),
     "gripper_cube_alignment": (GripperCubeAlignmentRewardStep, RewardCfg),
     "close_gripper": (CloseGripperRewardStep, CloseGripperRewardCfg),
@@ -650,25 +653,19 @@ REWARD_STEP_REGISTRY: dict[str, tuple[type[RewardStep[Any]], type[RewardCfg]]] =
     "joint_speed": (JointSpeedRewardStep, RewardCfg),
     "success_lift_fraction_terminal": (
         SuccessLiftFractionTerminalRewardStep,
-        SuccessLiftFractionRewardCfg,
+        RewardCfg,
     ),
     "safety_touch_table_terminal": (SafetyTouchTableTerminalRewardStep, RewardCfg),
     "safety_touch_table": (SafetyTouchTableRewardStep, RewardCfg),
-    "cube_out_of_range_terminal": (
-        CubeOutOfRangeTerminalRewardStep,
-        CubeOutOfRangeTerminalRewardCfg,
-    ),
-    "approach_phase_terminal": (
-        ApproachPhaseTerminalRewardStep,
-        ApproachPhaseTerminalRewardCfg,
-    ),
-    "grasp_phase_terminal": (GraspPhaseTerminalRewardStep, GraspPhaseTerminalRewardCfg),
+    "cube_out_of_range_terminal": (CubeOutOfRangeTerminalRewardStep, RewardCfg),
+    "approach_phase_terminal": (ApproachPhaseTerminalRewardStep, RewardCfg),
+    "grasp_phase_terminal": (GraspPhaseTerminalRewardStep, RewardCfg),
     "approach_distance": (ApproachDistanceRewardStep, RewardCfg),
     "approach_alignment": (ApproachAlignmentRewardStep, RewardCfg),
     "approach_gripper_pose": (ApproachGripperPoseRewardStep, RewardCfg),
     "approach_phase": (ApproachPhaseRewardStep, RewardCfg),
     "avoid_bumping_cube": (AvoidBumpingCubeRewardStep, AvoidBumpingCubeRewardCfg),
-    "grasp_phase": (GraspPhaseRewardStep, GraspPhaseRewardCfg),
+    "grasp_phase": (GraspPhaseRewardStep, RewardCfg),
     "wrist_roll_pose": (WristRollPoseRewardStep, WristRollPoseRewardCfg),
 }
 

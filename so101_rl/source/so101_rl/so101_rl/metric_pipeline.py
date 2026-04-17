@@ -205,7 +205,7 @@ class FixedJawContactForceMagnitudeMetricStep(MetricStep):
 
     produces = frozenset({"fixed_jaw_cube_contact_force_magnitude"})
     depends_on = frozenset()
-    obs_dim = 0  # not fed into observations directly
+    obs_dim = 1
 
     def compute(self, ctx: StepContext) -> None:
         env = ctx.env
@@ -229,7 +229,7 @@ class MovingJawContactForceMagnitudeMetricStep(MetricStep):
 
     produces = frozenset({"moving_jaw_cube_contact_force_magnitude"})
     depends_on = frozenset()
-    obs_dim = 0  # not fed into observations directly
+    obs_dim = 1
 
     def compute(self, ctx: StepContext) -> None:
         env = ctx.env
@@ -365,7 +365,7 @@ class NormalizedGripZoneCubeDistanceMetricStep(MetricStep):
     produces = frozenset({"normalized_grip_zone_cube_distance"})
     depends_on = frozenset({"grip_zone_cube_distance"})
     depends_on_env_metrics = frozenset({"env_min_cube_distance"})
-    obs_dim = 0  # not fed directly into observations
+    obs_dim = 1
 
     def compute(self, ctx: StepContext) -> None:
         env = ctx.env
@@ -402,10 +402,7 @@ class CubeLiftFractionMetricStep(MetricStep):
 
     def compute(self, ctx: StepContext) -> None:
         env = ctx.env
-        val = (
-            ctx.metrics["cube_height_w"]
-            / env.cfg.get_reward_cfg("success_lift_fraction_terminal").height_threshold
-        )
+        val = ctx.metrics["cube_height_w"] / env.cfg.metrics.lift_cube.height_threshold
         assert_tensor(val, (env.num_envs,), torch.float32)
         ctx.metrics["cube_lift_fraction"] = val
 
@@ -413,6 +410,7 @@ class CubeLiftFractionMetricStep(MetricStep):
 class IsSuccessLiftFractionTerminalMetricStep(MetricStep):
     produces = frozenset({"is_success_lift_fraction_terminal"})
     depends_on = frozenset({"cube_lift_fraction"})
+    obs_dim = 1
 
     def compute(self, ctx: StepContext) -> None:
         env = ctx.env
@@ -430,7 +428,7 @@ class IsCubeInGripPositionMetricStep(MetricStep):
         env = ctx.env
         val = (
             ctx.metrics["grip_zone_cube_distance"]
-            < env.cfg.get_reward_cfg("grip_cube").distance_threshold
+            < env.cfg.metrics.grip_cube.distance_threshold
         ).bool()
         assert_tensor(val, (env.num_envs,), torch.bool)
         ctx.metrics["is_cube_in_grip_position"] = val
@@ -449,7 +447,7 @@ class IsCubeGrippedMetricStep(MetricStep):
             ctx.metrics["is_cube_in_grip_position"]
             & (
                 ctx.metrics["gripper_cube_contact_force_magnitude"]
-                > env.cfg.get_reward_cfg("grip_cube").touch_force_threshold
+                > env.cfg.metrics.grip_cube.touch_force_threshold
             )
         ).bool()
         assert_tensor(val, (env.num_envs,), torch.bool)
@@ -473,12 +471,13 @@ class CubeDistanceFromBaseMetricStep(MetricStep):
 class IsCubeOutOfRangeMetricStep(MetricStep):
     produces = frozenset({"is_cube_out_of_range"})
     depends_on = frozenset({"cube_distance_from_base"})
+    obs_dim = 1
 
     def compute(self, ctx: StepContext) -> None:
         env = ctx.env
         val = (
             ctx.metrics["cube_distance_from_base"]
-            > env.cfg.get_reward_cfg("cube_out_of_range_terminal").distance_threshold
+            > env.cfg.metrics.cube_out_of_range.distance_threshold
         ).bool()
         assert_tensor(val, (env.num_envs,), torch.bool)
         ctx.metrics["is_cube_out_of_range"] = val
@@ -496,6 +495,7 @@ class ApproachPhaseMetricStep(MetricStep):
     depends_on = frozenset(
         {"normalized_grip_zone_cube_distance", "gripper_cube_alignment"}
     )
+    obs_dim = 1
 
     def compute(self, ctx: StepContext) -> None:
         env = ctx.env
@@ -581,10 +581,11 @@ class GraspPhaseMetricStep(MetricStep):
             "moving_jaw_cube_contact_force_magnitude",
         }
     )
+    obs_dim = 1
 
     def compute(self, ctx: StepContext) -> None:
         env = ctx.env
-        _grasp_cfg = env.cfg.get_reward_cfg("grasp_phase")
+        _grasp_cfg = env.cfg.metrics.grasp_phase
 
         f_fixed = ctx.metrics["fixed_jaw_cube_contact_force_magnitude"].clamp(min=0.0)
         f_moving = ctx.metrics["moving_jaw_cube_contact_force_magnitude"].clamp(min=0.0)
@@ -613,12 +614,13 @@ class GraspPhaseMetricStep(MetricStep):
 class ApproachPhaseTerminalMetricStep(MetricStep):
     produces = frozenset({"approach_phase_terminal"})
     depends_on = frozenset({"approach_phase"})
+    obs_dim = 1
 
     def compute(self, ctx: StepContext) -> None:
         env = ctx.env
         approach_phase_terminal = (
             ctx.metrics["approach_phase"]
-            > env.cfg.get_reward_cfg("approach_phase_terminal").threshold
+            > env.cfg.metrics.approach_phase_terminal.threshold
         )
 
         assert_tensor(approach_phase_terminal, (env.num_envs,), torch.bool)
@@ -628,13 +630,13 @@ class ApproachPhaseTerminalMetricStep(MetricStep):
 class GraspPhaseTerminalMetricStep(MetricStep):
     produces = frozenset({"grasp_phase_terminal"})
     depends_on = frozenset({"grasp_phase", "approach_phase_terminal"})
+    obs_dim = 1
 
     def compute(self, ctx: StepContext) -> None:
         env = ctx.env
         grasp_phase_terminal = torch.logical_and(
             ctx.metrics["approach_phase_terminal"],
-            ctx.metrics["grasp_phase"]
-            > env.cfg.get_reward_cfg("grasp_phase_terminal").threshold,
+            ctx.metrics["grasp_phase"] > env.cfg.metrics.grasp_phase_terminal.threshold,
         )
 
         assert_tensor(grasp_phase_terminal, (env.num_envs,), torch.bool)
