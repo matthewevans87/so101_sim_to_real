@@ -47,6 +47,11 @@ class RewardStep(ABC, Generic[CfgT]):
         self._fired: torch.Tensor | None = None
         """Per-env bool tensor tracking whether this fire_once step has already
         fired during the current episode.  Lazily initialised on first call."""
+        self._prev_base: torch.Tensor | None = None
+        """Per-env float tensor storing the previous step's unscaled base value
+        for progressive reward modes.  ``None`` before the first call; set to
+        NaN for reset environments so the first step of a new episode yields a
+        zero delta rather than a spurious jump."""
 
     def _apply_fire_once(self, flag: torch.Tensor, env) -> torch.Tensor:
         """Return a mask that is True only for the first step ``flag`` is True
@@ -62,6 +67,47 @@ class RewardStep(ABC, Generic[CfgT]):
         if self._fired is not None:
             self._fired[env_ids] = False
 
+    def _apply_mode_and_scale(self, base: torch.Tensor, env) -> torch.Tensor:
+        """Apply the configured mode and scale to the unscaled *base* value.
+
+        ``'absolute'``: returns ``base * scale``.
+        ``'unsigned_progressive'``: returns ``max(0, \u0394base) * scale``; only
+        improvements are rewarded, regressions yield zero.
+        ``'signed_progressive'``: returns ``\u0394base * scale``; regressions yield
+        negative reward, discouraging lift\u2192lower\u2192lift cycles.
+
+        ``_prev_base`` is updated before gate masking is applied (in
+        :meth:`RewardPipeline.compute`), so gated-off environments still
+        maintain a valid baseline for the next step.
+        """
+        if self._cfg.mode == "absolute":
+            return base * self._cfg.scale
+        # Progressive modes: lazily initialise with NaN sentinels so the first
+        # call (and any call immediately after a reset) yields a zero delta.
+        if self._prev_base is None:
+            self._prev_base = torch.full_like(base, float("nan"))
+        has_prev = ~torch.isnan(self._prev_base)
+        delta = torch.where(has_prev, base - self._prev_base, torch.zeros_like(base))
+        self._prev_base = base.clone()
+        if self._cfg.mode == "unsigned_progressive":
+            return delta.clamp(min=0.0) * self._cfg.scale
+        elif self._cfg.mode == "signed_progressive":
+            return delta * self._cfg.scale
+        raise ValueError(
+            f"Unknown reward mode: {self._cfg.mode!r}. "
+            "Must be 'absolute', 'unsigned_progressive', or 'signed_progressive'."
+        )
+
+    def reset_base_value(self, env_ids) -> None:
+        """Reset the progressive baseline for *env_ids* (called at episode reset).
+
+        Marks the stored baseline as NaN for the reset environments so that the
+        first step of the new episode produces a zero delta rather than a
+        potentially large jump from the previous episode's final state.
+        """
+        if self._prev_base is not None:
+            self._prev_base[env_ids] = float("nan")
+
     def _prev(self, key: str, ctx: StepContext) -> torch.Tensor | None:
         """Return the previous-step value for *key* from ``ctx.prev_metrics``.
 
@@ -72,7 +118,12 @@ class RewardStep(ABC, Generic[CfgT]):
 
     @abstractmethod
     def compute(self, ctx: StepContext) -> torch.Tensor:
-        """Return reward tensor of shape ``(num_envs,)``."""
+        """Return the unscaled base value of shape ``(num_envs,)``.
+
+        Scale and mode (``absolute`` / ``unsigned_progressive`` /
+        ``signed_progressive``) are applied externally by
+        :meth:`RewardPipeline.compute`.
+        """
         ...
 
 
@@ -190,6 +241,7 @@ class RewardPipeline:
         next episode.
         """
         for step in self.steps:
+            step.reset_base_value(env_ids)
             if step._cfg.fire_once:
                 step.reset_fired(env_ids)
 
@@ -203,7 +255,8 @@ class RewardPipeline:
         total = torch.zeros(env.num_envs, device=env.device)
         totals_by_name: dict[str, torch.Tensor] = {}
         for step in self.steps:
-            rew = step.compute(ctx)
+            base = step.compute(ctx)
+            rew = step._apply_mode_and_scale(base, env)
             if step._gates:
                 rew = rew * self._evaluate_gate_mask(step._gates, ctx).float()
             if step._cfg.fire_once:
@@ -237,9 +290,7 @@ class StaticRewardStep(TerminalRewardStep[RewardCfg]):
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
         env = ctx.env
-        return torch.full(
-            (env.num_envs,), self._cfg.scale, device=env.device, dtype=torch.float32
-        )
+        return torch.ones(env.num_envs, device=env.device, dtype=torch.float32)
 
     def done(self, ctx: StepContext) -> torch.Tensor:
         env = ctx.env
@@ -251,23 +302,10 @@ class DistanceRewardStep(RewardStep[DistanceRewardCfg]):
     requires_metrics = frozenset({"normalized_grip_zone_cube_distance"})
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
-        env = ctx.env
-        if self._cfg.mode == "progressive":
-            prev = self._prev("normalized_grip_zone_cube_distance", ctx)
-            if prev is None:
-                return torch.zeros(env.num_envs, device=env.device)
-            # Improvement = reduction in normalised distance; clamp so regression is not penalized.
-            delta = (prev - ctx.metrics["normalized_grip_zone_cube_distance"]).clamp(
-                min=0.0
-            )
-            return delta * self._cfg.scale
-        grip_zone_dist = 1 - (
-            torch.exp(
-                -self._cfg.distance_pressure
-                * ctx.metrics["normalized_grip_zone_cube_distance"]
-            )
+        return 1.0 - torch.exp(
+            -self._cfg.distance_pressure
+            * ctx.metrics["normalized_grip_zone_cube_distance"]
         )
-        return grip_zone_dist * self._cfg.scale
 
 
 class GripCubeRewardStep(RewardStep[RewardCfg]):
@@ -277,11 +315,9 @@ class GripCubeRewardStep(RewardStep[RewardCfg]):
     )
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
-        env = ctx.env
         return (
-            ctx.metrics["is_cube_in_grip_position"]
-            * (ctx.metrics["gripper_cube_contact_force_magnitude"] > 0.0)
-            * self._cfg.scale
+            ctx.metrics["is_cube_in_grip_position"].float()
+            * (ctx.metrics["gripper_cube_contact_force_magnitude"] > 0.0).float()
         )
 
 
@@ -290,14 +326,7 @@ class LiftCubeRewardStep(RewardStep[RewardCfg]):
     requires_metrics = frozenset({"cube_lift_fraction"})
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
-        env = ctx.env
-        if self._cfg.mode == "progressive":
-            prev = self._prev("cube_lift_fraction", ctx)
-            if prev is None:
-                return torch.zeros(env.num_envs, device=env.device)
-            delta = (ctx.metrics["cube_lift_fraction"] - prev).clamp(min=0.0)
-            return delta * self._cfg.scale
-        return ctx.metrics["cube_lift_fraction"] * self._cfg.scale
+        return ctx.metrics["cube_lift_fraction"]
 
 
 # ---------------------------------------------------------------------------
@@ -310,13 +339,9 @@ class GripperCubeAlignmentRewardStep(RewardStep[RewardCfg]):
     requires_metrics = frozenset({"is_cube_gripped", "gripper_cube_alignment"})
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
-        env = ctx.env
-        return (
-            torch.maximum(
-                ctx.metrics["is_cube_gripped"],
-                ctx.metrics["gripper_cube_alignment"],
-            )
-            * self._cfg.scale
+        return torch.maximum(
+            ctx.metrics["is_cube_gripped"].float(),
+            ctx.metrics["gripper_cube_alignment"],
         )
 
 
@@ -331,11 +356,7 @@ class CloseGripperRewardStep(RewardStep[CloseGripperRewardCfg]):
         fraction_to_target = 1.0 - (gripper_close_error / self._cfg.max_open).squeeze(
             -1
         )
-        return (
-            ctx.metrics["is_cube_in_grip_position"]
-            * fraction_to_target
-            * self._cfg.scale
-        )
+        return ctx.metrics["is_cube_in_grip_position"].float() * fraction_to_target
 
 
 # ---------------------------------------------------------------------------
@@ -371,7 +392,7 @@ class ActionRewardStep(RewardStep[ActionRewardCfg]):
             return torch.zeros(env.num_envs, device=env.device)
         indices = self._resolve_indices(env)
         delta = env.actions[:, indices] - env.prev_actions[:, indices]
-        return self._cfg.scale * torch.sum(torch.abs(delta), dim=-1)
+        return torch.sum(torch.abs(delta), dim=-1)
 
 
 class EELinearSpeedRewardStep(RewardStep[EeLinearSpeedRewardCfg]):
@@ -384,7 +405,7 @@ class EELinearSpeedRewardStep(RewardStep[EeLinearSpeedRewardCfg]):
         speed = torch.linalg.norm(ee_lin_vel_w, dim=-1)
         v_safe = self._cfg.safe_speed
         v_excess = torch.clamp(speed - v_safe, min=0.0)
-        return self._cfg.scale * (v_excess + v_excess**2)
+        return v_excess + v_excess**2
 
 
 class JointSpeedRewardStep(RewardStep[RewardCfg]):
@@ -394,7 +415,7 @@ class JointSpeedRewardStep(RewardStep[RewardCfg]):
     def compute(self, ctx: StepContext) -> torch.Tensor:
         env = ctx.env
         joint_speed = torch.abs(env.joint_vel[:, env._dof_idx])
-        return self._cfg.scale * torch.sum(joint_speed**2, dim=-1)
+        return torch.sum(joint_speed**2, dim=-1)
 
 
 # ---------------------------------------------------------------------------
@@ -407,13 +428,7 @@ class SuccessLiftFractionTerminalRewardStep(TerminalRewardStep[RewardCfg]):
     requires_metrics = frozenset({"is_success_lift_fraction_terminal"})
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
-        env = ctx.env
-        flag = ctx.metrics["is_success_lift_fraction_terminal"]
-        return torch.where(
-            flag >= 1.0,
-            torch.full_like(flag.float(), self._cfg.scale),
-            torch.zeros(env.num_envs, device=env.device),
-        )
+        return ctx.metrics["is_success_lift_fraction_terminal"].float()
 
     def done(self, ctx: StepContext) -> torch.Tensor:
         return ctx.metrics["is_success_lift_fraction_terminal"]
@@ -424,16 +439,7 @@ class SafetyTouchTableTerminalRewardStep(TerminalRewardStep[RewardCfg]):
     requires_metrics = frozenset({"is_table_touched"})
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
-        env = ctx.env
-        return torch.where(
-            ctx.metrics["is_table_touched"],
-            torch.tensor(
-                self._cfg.scale,
-                device=env.device,
-                dtype=torch.float32,
-            ),
-            torch.tensor(0.0, device=env.device, dtype=torch.float32),
-        )
+        return ctx.metrics["is_table_touched"].float()
 
     def done(self, ctx: StepContext) -> torch.Tensor:
         return ctx.metrics["is_table_touched"]
@@ -444,16 +450,7 @@ class SafetyTouchTableRewardStep(RewardStep[RewardCfg]):
     requires_metrics = frozenset({"is_table_touched"})
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
-        env = ctx.env
-        return torch.where(
-            ctx.metrics["is_table_touched"],
-            torch.tensor(
-                self._cfg.scale,
-                device=env.device,
-                dtype=torch.float32,
-            ),
-            torch.tensor(0.0, device=env.device, dtype=torch.float32),
-        )
+        return ctx.metrics["is_table_touched"].float()
 
 
 class CubeOutOfRangeTerminalRewardStep(TerminalRewardStep[RewardCfg]):
@@ -461,8 +458,7 @@ class CubeOutOfRangeTerminalRewardStep(TerminalRewardStep[RewardCfg]):
     requires_metrics = frozenset({"is_cube_out_of_range"})
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
-        env = ctx.env
-        return ctx.metrics["is_cube_out_of_range"].float() * self._cfg.scale
+        return ctx.metrics["is_cube_out_of_range"].float()
 
     def done(self, ctx: StepContext) -> torch.Tensor:
         return ctx.metrics["is_cube_out_of_range"]
@@ -473,7 +469,7 @@ class ApproachPhaseTerminalRewardStep(TerminalRewardStep[RewardCfg]):
     requires_metrics = frozenset({"approach_phase_terminal"})
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
-        return ctx.metrics["approach_phase_terminal"].float() * self._cfg.scale
+        return ctx.metrics["approach_phase_terminal"].float()
 
     def done(self, ctx: StepContext) -> torch.Tensor:
         return ctx.metrics["approach_phase_terminal"]
@@ -484,11 +480,9 @@ class GraspPhaseTerminalRewardStep(TerminalRewardStep[RewardCfg]):
     requires_metrics = frozenset({"grasp_phase_terminal", "approach_phase_terminal"})
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
-        env = ctx.env
-        flag = torch.logical_and(
+        return torch.logical_and(
             ctx.metrics["approach_phase_terminal"], ctx.metrics["grasp_phase_terminal"]
-        )
-        return flag.float() * self._cfg.scale
+        ).float()
 
     def done(self, ctx: StepContext) -> torch.Tensor:
         flag = torch.logical_and(
@@ -508,14 +502,7 @@ class ApproachDistanceRewardStep(RewardStep[RewardCfg]):
     requires_metrics = frozenset({"approach_distance"})
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
-        env = ctx.env
-        if self._cfg.mode == "progressive":
-            prev = self._prev("approach_distance", ctx)
-            if prev is None:
-                return torch.zeros(env.num_envs, device=env.device)
-            delta = (ctx.metrics["approach_distance"] - prev).clamp(min=0.0)
-            return delta * self._cfg.scale
-        return ctx.metrics["approach_distance"] * self._cfg.scale
+        return ctx.metrics["approach_distance"]
 
 
 class ApproachAlignmentRewardStep(RewardStep[RewardCfg]):
@@ -523,14 +510,7 @@ class ApproachAlignmentRewardStep(RewardStep[RewardCfg]):
     requires_metrics = frozenset({"approach_alignment"})
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
-        env = ctx.env
-        if self._cfg.mode == "progressive":
-            prev = self._prev("approach_alignment", ctx)
-            if prev is None:
-                return torch.zeros(env.num_envs, device=env.device)
-            delta = (ctx.metrics["approach_alignment"] - prev).clamp(min=0.0)
-            return delta * self._cfg.scale
-        return ctx.metrics["approach_alignment"] * self._cfg.scale
+        return ctx.metrics["approach_alignment"]
 
 
 class ApproachGripperPoseRewardStep(RewardStep[RewardCfg]):
@@ -538,14 +518,7 @@ class ApproachGripperPoseRewardStep(RewardStep[RewardCfg]):
     requires_metrics = frozenset({"approach_gripper_pose"})
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
-        env = ctx.env
-        if self._cfg.mode == "progressive":
-            prev = self._prev("approach_gripper_pose", ctx)
-            if prev is None:
-                return torch.zeros(env.num_envs, device=env.device)
-            delta = (ctx.metrics["approach_gripper_pose"] - prev).clamp(min=0.0)
-            return delta * self._cfg.scale
-        return ctx.metrics["approach_gripper_pose"] * self._cfg.scale
+        return ctx.metrics["approach_gripper_pose"]
 
 
 class ApproachPhaseRewardStep(RewardStep[RewardCfg]):
@@ -553,14 +526,7 @@ class ApproachPhaseRewardStep(RewardStep[RewardCfg]):
     requires_metrics = frozenset({"approach_phase"})
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
-        env = ctx.env
-        if self._cfg.mode == "progressive":
-            prev = self._prev("approach_phase", ctx)
-            if prev is None:
-                return torch.zeros(env.num_envs, device=env.device)
-            delta = (ctx.metrics["approach_phase"] - prev).clamp(min=0.0)
-            return delta * self._cfg.scale
-        return ctx.metrics["approach_phase"] * self._cfg.scale
+        return ctx.metrics["approach_phase"]
 
 
 class AvoidBumpingCubeRewardStep(RewardStep[AvoidBumpingCubeRewardCfg]):
@@ -571,7 +537,6 @@ class AvoidBumpingCubeRewardStep(RewardStep[AvoidBumpingCubeRewardCfg]):
     requires_env_metrics = frozenset({"dr_cube_scale"})
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
-        env = ctx.env
         force_mag = ctx.metrics["gripper_cube_contact_force_magnitude"]
         # Use per-env DR cube scale (isotropic; X axis = side length scale factor)
         # so the proximity threshold tracks the actual cube size this episode.
@@ -579,15 +544,7 @@ class AvoidBumpingCubeRewardStep(RewardStep[AvoidBumpingCubeRewardCfg]):
         cube_near_gz = ctx.metrics["grip_zone_cube_distance"] < (
             self._cfg.cube_widths * cube_width
         )
-        return torch.where(
-            (force_mag > 0.0) & ~cube_near_gz,
-            torch.tensor(
-                self._cfg.scale,
-                device=env.device,
-                dtype=torch.float32,
-            ),
-            torch.tensor(0.0, device=env.device, dtype=torch.float32),
-        )
+        return ((force_mag > 0.0) & ~cube_near_gz).float()
 
 
 # ---------------------------------------------------------------------------
@@ -600,17 +557,8 @@ class GraspPhaseRewardStep(RewardStep[RewardCfg]):
     requires_metrics = frozenset({"grasp_phase", "approach_phase_terminal"})
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
-        env = ctx.env
-        grasp_phase = ctx.metrics["grasp_phase"]
-        if self._cfg.mode == "progressive":
-            prev = self._prev("grasp_phase", ctx)
-            if prev is None:
-                return torch.zeros(env.num_envs, device=env.device)
-            grasp_phase = (grasp_phase - prev).clamp(min=0.0)
         return (
-            ctx.metrics["approach_phase_terminal"].float()
-            * grasp_phase
-            * self._cfg.scale
+            ctx.metrics["approach_phase_terminal"].float() * ctx.metrics["grasp_phase"]
         )
 
 
@@ -634,7 +582,7 @@ class WristRollPoseRewardStep(RewardStep[WristRollPoseRewardCfg]):
         env = ctx.env
         q = env.joint_pos[:, env._wrist_roll_joint_idx].squeeze(-1)
         error = torch.abs(q - self._cfg.target_rad)
-        return torch.exp(-self._cfg.pressure * error) * self._cfg.scale
+        return torch.exp(-self._cfg.pressure * error)
 
 
 # ---------------------------------------------------------------------------

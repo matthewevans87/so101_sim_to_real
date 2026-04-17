@@ -295,8 +295,13 @@ class RewardCfg:
     enabled: bool
     scale: float
     mode: str = "absolute"
-    """Reward computation mode: 'absolute' (current value) or 'progressive'
-    (improvement delta from previous step, clamped to min=0)."""
+    """Reward computation mode.
+
+    ``'absolute'``: reward = base * scale each step.
+    ``'unsigned_progressive'``: reward = max(0, \u0394base) * scale; only improvements
+    are rewarded, regressions yield zero.
+    ``'signed_progressive'``: reward = \u0394base * scale; regressions yield negative
+    reward, discouraging lift\u2192lower\u2192lift cycles."""
     gates: list[GateCfg] = field(default_factory=list)
     """Optional gate conditions. Reward (and termination for terminal steps) is
     suppressed for any environment where a gate condition is not met."""

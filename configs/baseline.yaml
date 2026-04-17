@@ -110,15 +110,16 @@ metrics:
     threshold: 0.95  # grasp_phase value above which grasp_phase_terminal is True
 
 rewards:
-  # mode: absolute (default) — reward the current metric value each step.
-  # mode: progressive        — reward only the improvement delta vs the previous step
-  #                            (clamped to min=0; regressions are not penalized).
+  # mode: absolute (default)     — reward the current metric value each step.
+  # mode: unsigned_progressive    — reward only the improvement delta vs the previous step
+  #                                 (clamped to min=0; regressions yield zero).
+  # mode: signed_progressive      — reward the signed delta; regressions yield negative reward.
 
   # Phased approach:
   - type: approach_distance
     enabled: true
     scale: 5.0
-    mode: progressive
+    mode: unsigned_progressive
 
   - type: approach_alignment
     enabled: true
@@ -137,7 +138,7 @@ rewards:
   - type: approach_phase
     enabled: true
     scale: 3.0
-    mode: progressive
+    mode: unsigned_progressive
 
   - type: grasp_phase
     enabled: false

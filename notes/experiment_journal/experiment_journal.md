@@ -520,3 +520,47 @@ changing to
       - metric: normalized_grip_zone_cube_distance
         lte: 0.013 #0.5/(40-1.5) == ~0.5cm from cube edge in normalized units
 ```
+
+
+## April 17, 2026
+
+After many changes (see git log), we've achieved consistent lifting behavior. 
+
+There's a few manual things to check before we start a full ablation study.
+
+*Observation:* The policy lifts to ~5cm when `lift_cube.height_threshold = 0.05`. Will it push to 10cm when we up this to `0.10`?
+
+
+Test: change `lift_cube.height_threshold -> 0.10`, check results after same timestep length.
+
+Result: No! Over the same number of timesteps, the policy achieves approx. the same lift height.
+
+Hypothesis: Between the `static` `cube_height_w gte 0.05` reward and the `progressive` `lift_cube`, the policy gets stuck in a local minima. 
+
+
+*Observation:* The policy now lifts and lowers the cube repeatedly. This is almost certainly an artifact of the progressive `lift_cube` reward. 
+
+Test: Will using a single `absolute` `lift_cube` reward fix the cyclical lift behavior?
+
+
+**Potential Refinement:** Change the behavior of `progressive` rewards such that they are only given on improvements over the "current best" value. This means the policy can't reward hack by going up and down. 
+Another option is to make `progressive` rewards signed rather than absolute magnitude, which would give both a push (negative) and a pull (positive) reward. 
+
+I think the signed progressive rewards might address the cyclical reward hacking (up -> down -> ...) behavior, enabling it to push past these barriers. 
+
+
+*Ablation: Remove static cube_height_w rewards*
+How does disabling these static "threshold rewards" effect training?
+```yaml
+  - type: static
+    enabled: false
+    scale: 500.0
+    fire_once: true
+    terminate: false
+    gates:
+      - metric: cube_height_w
+        gte: 0.05 # 0.10, 0.15
+```
+
+**Result:**
+The removal of the static rewards actually yielded significantly better performance.

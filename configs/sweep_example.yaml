@@ -85,10 +85,10 @@ experiments:
       rewards:
         - type: approach_distance
           scale: 10.0
-          mode: progressive
+          mode: unsigned_progressive
         - type: approach_phase
           scale: 6.0
-          mode: progressive
+          mode: unsigned_progressive
 
   # ── 4. Lower PPO learning rate ───────────────────────────────────────────────
   - name: "lower_lr"
