@@ -564,3 +564,38 @@ How does disabling these static "threshold rewards" effect training?
 
 **Result:**
 The removal of the static rewards actually yielded significantly better performance.
+
+## April 17, 2026 - Update
+
+We now have a consistently working build that finds, approaches, grasps, and lifts the cube. The lift behavior lifts to the target height, but otherwise is somewhat random.
+
+The stretch goal is now to grasp the cube and move it into a target position. This is arguably much more complex than the lift behavior–at least as complex as the approach phase.
+
+
+*Physical Cube*
+I created a 3D model of a cube similar to the dexterity cube which is printable with a 3D printer. The cube is black with white letters. The cube weighs 14.71 grams when printed with PLA and printed with default settings and when the letters are friction fitted (i.e. no glue). Once things stabilize, I will retrain the entire pipeline with the new cube model. 
+
+
+## April 18, 2026
+Todo
+- Goal Zone Task
+  - [x] Fix issue with no reward for goal_zone_distance
+  - [x] Commit changes
+- [x] Import new cube 3D model as USD
+- Run training on new cube
+- Lift Task
+  - Re-train with latest changes (but with config set to lift goal only)
+  - Commit changes
+  - Merge to main
+  - Post videos
+- Report
+  - Design Ablation studies
+  - Configure Training pipeline and verify it is working
+- Create metrics for these and add to Critic network:
+  - Add Cube's angular and linear velocity
+  - Computed opening width between the tips of the gripper
+- Upgrade to latest version of Isaac Sim (?)
+
+
+*Contemplations:*
+The goal zone, as currently designed, as a known location. This means we're just trying to train the policy to do FK, which isn't novel or needed. There's no great learned capability here. The impressive bit is finding and picking the object. If you want to create a visual target for placement, that's fine, but that's a different task.

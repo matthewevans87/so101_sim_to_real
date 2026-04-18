@@ -245,6 +245,7 @@ class DebugCfg:
     enable_gripper_arrow_markers: bool
     enable_camera_frame_markers: bool
     enable_grip_zone_markers: bool
+    enable_goal_zone_markers: bool
     vision_debug: VisionDebugCfg
 
 
@@ -399,6 +400,23 @@ class GraspPhaseTerminalMetricCfg:
 
 
 @dataclass
+class GoalZoneDistanceMetricCfg:
+    """Configuration for the goal zone distance metric.
+
+    ``goal_zone_distance`` is a shaped scalar in (0, 1] that is highest (1.0)
+    when the cube centroid coincides with the goal zone and decays
+    exponentially with distance.
+    """
+
+    pressure: float
+    """Exponential decay rate: ``exp(-pressure * dist / env_cube_width)``.
+    Higher values create a sharper peak around the goal zone."""
+    distance_threshold: float
+    """Euclidean distance (m) within which the cube centroid is considered to
+    have *reached* the goal zone (``is_goal_zone_reached = True``)."""
+
+
+@dataclass
 class MetricsCfg:
     approach_distance: ApproachDistanceMetricCfg
     approach_alignment: ApproachAlignmentMetricCfg
@@ -410,6 +428,7 @@ class MetricsCfg:
     lift_cube: LiftCubeMetricCfg
     approach_phase_terminal: ApproachPhaseTerminalMetricCfg
     grasp_phase_terminal: GraspPhaseTerminalMetricCfg
+    goal_zone_distance: GoalZoneDistanceMetricCfg
 
 
 @dataclass(kw_only=True)
@@ -548,12 +567,31 @@ class GroundDRCfg:
 
 
 @dataclass
+class GoalZonePositionDRCfg:
+    """Domain randomisation config for the per-episode goal zone target position.
+
+    The goal zone is sampled in polar coordinates relative to the robot base
+    at episode reset.  Set ``enabled: false`` to disable the feature entirely
+    (no :class:`GoalZoneEnvMetricStep` will be added to the pipeline).
+    """
+
+    enabled: bool
+    radius_range: tuple[float, float]
+    """Radial distance from the robot base (m) in which the goal zone is sampled."""
+    angle_range: tuple[float, float]
+    """Azimuthal angle range (degrees) for the goal zone."""
+    z_range: tuple[float, float]
+    """Height range (m) above the table surface for the goal zone."""
+
+
+@dataclass
 class DomainRandomizationCfg:
     camera: DRCameraCfg
     world_lighting: WorldLightingCfg
     env_lighting: EnvLightingCfg
     cube: DRCubeCfg
     ground: GroundDRCfg
+    goal_zone: GoalZonePositionDRCfg
 
 
 # ---------------------------------------------------------------------------
@@ -595,6 +633,11 @@ class SensorsCfg:
 @dataclass
 class ObservationsCfg:
     critic_obs_metrics: list[str]
+    actor_obs_metrics: list[str] = field(default_factory=list)
+    """Extra metric keys appended to the actor observation vector after the
+    frozen vision features and joint positions.  Defaults to an empty list
+    (no change to actor obs space).  Each key must appear in
+    :data:`KEY_OBS_DIMS` so its column width is known."""
     telemetry_metrics: list[str] = field(default_factory=list)
     """Extra metric keys to include in the metric pipeline for telemetry collection.
     Unlike critic_obs_metrics, these do not become part of the critic observation

@@ -32,9 +32,11 @@ from so101_rl.helpers.visual_markers import (
     define_grip_zone_markers,
     define_gripper_arrow_markers,
     define_camera_frame_markers,
+    define_goal_zone_markers,
     visualize_grip_zone_markers,
     visualize_gripper_arrow,
     visualize_camera_frame_markers,
+    visualize_goal_zone_markers,
 )
 from so101_rl.helpers.utils import set_material
 
@@ -183,6 +185,8 @@ class So101LiftCube(DirectRLEnv):
             self.reward_pipeline,
             extra_keys=frozenset(
                 {
+                    # consumed by _get_observations (actor features)
+                    *self.cfg.observations.actor_obs_metrics,
                     # consumed by _get_observations (critic features)
                     *self.cfg.observations.critic_obs_metrics,
                     # always computed for telemetry collection (does not affect obs space)
@@ -387,6 +391,11 @@ class So101LiftCube(DirectRLEnv):
         if self.cfg.debug.enable_grip_zone_markers:
             self.grip_zone_markers = define_grip_zone_markers()
 
+        if self.cfg.debug.enable_goal_zone_markers:
+            self.goal_zone_markers = define_goal_zone_markers(
+                radius=self.cfg.metrics.goal_zone_distance.distance_threshold
+            )
+
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
         """Called before stepping the physics; store and scale actions."""
         if actions is None:
@@ -434,6 +443,14 @@ class So101LiftCube(DirectRLEnv):
             )
             visualize_grip_zone_markers(
                 self.grip_zone_markers, gz_pos_w, gripper_quat_w, self.device
+            )
+
+        if (
+            self.cfg.debug.enable_goal_zone_markers
+            and self.env_metrics.get("goal_zone_pos_w") is not None
+        ):
+            visualize_goal_zone_markers(
+                self.goal_zone_markers, self.env_metrics["goal_zone_pos_w"], self.device
             )
 
     def _apply_action(self) -> None:
@@ -494,6 +511,19 @@ class So101LiftCube(DirectRLEnv):
         if self.step_metrics is None:
             print("Computing initial step metrics...")
             self._compute_step_metrics()
+
+        # Append any configured actor-only metric observations (e.g. goal_zone_pos_local).
+        if self.cfg.observations.actor_obs_metrics:
+            actor_obs = torch.cat(
+                [
+                    actor_obs,
+                    *[
+                        self.step_metrics[key].reshape(self.num_envs, KEY_OBS_DIMS[key])
+                        for key in self.cfg.observations.actor_obs_metrics
+                    ],
+                ],
+                dim=-1,
+            )
 
         critic_obs_parts: list[torch.Tensor] = []
         if self.cfg.observations.critic_include_vision_features:

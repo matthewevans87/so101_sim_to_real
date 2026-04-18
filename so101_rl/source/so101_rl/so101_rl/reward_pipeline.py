@@ -585,6 +585,25 @@ class WristRollPoseRewardStep(RewardStep[WristRollPoseRewardCfg]):
         return torch.exp(-self._cfg.pressure * error)
 
 
+class GoalZoneDistanceRewardStep(RewardStep[RewardCfg]):
+    """Rewards moving the cube towards the goal zone.
+
+    ``compute()`` returns ``goal_zone_distance = exp(-pressure * dist / cube_width)``
+    from :class:`~so101_rl.metric_pipeline.GoalZoneCubeDistanceMetricStep`.
+    This is in (0, 1] and is highest when the cube is at the goal zone.
+
+    Combine with ``mode: unsigned_progressive`` and a positive scale to reward
+    per-step improvements in proximity, or use ``mode: absolute`` with a
+    positive scale for a dense potential-based reward.
+    """
+
+    name = "goal_zone_distance"
+    requires_metrics = frozenset({"goal_zone_distance"})
+
+    def compute(self, ctx: StepContext) -> torch.Tensor:
+        return ctx.metrics["goal_zone_distance"]
+
+
 # ---------------------------------------------------------------------------
 # Factory helper
 # ---------------------------------------------------------------------------
@@ -615,6 +634,7 @@ REWARD_STEP_REGISTRY: dict[str, tuple[type[RewardStep[Any]], type[RewardCfg]]] =
     "avoid_bumping_cube": (AvoidBumpingCubeRewardStep, AvoidBumpingCubeRewardCfg),
     "grasp_phase": (GraspPhaseRewardStep, RewardCfg),
     "wrist_roll_pose": (WristRollPoseRewardStep, WristRollPoseRewardCfg),
+    "goal_zone_distance": (GoalZoneDistanceRewardStep, RewardCfg),
 }
 
 

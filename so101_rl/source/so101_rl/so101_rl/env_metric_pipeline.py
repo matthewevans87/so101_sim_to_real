@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections import defaultdict, deque
+import math
 
 import omni.usd  # type: ignore
 import torch
 from pxr import UsdGeom  # type: ignore
 
-from isaaclab.utils.math import quat_apply
+from isaaclab.utils.math import quat_apply, sample_uniform
 
 from so101_rl.configurations.cube import CUBE_DEFAULT_DIMS, CUBE_WIDTH
 from so101_rl.dr_pipeline import DRContext
@@ -253,9 +254,54 @@ class GripZoneOffsetEnvMetricStep(EnvMetricStep):
         env.env_metrics["grip_zone_offset"][env_ids_t] = val
 
 
+class GoalZoneEnvMetricStep(EnvMetricStep):
+    """Samples a per-env, per-episode goal zone position in world coordinates.
+
+    The goal zone is sampled in polar coordinates relative to the robot base,
+    then offset by ``env.scene.env_origins`` to produce world-frame positions.
+
+    Produces ``env.env_metrics["goal_zone_pos_w"]`` of shape ``(num_envs, 3)``.
+    Only runs when ``cfg.domain_randomization.goal_zone.enabled`` is ``True``.
+    """
+
+    produces = frozenset({"goal_zone_pos_w"})
+    depends_on = frozenset()
+
+    def apply(self, ctx: DRContext) -> None:
+        env = ctx.env
+        n = len(ctx.env_ids)
+        env_ids_t = torch.as_tensor(list(ctx.env_ids), device=env.device)
+
+        if "goal_zone_pos_w" not in env.env_metrics:
+            env.env_metrics["goal_zone_pos_w"] = torch.zeros(
+                env.num_envs, 3, device=env.device, dtype=torch.float32
+            )
+
+        gz_cfg = env.cfg.domain_randomization.goal_zone
+        radius = sample_uniform(
+            gz_cfg.radius_range[0], gz_cfg.radius_range[1], (n,), device=env.device
+        )
+        angle = sample_uniform(
+            math.radians(gz_cfg.angle_range[0]),
+            math.radians(gz_cfg.angle_range[1]),
+            (n,),
+            device=env.device,
+        )
+        z = sample_uniform(
+            gz_cfg.z_range[0], gz_cfg.z_range[1], (n,), device=env.device
+        )
+
+        pos = torch.stack(
+            [radius * torch.cos(angle), radius * torch.sin(angle), z], dim=-1
+        )  # (n, 3) in env-local frame
+        pos += env.scene.env_origins[env_ids_t]  # shift to world frame
+        env.env_metrics["goal_zone_pos_w"][env_ids_t] = pos
+
+
 ALL_ENV_METRIC_STEPS: list[type[EnvMetricStep]] = [
     CubeDimsEnvMetricStep,
     GripZoneOffsetEnvMetricStep,
+    GoalZoneEnvMetricStep,
 ]
 
 
@@ -278,4 +324,6 @@ def build_env_metric_pipeline(cfg) -> EnvMetricPipeline:
         CubeDimsEnvMetricStep(),
         GripZoneOffsetEnvMetricStep(),
     ]
+    if cfg.domain_randomization.goal_zone.enabled:
+        steps.append(GoalZoneEnvMetricStep())
     return EnvMetricPipeline(steps)

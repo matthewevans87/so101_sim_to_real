@@ -643,6 +643,194 @@ class GraspPhaseTerminalMetricStep(MetricStep):
         ctx.metrics["grasp_phase_terminal"] = grasp_phase_terminal
 
 
+class GoalZonePosMetricStep(MetricStep):
+    """Exposes the current episode's goal zone position in env-local frame.
+
+    Produces ``goal_zone_pos_local = goal_zone_pos_w - env.scene.env_origins``
+    of shape ``(num_envs, 3)``.  Using env-local coordinates ensures the actor
+    observation is invariant across parallel environments.
+
+    Requires :class:`~so101_rl.env_metric_pipeline.GoalZoneEnvMetricStep`
+    (i.e. ``cfg.domain_randomization.goal_zone.enabled`` must be ``True``).
+    """
+
+    produces = frozenset({"goal_zone_pos_local"})
+    depends_on = frozenset()
+    depends_on_env_metrics = frozenset({"goal_zone_pos_w"})
+    obs_dim = 3
+
+    def compute(self, ctx: StepContext) -> None:
+        env = ctx.env
+        val = (
+            ctx.env_metrics["goal_zone_pos_w"] - env.scene.env_origins
+        )  # (num_envs, 3)
+        assert_tensor(val, (env.num_envs, 3), torch.float32)
+        ctx.metrics["goal_zone_pos_local"] = val
+
+
+class GoalZoneCubeDistanceMetricStep(MetricStep):
+    """Computes distance-based metrics from the cube to the goal zone.
+
+    Produced metrics
+    ~~~~~~~~~~~~~~~~
+    * ``goal_zone_cube_distance`` — Euclidean distance (m) from the cube
+      centroid to the goal zone centre, shape ``(num_envs,)``.
+    * ``goal_zone_distance`` — exponentially shaped score in (0, 1] that is
+      highest (1.0) at zero distance and decays as
+      ``exp(-pressure * dist / env_cube_width)``.
+    * ``is_goal_zone_reached`` — float ``1.0`` when
+      ``goal_zone_cube_distance <= cfg.distance_threshold``,
+      else ``0.0``.
+    """
+
+    produces = frozenset(
+        {"goal_zone_cube_distance", "goal_zone_distance", "is_goal_zone_reached"}
+    )
+    depends_on = frozenset()
+    depends_on_env_metrics = frozenset({"goal_zone_pos_w", "env_cube_width"})
+    obs_dim = 1
+
+    def compute(self, ctx: StepContext) -> None:
+        env = ctx.env
+        cube_pos_w = env.cube.data.root_pos_w  # (num_envs, 3)
+        goal_pos_w = ctx.env_metrics["goal_zone_pos_w"]  # (num_envs, 3)
+        dist = (cube_pos_w - goal_pos_w).norm(dim=-1)  # (num_envs,)
+        cube_width = ctx.env_metrics["env_cube_width"]  # (num_envs,)
+
+        cfg = env.cfg.metrics.goal_zone_distance
+        gz_dist = torch.exp(
+            -cfg.pressure * dist / cube_width.clamp(min=1e-6)
+        )  # (num_envs,) in (0, 1]
+        reached = (dist <= cfg.distance_threshold).float()  # (num_envs,)
+
+        assert_tensor(dist, (env.num_envs,), torch.float32)
+        assert_tensor(gz_dist, (env.num_envs,), torch.float32)
+        assert_tensor(reached, (env.num_envs,), torch.float32)
+        ctx.metrics["goal_zone_cube_distance"] = dist
+        ctx.metrics["goal_zone_distance"] = gz_dist
+        ctx.metrics["is_goal_zone_reached"] = reached
+
+
+class CubeLinearVelocityMetricStep(MetricStep):
+    """Linear velocity of the cube in world frame.
+
+    Produces ``cube_linear_velocity`` of shape ``(num_envs, 3)`` (m/s).
+    """
+
+    produces = frozenset({"cube_linear_velocity"})
+    depends_on = frozenset()
+    obs_dim = 3
+
+    def compute(self, ctx: StepContext) -> None:
+        env = ctx.env
+        val = env.cube.data.root_lin_vel_w
+        assert_tensor(val, (env.num_envs, 3), torch.float32)
+        ctx.metrics["cube_linear_velocity"] = val
+
+
+class CubeAngularVelocityMetricStep(MetricStep):
+    """Angular velocity of the cube in world frame.
+
+    Produces ``cube_angular_velocity`` of shape ``(num_envs, 3)`` (rad/s).
+    """
+
+    produces = frozenset({"cube_angular_velocity"})
+    depends_on = frozenset()
+    obs_dim = 3
+
+    def compute(self, ctx: StepContext) -> None:
+        env = ctx.env
+        val = env.cube.data.root_ang_vel_w
+        assert_tensor(val, (env.num_envs, 3), torch.float32)
+        ctx.metrics["cube_angular_velocity"] = val
+
+
+class GripperOpenWidthMetricStep(MetricStep):
+    """Distance between the two gripper tip xframes in world space.
+
+    Computes the Euclidean distance between:
+
+    * ``Robot/gripper/gripperframe``  (fixed-jaw tip)
+    * ``Robot/moving_jaw_so101_v1/moving_gripperframe``  (moving-jaw tip)
+
+    The local USD transform of each xframe relative to its parent body is read
+    once from the USD stage on the first call and cached as class attributes,
+    following the same pattern as ``GripZoneOffsetEnvMetricStep``.
+
+    Produces ``gripper_open_width`` (m), shape ``(num_envs,)``.
+    """
+
+    produces = frozenset({"gripper_open_width"})
+    depends_on = frozenset()
+    obs_dim = 1
+
+    # Class-level cache — populated once from USD, shared across all instances.
+    _gripperframe_local_pos: torch.Tensor | None = None
+    _moving_gripperframe_local_pos: torch.Tensor | None = None
+
+    def _cache_tip_transforms(self, env) -> None:
+        import omni.usd  # type: ignore
+        from pxr import UsdGeom  # type: ignore
+
+        stage = omni.usd.get_context().get_stage()
+        meters_per_unit = float(UsdGeom.GetStageMetersPerUnit(stage))
+
+        def _read_local_pos(prim_path: str) -> torch.Tensor:
+            prim = stage.GetPrimAtPath(prim_path)
+            local_xform = UsdGeom.Xformable(prim).GetLocalTransformation()
+            t = local_xform.ExtractTranslation()
+            return torch.tensor(
+                [
+                    t[0] * meters_per_unit,
+                    t[1] * meters_per_unit,
+                    t[2] * meters_per_unit,
+                ],
+                device=env.device,
+                dtype=torch.float32,
+            )
+
+        GripperOpenWidthMetricStep._gripperframe_local_pos = _read_local_pos(
+            "/World/envs/env_0/Robot/gripper/gripperframe"
+        )
+        GripperOpenWidthMetricStep._moving_gripperframe_local_pos = _read_local_pos(
+            "/World/envs/env_0/Robot/moving_jaw_so101_v1/moving_gripperframe"
+        )
+
+    def compute(self, ctx: StepContext) -> None:
+        env = ctx.env
+
+        if GripperOpenWidthMetricStep._gripperframe_local_pos is None:
+            self._cache_tip_transforms(env)
+
+        # Fixed-jaw tip position in world frame
+        gripper_pos_w = env.robot.data.body_pos_w[:, env._ee_body_idx[0], :]  # (N, 3)
+        gripper_quat_w = env.robot.data.body_quat_w[:, env._ee_body_idx[0], :]  # (N, 4)
+        tip_fixed_w = gripper_pos_w + quat_apply(
+            gripper_quat_w,
+            GripperOpenWidthMetricStep._gripperframe_local_pos.unsqueeze(0).expand(  # type: ignore[union-attr]
+                env.num_envs, -1
+            ),
+        )
+
+        # Moving-jaw tip position in world frame
+        mj_pos_w = env.robot.data.body_pos_w[
+            :, env._moving_jaw_body_idx[0], :
+        ]  # (N, 3)
+        mj_quat_w = env.robot.data.body_quat_w[
+            :, env._moving_jaw_body_idx[0], :
+        ]  # (N, 4)
+        tip_moving_w = mj_pos_w + quat_apply(
+            mj_quat_w,
+            GripperOpenWidthMetricStep._moving_gripperframe_local_pos.unsqueeze(0).expand(  # type: ignore[union-attr]
+                env.num_envs, -1
+            ),
+        )
+
+        val = (tip_fixed_w - tip_moving_w).norm(dim=-1)  # (N,)
+        assert_tensor(val, (env.num_envs,), torch.float32)
+        ctx.metrics["gripper_open_width"] = val
+
+
 # ---------------------------------------------------------------------------
 # Complete catalog of all available metric step classes (order irrelevant).
 # MetricPipeline will topologically sort any subset passed to it.
@@ -670,6 +858,11 @@ ALL_METRIC_STEPS: list[type[MetricStep]] = [
     GraspPhaseMetricStep,
     ApproachPhaseTerminalMetricStep,
     GraspPhaseTerminalMetricStep,
+    GoalZonePosMetricStep,
+    GoalZoneCubeDistanceMetricStep,
+    CubeLinearVelocityMetricStep,
+    CubeAngularVelocityMetricStep,
+    GripperOpenWidthMetricStep,
 ]
 
 # Maps each observable metric key to the number of columns it contributes

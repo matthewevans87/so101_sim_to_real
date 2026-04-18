@@ -58,6 +58,7 @@ debug:
   enable_gripper_arrow_markers: false
   enable_camera_frame_markers: false
   enable_grip_zone_markers: false
+  enable_goal_zone_markers: false
   vision_debug:
     enabled: false
     interval: 100
@@ -108,6 +109,9 @@ metrics:
     threshold: 0.90  # approach_phase value above which approach_phase_terminal is True
   grasp_phase_terminal:
     threshold: 0.95  # grasp_phase value above which grasp_phase_terminal is True
+  goal_zone_distance:
+    pressure: 5.0   # exp(-pressure * dist / cube_width); higher = sharper peak at goal
+    distance_threshold: 0.05  # metres — cube centroid within this distance is considered reached
 
 rewards:
   # mode: absolute (default)     — reward the current metric value each step.
@@ -285,6 +289,11 @@ domain_randomization:
       z_range: [0.03, 0.04]
   ground:
     enabled: false
+  goal_zone:
+    enabled: false
+    radius_range: [0.25, 0.45]  # m from robot base
+    angle_range: [-30.0, 30.0]  # degrees
+    z_range: [0.05, 0.20]       # m above table
 
 sensors:
   camera:

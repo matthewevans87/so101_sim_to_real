@@ -210,3 +210,42 @@ def visualize_gripper_arrow(
 
     marker_indices = torch.zeros(num_envs, dtype=torch.long, device=device)
     markers.visualize(arrow_pos_w, arrow_quat_w, marker_indices=marker_indices)
+
+
+def define_goal_zone_markers(radius: float = 0.05) -> VisualizationMarkers:
+    """A semi-transparent green sphere at the goal zone position for each environment.
+
+    Args:
+        radius: Sphere radius in metres — should match
+            ``cfg.metrics.goal_zone_distance.distance_threshold``.
+    """
+    marker_cfg = VisualizationMarkersCfg(
+        prim_path="/Visuals/GoalZoneMarkers",
+        markers={
+            "sphere": sim_utils.SphereCfg(
+                radius=radius,
+                visual_material=sim_utils.PreviewSurfaceCfg(
+                    diffuse_color=(0.0, 0.8, 0.0),  # green
+                    opacity=0.35,
+                ),
+            ),
+        },
+    )
+    return VisualizationMarkers(cfg=marker_cfg)
+
+
+def visualize_goal_zone_markers(
+    markers: VisualizationMarkers,
+    goal_pos_w: torch.Tensor,  # (N, 3) goal zone world positions
+    device: str,
+) -> None:
+    """Draw a semi-transparent green sphere at each environment's goal zone."""
+    N = goal_pos_w.shape[0]
+    identity_quat = torch.zeros(N, 4, dtype=torch.float32, device=device)
+    identity_quat[:, 0] = 1.0  # w=1 identity quaternion (wxyz)
+    marker_indices = torch.zeros(N, dtype=torch.long, device=device)
+    markers.visualize(
+        translations=goal_pos_w,
+        orientations=identity_quat,
+        marker_indices=marker_indices,
+    )

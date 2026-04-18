@@ -36,6 +36,8 @@ from so101_rl.metric_pipeline import (
     GraspPhaseMetricStep,
     ApproachPhaseTerminalMetricStep,
     GraspPhaseTerminalMetricStep,
+    GoalZonePosMetricStep,
+    GoalZoneCubeDistanceMetricStep,
     ALL_METRIC_STEPS,
     KEY_OBS_DIMS,
     build_metric_pipeline,
@@ -65,6 +67,7 @@ from so101_rl.reward_pipeline import (
     AvoidBumpingCubeRewardStep,
     GraspPhaseRewardStep,
     WristRollPoseRewardStep,
+    GoalZoneDistanceRewardStep,
     build_reward_pipeline,
     validate_gate_metrics,
 )
@@ -87,6 +90,7 @@ from so101_rl.env_metric_pipeline import (
     EnvMetricPipeline,
     CubeDimsEnvMetricStep,
     GripZoneOffsetEnvMetricStep,
+    GoalZoneEnvMetricStep,
     ALL_ENV_METRIC_STEPS,
     build_env_metric_pipeline,
 )
@@ -117,6 +121,8 @@ __all__ = [
     "GraspPhaseMetricStep",
     "ApproachPhaseTerminalMetricStep",
     "GraspPhaseTerminalMetricStep",
+    "GoalZonePosMetricStep",
+    "GoalZoneCubeDistanceMetricStep",
     "ALL_METRIC_STEPS",
     "KEY_OBS_DIMS",
     "build_metric_pipeline",
@@ -145,6 +151,7 @@ __all__ = [
     "AvoidBumpingCubeRewardStep",
     "GraspPhaseRewardStep",
     "WristRollPoseRewardStep",
+    "GoalZoneDistanceRewardStep",
     "build_reward_pipeline",
     "validate_gate_metrics",
     # DR pipeline
@@ -164,6 +171,7 @@ __all__ = [
     "EnvMetricPipeline",
     "CubeDimsEnvMetricStep",
     "GripZoneOffsetEnvMetricStep",
+    "GoalZoneEnvMetricStep",
     "ALL_ENV_METRIC_STEPS",
     "build_env_metric_pipeline",
 ]

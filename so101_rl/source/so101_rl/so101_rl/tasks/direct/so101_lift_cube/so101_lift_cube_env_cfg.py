@@ -84,7 +84,11 @@ class So101LiftCubeCfg(DirectRLEnvCfg):
             "Must be 'frozen_resnet18' or 'frozen_cnn'."
         )
 
-    observation_space = _VISION_FEATURE_DIM + NUM_ACTIVE_JOINTS
+    observation_space = (
+        _VISION_FEATURE_DIM
+        + NUM_ACTIVE_JOINTS
+        + sum(KEY_OBS_DIMS[k] for k in _Y.observations.actor_obs_metrics)
+    )
 
     state_space = (
         (_VISION_FEATURE_DIM if _Y.observations.critic_include_vision_features else 0)
