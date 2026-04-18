@@ -382,7 +382,7 @@ class CubeOutOfRangeMetricCfg:
 
 
 @dataclass
-class LiftCubeMetricCfg:
+class LiftPhaseMetricCfg:
     height_threshold: float
     """Cube height above resting position (m) at which cube_lift_fraction reaches 1.0."""
 
@@ -425,7 +425,7 @@ class MetricsCfg:
     grasp_phase: GraspPhaseMetricCfg
     grip_cube: GripCubeMetricCfg
     cube_out_of_range: CubeOutOfRangeMetricCfg
-    lift_cube: LiftCubeMetricCfg
+    lift_phase: LiftPhaseMetricCfg
     approach_phase_terminal: ApproachPhaseTerminalMetricCfg
     grasp_phase_terminal: GraspPhaseTerminalMetricCfg
     goal_zone_distance: GoalZoneDistanceMetricCfg

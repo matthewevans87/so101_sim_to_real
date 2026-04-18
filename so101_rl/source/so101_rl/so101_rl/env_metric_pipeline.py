@@ -10,7 +10,7 @@ from pxr import UsdGeom  # type: ignore
 
 from isaaclab.utils.math import quat_apply, sample_uniform
 
-from so101_rl.configurations.cube import CUBE_DEFAULT_DIMS, CUBE_WIDTH
+from so101_rl.configurations.black_cube import CUBE_DEFAULT_DIMS, CUBE_WIDTH
 from so101_rl.dr_pipeline import DRContext
 
 

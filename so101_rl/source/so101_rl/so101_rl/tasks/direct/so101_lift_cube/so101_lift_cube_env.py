@@ -186,9 +186,9 @@ class So101LiftCube(DirectRLEnv):
             extra_keys=frozenset(
                 {
                     # consumed by _get_observations (actor features)
-                    *self.cfg.observations.actor_obs_metrics,
+                    *(self.cfg.observations.actor_obs_metrics or []),
                     # consumed by _get_observations (critic features)
-                    *self.cfg.observations.critic_obs_metrics,
+                    *(self.cfg.observations.critic_obs_metrics or []),
                     # always computed for telemetry collection (does not affect obs space)
                     *self.cfg.observations.telemetry_metrics,
                 }
@@ -556,13 +556,17 @@ class So101LiftCube(DirectRLEnv):
 
         self._compute_step_metrics()
         for key in self.step_metrics:
-            if (
-                self.step_metrics[key].size(-1) == 1
-                or self.step_metrics[key].dim() == 1
-            ):
-                val = self.step_metrics[key].float()
+            t = self.step_metrics[key].float()
+            if t.dim() == 1 or t.size(-1) == 1:
+                # Scalar metric — log directly.
+                val = t.reshape(self.num_envs)
                 self.extras["log"][f"Step_Metrics/{key}"] = val.mean()
                 self.extras["per_env_log"][f"Step_Metrics/{key}"] = val
+            else:
+                # Vector metric — log the L2 norm so it's visible in TensorBoard.
+                val = t.norm(dim=-1)  # (num_envs,)
+                self.extras["log"][f"Step_Metrics/{key}_norm"] = val.mean()
+                self.extras["per_env_log"][f"Step_Metrics/{key}_norm"] = val
 
         # Episode timeout
         time_out = self.episode_length_buf >= self.max_episode_length - 1

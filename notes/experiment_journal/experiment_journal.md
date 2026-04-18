@@ -578,11 +578,16 @@ I created a 3D model of a cube similar to the dexterity cube which is printable 
 
 ## April 18, 2026
 Todo
-- Goal Zone Task
+- [x] Goal Zone Task
   - [x] Fix issue with no reward for goal_zone_distance
   - [x] Commit changes
+  - [x] Not going to pursue goal zone further for now; just focus on lift task.
 - [x] Import new cube 3D model as USD
 - Run training on new cube
+  - [x] Achieves lifting despite not retraining CNN. CNN will likely improve performance. See run `2026-04-18_12-29-55/`
+    - Retrain Steps:
+      - [ ] Step 0: RN18 -> CNN1
+      - [ ] Step 1: CNN1 -> CNN2
 - Lift Task
   - Re-train with latest changes (but with config set to lift goal only)
   - Commit changes

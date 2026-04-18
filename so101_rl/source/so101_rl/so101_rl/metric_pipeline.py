@@ -13,7 +13,7 @@ from isaaclab.utils.math import (
     quat_unique,
 )
 
-from so101_rl.configurations.cube import CUBE_RESTING_HEIGHT
+from so101_rl.configurations.black_cube import CUBE_RESTING_HEIGHT
 from so101_rl.helpers.utils import assert_tensor
 
 if TYPE_CHECKING:
@@ -402,7 +402,7 @@ class CubeLiftFractionMetricStep(MetricStep):
 
     def compute(self, ctx: StepContext) -> None:
         env = ctx.env
-        val = ctx.metrics["cube_height_w"] / env.cfg.metrics.lift_cube.height_threshold
+        val = ctx.metrics["cube_height_w"] / env.cfg.metrics.lift_phase.height_threshold
         assert_tensor(val, (env.num_envs,), torch.float32)
         ctx.metrics["cube_lift_fraction"] = val
 

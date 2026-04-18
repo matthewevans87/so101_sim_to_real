@@ -5,7 +5,7 @@ from typing import Any, Generic, TypeVar
 
 import torch
 
-from so101_rl.configurations.cube import CUBE_WIDTH
+from so101_rl.configurations.black_cube import CUBE_WIDTH
 from so101_rl.configurations.so101_env_params import (
     GateCfg,
     RewardCfg,
@@ -321,8 +321,8 @@ class GripCubeRewardStep(RewardStep[RewardCfg]):
         )
 
 
-class LiftCubeRewardStep(RewardStep[RewardCfg]):
-    name = "lift_cube"
+class LiftPhaseRewardStep(RewardStep[RewardCfg]):
+    name = "lift_phase"
     requires_metrics = frozenset({"cube_lift_fraction"})
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
@@ -612,7 +612,7 @@ REWARD_STEP_REGISTRY: dict[str, tuple[type[RewardStep[Any]], type[RewardCfg]]] =
     "static": (StaticRewardStep, RewardCfg),
     "distance": (DistanceRewardStep, DistanceRewardCfg),
     "grip_cube": (GripCubeRewardStep, RewardCfg),
-    "lift_cube": (LiftCubeRewardStep, RewardCfg),
+    "lift_phase": (LiftPhaseRewardStep, RewardCfg),
     "gripper_cube_alignment": (GripperCubeAlignmentRewardStep, RewardCfg),
     "close_gripper": (CloseGripperRewardStep, CloseGripperRewardCfg),
     "action": (ActionRewardStep, ActionRewardCfg),

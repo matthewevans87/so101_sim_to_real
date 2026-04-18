@@ -5,8 +5,9 @@ from isaaclab.assets import RigidObjectCfg
 
 WORKSPACE_PATH = os.environ.get("ISAAC_LAB_WORKSPACE_PATH", "/workspace")
 
-BLACK_CUBE_WIDTH = 0.03  # 3 cm
-BLACK_CUBE_RESTING_HEIGHT = BLACK_CUBE_WIDTH / 2  # 0.015 m — half-height
+CUBE_WIDTH = 0.03  # 3 cm
+CUBE_DEFAULT_DIMS = (CUBE_WIDTH, CUBE_WIDTH, CUBE_WIDTH)  # 3cm cube
+CUBE_RESTING_HEIGHT = CUBE_WIDTH / 2  # 0.015 m — half-height
 
 # Mass is baked into the USDA via PhysicsMassAPI (14.71 g = 0.01471 kg).
 # Friction and restitution are baked in via PhysicsMaterialAPI.
@@ -14,7 +15,7 @@ BLACK_CUBE_RESTING_HEIGHT = BLACK_CUBE_WIDTH / 2  # 0.015 m — half-height
 BLACK_CUBE_CFG = RigidObjectCfg(
     prim_path="{ENV_REGEX_NS}/Object",
     init_state=RigidObjectCfg.InitialStateCfg(
-        pos=(0.2, 0.0, BLACK_CUBE_RESTING_HEIGHT * 2),  # a tiny bit above the ground
+        pos=(0.2, 0.0, CUBE_RESTING_HEIGHT * 2),  # a tiny bit above the ground
         rot=(1.0, 0.0, 0.0, 0.0),
     ),
     spawn=sim_utils.UsdFileCfg(

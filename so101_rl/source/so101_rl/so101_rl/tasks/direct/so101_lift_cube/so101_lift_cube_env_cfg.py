@@ -5,13 +5,13 @@
 
 import os
 
+from so101_rl.configurations.black_cube import BLACK_CUBE_CFG
 from so101_rl.configurations.debug import VIS_MARKER_CFG
 from so101_rl.configurations.so101 import (
     SO101_CFG,
     GRIPPER_CONTACT_SENSOR_CFG,
     MOVING_JAW_CONTACT_SENSOR_CFG,
 )
-from so101_rl.configurations.cube import DEX_CUBE_CFG
 from so101_rl.configurations.camera import (
     CAMERA_CFG,
     OVERHEAD_CAMERA_CFG,
@@ -87,7 +87,7 @@ class So101LiftCubeCfg(DirectRLEnvCfg):
     observation_space = (
         _VISION_FEATURE_DIM
         + NUM_ACTIVE_JOINTS
-        + sum(KEY_OBS_DIMS[k] for k in _Y.observations.actor_obs_metrics)
+        + sum(KEY_OBS_DIMS[k] for k in (_Y.observations.actor_obs_metrics or []))
     )
 
     state_space = (
@@ -101,7 +101,7 @@ class So101LiftCubeCfg(DirectRLEnvCfg):
 
     table_cfg: RigidObjectCfg = TABLE_CFG.replace(prim_path="/World/envs/env_.*/Table")  # type: ignore
 
-    cube_cfg: RigidObjectCfg = DEX_CUBE_CFG.replace(prim_path="/World/envs/env_.*/Object")  # type: ignore
+    cube_cfg: RigidObjectCfg = BLACK_CUBE_CFG.replace(prim_path="/World/envs/env_.*/Object")  # type: ignore
 
     camera_cfg: TiledCameraCfg = TILED_CAMERA_CFG.replace(  # type: ignore
         prim_path="/World/envs/env_.*/Robot/gripper/mountscrew/camera_mount/CameraXframe/gripper_camera",
