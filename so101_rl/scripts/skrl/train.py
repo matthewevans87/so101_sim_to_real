@@ -13,7 +13,12 @@ a more user-friendly way.
 """Launch Isaac Sim Simulator first."""
 
 import argparse
+import copy
+import json
+import shutil
 import sys
+from datetime import datetime, timezone
+from pathlib import Path
 
 from isaaclab.app import AppLauncher
 
@@ -100,6 +105,17 @@ parser.add_argument(
         "train_cnn.py (best_model.pt or final_model.pt). "
         "Only valid when vision_encoder.type == 'frozen_cnn'. "
         "Weights are loaded into the frozen CNN feature extractor before training starts."
+    ),
+)
+parser.add_argument(
+    "--agent_config",
+    type=str,
+    default=None,
+    help=(
+        "Path to a YAML file whose contents are deep-merged into the agent config "
+        "loaded from the task registry.  Used by the sweep orchestrator to apply "
+        "per-experiment agent overrides (e.g. learning_rate, rollouts).  "
+        "Override values take precedence over the registered defaults."
     ),
 )
 
@@ -265,11 +281,37 @@ else:
     algorithm = agent_cfg_entry_point.split("_cfg")[0].split("skrl_")[-1].lower()
 
 
+def _deep_merge_dicts(base: dict, overrides: dict) -> dict:
+    """Recursively merge *overrides* into *base*, returning a new dict."""
+    result = copy.deepcopy(base)
+    for k, v in overrides.items():
+        if k in result and isinstance(result[k], dict) and isinstance(v, dict):
+            result[k] = _deep_merge_dicts(result[k], v)
+        else:
+            result[k] = copy.deepcopy(v)
+    return result
+
+
 @hydra_task_config(args_cli.task, agent_cfg_entry_point)
 def main(
     env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: dict
 ):
     """Train with skrl agent."""
+    # Apply per-experiment agent config overrides supplied by the sweep orchestrator.
+    # This must happen before any other use of agent_cfg so that overrides such as
+    # learning_rate or rollouts take effect for all downstream calculations.
+    if args_cli.agent_config is not None:
+        import yaml as _yaml
+
+        _override_path = Path(args_cli.agent_config)
+        if not _override_path.is_file():
+            raise FileNotFoundError(
+                f"--agent_config path not found: {_override_path.resolve()}"
+            )
+        with open(_override_path) as _f:
+            _agent_overrides = _yaml.safe_load(_f) or {}
+        agent_cfg = _deep_merge_dicts(agent_cfg, _agent_overrides)
+
     # override configurations with non-hydra CLI arguments
     env_cfg.scene.num_envs = (
         args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
@@ -324,9 +366,9 @@ def main(
     # specify directory for logging experiments
     log_root_path = os.path.abspath(os.path.join(args_cli.artifacts_dir, "skrl"))
     print(f"[INFO] Logging experiment in directory: {log_root_path}")
-    # Write directly into log_root_path — no experiment_name subdir
+    # Fix experiment_name to "agent" so skrl always creates skrl/agent/ (no timestamp suffix)
     agent_cfg["agent"]["experiment"]["directory"] = log_root_path
-    agent_cfg["agent"]["experiment"]["experiment_name"] = ""
+    agent_cfg["agent"]["experiment"]["experiment_name"] = "agent"
     agent_cfg["agent"]["experiment"]["write_interval"] = 100
 
     log_dir = log_root_path
@@ -369,7 +411,22 @@ def main(
                 "--cnn_checkpoint requires vision_encoder.type == "
                 "'frozen_cnn'.  Switch to a frozen_cnn env config."
             )
-        env_cfg.vision_encoder.cnn_checkpoint = args_cli.cnn_checkpoint
+        # Embed a copy of the CNN checkpoint into the experiment directory so
+        # that collect_telemetry.py (and future tools) can locate it without
+        # any extra flags, and the experiment remains self-contained.
+        cnn_src = os.path.abspath(args_cli.cnn_checkpoint)
+        artifacts_path = Path(args_cli.artifacts_dir).resolve()
+        embedded_cnn = artifacts_path / "cnn_checkpoint.pt"
+        shutil.copy2(cnn_src, embedded_cnn)
+        provenance = {
+            "source_path": cnn_src,
+            "copied_at": datetime.now(timezone.utc).isoformat(),
+        }
+        (artifacts_path / "cnn_checkpoint_provenance.json").write_text(
+            json.dumps(provenance, indent=2)
+        )
+        print(f"[INFO] CNN checkpoint embedded: {embedded_cnn}")
+        env_cfg.vision_encoder.cnn_checkpoint = str(embedded_cnn)
 
     # create isaac environment
     env = gym.make(

@@ -302,3 +302,305 @@ Domain Randomization (DR) is applied to the cube. As such, the ideal gripping po
 To achieve this, we introduce the concept of `EnvMetricPipeline` and `EnvMetricStep`. `EnvMetricStep`s are compute when a given environment resets in `_reset_idx`.
 
 With these changes in place, we are now positioned to make further refinements to the phased rewards. 
+
+*Update*
+
+With the new EnvMetricPipeline, improved grip zone calculation, and **addition of a *avoid_bumping_cube*** penalty, the policy is learning to straddle the gripper around the cube within `< 50k` steps. 
+
+*Considerations*
+- Need to review the camera config settings and ensure we have proper simulated lens
+- The policy tends to move around a lot unnecessarily even after it has placed the cube in the grip zone. How can we reduce this extra motion--ideally to zero? Low pass filter?
+- We need to add a simulated camera mount rigid body so that the policy doesn't clip the camera through the floor
+- The policy tends to touch the tip of the gripper to the cube rather than fully straddling it. I am going to move the grip zone back 1cm and see if this helps.
+
+
+## April 4, 2026
+The Robot Studio provides the stl file for the camera mount we are using: `assets/robots/SO-ARM101_camera_wrist_mount.stl`. We used Isaac Sim to generate a `.usd` file from this. We then add the camera mount usd to the robot's `assets/robots/so101_new_calib/so101_new_calib.usd`. We add an XForm to position the camera on the mount: `/so101_new_calib/gripper/mountscrew/camera_mount/CameraXframe`
+
+
+Additionally we discovered that there already exists an Xform for the gripper's tooth: `/so101_new_calib/gripper/gripperframe`
+
+*Distance Pressure*
+We are working in cm but the world units are meters. This means that distances on the final approach of the gripper to the target position are `<1.0`. By adding a coefficient to the distance value, we can add pressure to push the policy into the final position. Using this technique, we see the policy find the cube within a mere 3000 training steps.
+
+## April 5, 2026
+Think about how to start work on the grip phase. 
+
+*Hypothesis*
+The `gripper_close_error` isn't needed for the approach phase, the model can learn to open the gripper so as to minimize distance without nudging.
+
+If this holds, then we can easly apply an additional reward to encourage grasping once in position. 
+
+*Results*
+After 100k steps, getting similar performance.
+
+## April 7, 2026
+The approach phase reward now is accompanied by three component rewards, each with its own backing metric. 
+`ApproachPhaseMetricStep` produces 
+- `approach_distance`
+- `approach_alignment`
+- `approach_gripper_open`
+- `approach_phase` (the product of the other `approach_*` metrics)
+
+We then have the component rewards
+- `ApproachDistanceRewardStep`
+- `ApproachAlignmentRewardStep`
+- `ApproachGripperOpenRewardStep`
+and a terminal reward
+- `ApproachPhaseTerminalRewardStep` when `approach_phase` > threshold
+
+The three components are inverse exponential functions, `exp(-kx)` where k is a "pressure" exponential term driving behavior at the "last mile" of the policy's approach. 
+
+*Hypothesis*
+I'm going to try introducing a linear reward term to drive initial behaviors, while keeping the inverse exponential to provide sharp signal on the final approach. My hypothesis is that this will cause faster convergence. `Total Reward` will increase, but the test will be if `approach_phase` approaches `1.0` more quickly.
+
+
+*Possbile Breakthrough: Actions Penalty*
+I was incorrectly penalizing "actions". Rather than penalizing large movements, I was penalizing the actions based on their joint position value. Larger numerical positions resulted in larger penalties, which is obviously wrong. The correct behavior is to penalize large movements from the _previous_ position to the _next_.
+
+
+## April 8, 2026
+Ran 1M step training. The policy does a decent job of getting into position. It doesn't get into "perfect" position, but get's close, and hovers there. It's sufficient such that, if a grasp was triggered, it would indeed grab the cube. 
+
+That said, there are two observed issues:
+1. It tends to perform a lot of unnecessary movement, even when in a good approach position.
+2. The gripper pose reward pushes the policy to focus less on "getting into a good position in which to grasp the cube" and more on "hold this specific pose". 
+
+
+---
+
+For the unnecessary movement, I'm increasing the rew_action penalty from `-0.001` to `-0.02`. 
+
+For the gripper pose, I'm going to try simply disabling the gripper pose component of the approach phase rewards. The goal is to find find a good approach pose, which includes moving the gripper, so perhaps the gripper pose-specific component is unneeded.
+
+---
+
+*Regarding table touch safety*
+Currently, even with a (small) penalty, the robot touches the work surface in sim. This is unacceptable in a physical robot.
+
+
+---
+
+We're still having a lot of trouble in the approach phase. I think the multiplicative `approach_phase` reward is crushing the learning signal. I'm going to disable it. Also, I'm going to implement a tier approach that unlocks different reward signals at different phases. Also, I want to add a reward for a better approach vector: the axis alignment when grasping the cube matters.
+Also, I want to try moving away from a pure "distance" metric and try using a "improvement" metric: you only get more rewards if you next step moves you closer to the cube; no hovering to milk the rewards.
+
+## April 11, 2026
+
+We've changed a lot since last entry. Will have to look at the git logs. 
+
+Now have 
+- Gated rewards
+- Multiple instances of a reward (e.g., at different gate conditions)
+- Ability to set a terminal reward to not terminate
+- Ability to set a terminal reward to fire once per episode
+
+
+We're now working on trying to achieve grasp.
+
+---
+
+Suggested next consideration: Getting gripper to align with cube on axis.
+
+General Align + Distance is good, but `_dbg_approach_dist_exp` is struggling.
+Perhaps if we added axis alignment we could get the gripper into a better position. 
+
+Also, noticing that, when nearly in position, the policy still moves around a lot. Perhaps we could gate a stronger action penalty based on distance.
+
+## April 11, 2026 — Iterative CNN Bootstrap Plan
+
+Analysis of the CNN training data revealed that 0% of samples reach `approach_phase >= 0.90` (the terminal threshold), because the policy that collected the data never achieved it — `max(approach_phase) = 0.8999` across all 358k samples. The frozen CNN therefore has no representational coverage of near-contact distances, so the RL policy cannot learn to close the final 5mm gap regardless of reward shaping. The fix is an iterative bootstrap loop: lower the threshold to a value with training data coverage, run RL until the policy reliably hits it, re-collect, re-train the CNN on richer near-contact data, then raise the threshold again.
+
+### Checklist
+
+- [x] Diagnose root cause: confirm 0% training data coverage at `approach_phase >= 0.90` (see run `2026-04-11_10-13-14`)
+- [x] Lower `approach_phase_terminal.threshold` to `0.80` (30% training data coverage)
+- [x] Lower `grasp_phase` gate from `approach_phase >= 0.95` to `>= 0.80` to match
+- [x] Run RL training; confirm `_dbg_approach_dist_exp` now breaks past ~0.5 plateau
+- [x] Re-run `collect` step using new RL policy checkpoint to gather near-contact data
+- [x] Re-run `curate` + `train-cnn` on new dataset; verify `cube_pos_gz_mae` improves at short distances
+- [ ] Raise `approach_phase_terminal.threshold` back toward `0.90` and repeat if needed 
+
+
+*Side Note — `avoid_bumping_cube` threshold fix*
+`cube_widths` was set to `0.25`, which is impossible to satisfy without being *inside* the cube (minimum physical distance from centroid is `cube_width × 0.5 = 0.5`). Raised to `1.0` (= half cube-width radius from the surface). After restarting, `_dbg_approach_dist_exp` improved significantly faster.
+
+```yaml
+  - type: avoid_bumping_cube
+    enabled: true
+    scale: -0.1
+    cube_widths: 1.0  # was 0.25 — previously impossible without penetrating the cube
+```
+
+*Side Note — `grasp_phase_terminal` enabled*
+Enabled `grasp_phase_terminal` mirroring `approach_phase_terminal` (`terminate: false`, `fire_once: true`) to provide a 500-pt bonus for reaching `grasp_phase >= 0.80` without resetting the episode, allowing the lift phase to continue in the same rollout.
+
+```yaml
+  - type: grasp_phase_terminal
+    enabled: true
+    scale: 500.0
+    threshold: 0.80
+    terminate: false
+    fire_once: true
+```
+
+## April 12, 2026
+Trained CNN Gen2 based on Gen1. Gen2 uses better MLP head features; hoping to see improved perception at final approach. Were no CNN training examples sub-centimeter in Gen1, so, hoping to see improvements with Gen2, since such samples will be in distribution.
+
+## April 13, 2026
+
+With the Gen2 CNN, we're seeing improved performance; see `2026-04-13_08-08-52`. 
+
+- We need to see what is causing termination: timeout? cube out of range? etc.; it's certainly not (yet) lift. The `0` reward terminals need to be StepMetrics for logging purposes. 
+- Asymptotic behavior of `_dbg_approach_dist_exp` has moved from 0.5 to 0.6 upper bound. Concrete evidence of improvement. At `pressure=20` this implies distances ~0.025 on a 0.03 width cube. 
+
+Next things to try
+- Reduce distance pressure; see if a smoother gradient does better; I don't see why it would; I'd think a sharp gradient would be a very strong signal.
+- Include all termination events as metrics so we can see how episodes terminate in tensorboard
+- Reduce steps -> 50k, checkpoint interval -> 5k
+
+If reduced pressure shows improvement, do same for grasp phase. 
+
+Continue from April 11, 2026
+- [ ] Raise `approach_phase_terminal.threshold` back toward `0.90` and repeat if needed 
+
+
+*Critical Observation*
+The cube width is ~0.03. This means 0.03/2=0.015 is the lowest possible distance. Which means a distance of 0.025 is actually really close, It's only off by 1cm, and is perfectly suitable for grasping.
+
+We need to rework some of the reward computations:
+- Set `max_distance = 0.40`
+- Set `min_distance = CUBE_WIDTH/2`
+
+
+---
+
+As expected, reducing the distance pressure yields inferior results. with a distance pressure of `5` yielding distance asymptote at ~0.06. 
+
+Going to now fix the max/min distance described above and rerun. 
+
+---
+
+- Fixed max/min distance; updated metrics and rewards
+- Enhanced _get_dones() to log the cause of episode termination
+- Increased episode length back to 10 seconds; was seeing anecdotal visual behaviors that suggested a bit more time could result in better discovery.
+
+*Observations*
+- Seeing `grip_zone_cube_distance` drop more quickly that before! Which is good because we did **not** normalize this underlying value...
+  - Wait: now distance is *increasing*, not good.
+  - Changing pressure back to 20.
+
+With the newly normalized distance metrics, we need to fix this:
+
+```yaml
+  - type: grasp_phase
+    enabled: true
+    scale: 10.0
+    grip_force_pressure: 20.0
+    grip_force_target: 2.2  # 4.448 =~1 lbf in Newtons
+    mode: progressive
+    gates:
+      - metric: approach_phase
+        gte: 0.80
+      - metric: grip_zone_cube_distance
+        lte: 0.005 # <-- impossible
+```
+
+changing to
+
+```yaml
+  - type: grasp_phase
+    enabled: true
+    scale: 10.0
+    grip_force_pressure: 20.0
+    grip_force_target: 2.2  # 4.448 =~1 lbf in Newtons
+    mode: progressive
+    gates:
+      - metric: approach_phase
+        gte: 0.50 #lowering threshold
+      - metric: normalized_grip_zone_cube_distance
+        lte: 0.013 #0.5/(40-1.5) == ~0.5cm from cube edge in normalized units
+```
+
+
+## April 17, 2026
+
+After many changes (see git log), we've achieved consistent lifting behavior. 
+
+There's a few manual things to check before we start a full ablation study.
+
+*Observation:* The policy lifts to ~5cm when `lift_cube.height_threshold = 0.05`. Will it push to 10cm when we up this to `0.10`?
+
+
+Test: change `lift_cube.height_threshold -> 0.10`, check results after same timestep length.
+
+Result: No! Over the same number of timesteps, the policy achieves approx. the same lift height.
+
+Hypothesis: Between the `static` `cube_height_w gte 0.05` reward and the `progressive` `lift_cube`, the policy gets stuck in a local minima. 
+
+
+*Observation:* The policy now lifts and lowers the cube repeatedly. This is almost certainly an artifact of the progressive `lift_cube` reward. 
+
+Test: Will using a single `absolute` `lift_cube` reward fix the cyclical lift behavior?
+
+
+**Potential Refinement:** Change the behavior of `progressive` rewards such that they are only given on improvements over the "current best" value. This means the policy can't reward hack by going up and down. 
+Another option is to make `progressive` rewards signed rather than absolute magnitude, which would give both a push (negative) and a pull (positive) reward. 
+
+I think the signed progressive rewards might address the cyclical reward hacking (up -> down -> ...) behavior, enabling it to push past these barriers. 
+
+
+*Ablation: Remove static cube_height_w rewards*
+How does disabling these static "threshold rewards" effect training?
+```yaml
+  - type: static
+    enabled: false
+    scale: 500.0
+    fire_once: true
+    terminate: false
+    gates:
+      - metric: cube_height_w
+        gte: 0.05 # 0.10, 0.15
+```
+
+**Result:**
+The removal of the static rewards actually yielded significantly better performance.
+
+## April 17, 2026 - Update
+
+We now have a consistently working build that finds, approaches, grasps, and lifts the cube. The lift behavior lifts to the target height, but otherwise is somewhat random.
+
+The stretch goal is now to grasp the cube and move it into a target position. This is arguably much more complex than the lift behavior–at least as complex as the approach phase.
+
+
+*Physical Cube*
+I created a 3D model of a cube similar to the dexterity cube which is printable with a 3D printer. The cube is black with white letters. The cube weighs 14.71 grams when printed with PLA and printed with default settings and when the letters are friction fitted (i.e. no glue). Once things stabilize, I will retrain the entire pipeline with the new cube model. 
+
+
+## April 18, 2026
+Todo
+- [x] Goal Zone Task
+  - [x] Fix issue with no reward for goal_zone_distance
+  - [x] Commit changes
+  - [x] Not going to pursue goal zone further for now; just focus on lift task.
+- [x] Import new cube 3D model as USD
+- Run training on new cube
+  - [x] Achieves lifting despite not retraining CNN. CNN will likely improve performance. See run `2026-04-18_12-29-55/`
+    - Retrain Steps:
+      - [ ] Step 0: RN18 -> CNN1
+      - [ ] Step 1: CNN1 -> CNN2
+- Lift Task
+  - Re-train with latest changes (but with config set to lift goal only)
+  - Commit changes
+  - Merge to main
+  - Post videos
+- Report
+  - Design Ablation studies
+  - Configure Training pipeline and verify it is working
+- Create metrics for these and add to Critic network:
+  - Add Cube's angular and linear velocity
+  - Computed opening width between the tips of the gripper
+- Upgrade to latest version of Isaac Sim (?)
+
+
+*Contemplations:*
+The goal zone, as currently designed, as a known location. This means we're just trying to train the policy to do FK, which isn't novel or needed. There's no great learned capability here. The impressive bit is finding and picking the object. If you want to create a visual target for placement, that's fine, but that's a different task.

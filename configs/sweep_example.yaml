@@ -1,0 +1,116 @@
+# sweep_example.yaml — Example sweep configuration for reward/hyperparameter tuning.
+#
+# Run:     ./scripts/run.py sweep --sweep configs/sweep_example.yaml
+# Dry run: ./scripts/run.py sweep --sweep configs/sweep_example.yaml --dry-run
+# Resume:  ./scripts/run.py sweep --resume sweeps/sweep_reward_tuning_v1_<timestamp>/
+#
+# Each experiment applies YAML overrides on top of the base configs.
+# Results are compared in sweeps/sweep_<name>_<timestamp>/summary.md
+
+# ── sweep identity ─────────────────────────────────────────────────────────────
+name: "reward_tuning_v1"
+
+# ── base settings (shared by all experiments) ──────────────────────────────────
+base:
+  # Isaac Lab task name registered by so101_rl
+  task: So101-LiftCube-v0
+
+  # Base env config; per-experiment env_overrides are merged on top of this
+  env_config: configs/frozen_cnn.yaml
+
+  # Base agent config; per-experiment agent_overrides are merged on top of this
+  agent_config: so101_rl/source/so101_rl/so101_rl/tasks/direct/so101_lift_cube/agents/skrl_ppo_cfg.yaml
+
+  # Explicit seed for reproducibility; override per-experiment with a `seed` key
+  seed: 42
+
+  # Number of PPO iterations per experiment (timesteps = iters × agent.rollouts)
+  # Must be set explicitly — no silent defaults.
+  iters: 4000
+
+  # Parallel environments during training
+  envs: 128
+
+  # Run without display (recommended for sweeps)
+  headless: true
+
+  # Enable cameras (required for vision-based policies)
+  cameras: true
+
+  # Optional: path to a pretrained CNN backbone checkpoint (null = use ResNet18)
+  cnn_checkpoint: null
+
+# ── eval settings (applied to every evaluate.py call) ─────────────────────────
+eval:
+  # Number of evaluation episodes per experiment
+  episodes: 20
+
+  # Use headless mode for eval too
+  headless: true
+
+  # Leave unset to use 1 env (evaluate.py default)
+  # num_envs: 4
+
+  # verbosity: "basic" (default) | "full" (includes per-step arrays in results.json)
+  verbosity: basic
+
+# ── experiments ────────────────────────────────────────────────────────────────
+# Each entry runs one full Train → Eval cycle.
+# Keys:
+#   name           (required) unique identifier used for the output directory
+#   seed           (optional) override base.seed for this experiment only
+#   env_overrides  (optional) patches applied to env config before training
+#   agent_overrides(optional) patches applied to agent config before training
+#
+# env_overrides.rewards entries are matched by 'type' and patched field-by-field;
+# all other reward fields and unmatched reward entries are preserved unchanged.
+# All other keys use standard recursive dict merge (overrides replace base values).
+
+experiments:
+
+  # ── 1. Baseline run (no overrides — pure reference point) ───────────────────
+  - name: "baseline"
+    # no env_overrides, no agent_overrides
+
+  # ── 2. Increase approach_distance reward scale ───────────────────────────────
+  - name: "approach_scale_2x"
+    env_overrides:
+      rewards:
+        - type: approach_distance
+          scale: 10.0  # was 5.0 in baseline
+
+  # ── 3. Double both progressive approach rewards ──────────────────────────────
+  - name: "approach_progressive_2x"
+    env_overrides:
+      rewards:
+        - type: approach_distance
+          scale: 10.0
+          mode: unsigned_progressive
+        - type: approach_phase
+          scale: 6.0
+          mode: unsigned_progressive
+
+  # ── 4. Lower PPO learning rate ───────────────────────────────────────────────
+  - name: "lower_lr"
+    agent_overrides:
+      agent:
+        learning_rate: 5.0e-05  # was 1.0e-04
+
+  # ── 5. Combined: higher approach scale + lower learning rate ─────────────────
+  - name: "higher_approach_lower_lr"
+    # Per-experiment seed for a different random initialisation
+    seed: 123
+    env_overrides:
+      rewards:
+        - type: approach_distance
+          scale: 10.0
+    agent_overrides:
+      agent:
+        learning_rate: 5.0e-05
+
+  # ── 6. Stricter action penalty (reduce jitter) ───────────────────────────────
+  - name: "stricter_action_penalty"
+    env_overrides:
+      rewards:
+        - type: action
+          scale: -0.05  # was -0.02

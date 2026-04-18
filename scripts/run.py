@@ -14,6 +14,7 @@ Commands:
     play           Play back a trained agent
     export         Export a trained agent
     install        Install the task package into Isaac Lab
+    pin            Create named symlinks for frequently-used paths
     doctor         Diagnose X11 / display configuration
     viz-cnn        Visualize CNN training data and model predictions
     viz-pipeline   Visualize image processing pipeline
@@ -40,6 +41,33 @@ import yaml
 # ── constants ─────────────────────────────────────────────────────────────────
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 TASK_ROOT = PROJECT_ROOT / "so101_rl"
+PINS_DIR = PROJECT_ROOT / "scripts" / "pins"
+
+# Maps pin key → symlink filename inside PINS_DIR.
+# The filename suffix is chosen to match the expected file type so tab-completion
+# and human inspection both work naturally.
+_PINS: dict = {
+    "cnn_checkpoint": "cnn_checkpoint.pt",
+    "checkpoint": "checkpoint.pt",
+    "experiment": "experiment",
+    "input": "input",
+    "output": "output",
+}
+
+# Auto-managed symlink names (not exposed as pin --<flag> targets).
+_PIN_LATEST_EXPERIMENT = "latest_experiment"
+_PIN_LATEST_PIPELINE = "latest_pipeline"
+
+
+def _update_auto_pin(link_name: str, target: Path) -> None:
+    """Atomically update an auto-managed symlink inside PINS_DIR."""
+    PINS_DIR.mkdir(parents=True, exist_ok=True)
+    link = PINS_DIR / link_name
+    if link.is_symlink() or link.exists():
+        link.unlink()
+    link.symlink_to(target.resolve())
+    success(f"Auto-pin updated: {link.name}  →  {target.resolve()}")
+
 
 # ── terminal output ────────────────────────────────────────────────────────────
 _RED = "\033[0;31m"
@@ -374,6 +402,7 @@ def cmd_train(args) -> None:
     env.update({k: os.environ[k] for k in ("DISPLAY", "XAUTHORITY") if k in os.environ})
     _log_x11_status()
     run_subprocess(cmd, env=env)
+    _update_auto_pin(_PIN_LATEST_EXPERIMENT, artifacts_dir)
 
 
 def cmd_collect(args) -> None:
@@ -426,6 +455,8 @@ def cmd_collect(args) -> None:
         cmd += ["--headless"]
     if args.checkpoint:
         cmd += ["--checkpoint", str(args.checkpoint)]
+    if getattr(args, "cnn_checkpoint", None):
+        cmd += ["--cnn_checkpoint", str(args.cnn_checkpoint)]
 
     resolve_x11(getattr(args, "display", None))
     env = get_gui_env(Path(isaac_lab_path) / "workspace" / args.task, staged_cfg)
@@ -579,8 +610,17 @@ def cmd_play(args) -> None:
         if args.checkpoint:
             checkpoint = Path(args.checkpoint).resolve()
         else:
-            checkpoint = experiment_dir / "skrl" / "checkpoints" / "best_agent.pt"
+            checkpoint = (
+                experiment_dir / "skrl" / "agent" / "checkpoints" / "best_agent.pt"
+            )
             info(f"Derived checkpoint: {checkpoint}")
+        if not args.cnn_checkpoint:
+            candidate = experiment_dir / "cnn_checkpoint.pt"
+            if candidate.is_file():
+                args.cnn_checkpoint = candidate
+                info(f"Derived cnn_checkpoint: {candidate}")
+            else:
+                warn(f"No cnn_checkpoint.pt found in experiment dir: {experiment_dir}")
         ckpt_root = experiment_dir
     else:
         # --checkpoint only: --config is required
@@ -673,6 +713,67 @@ def cmd_install(args) -> None:
     isaac_lab_path = require_isaac_lab()
     stage_env_config(args.config, isaac_lab_path, args.task)
     install_task(isaac_lab_path)
+
+
+def cmd_pin(args) -> None:
+    """Create or list named symlinks in scripts/pins/ for frequently-used paths."""
+
+    if args.list:
+        PINS_DIR.mkdir(parents=True, exist_ok=True)
+        header("Pinned paths")
+        for key, filename in _PINS.items():
+            link = PINS_DIR / filename
+            flag = f"--{key.replace('_', '-')}"
+            if link.is_symlink():
+                target = os.readlink(str(link))
+                exists_marker = "" if link.exists() else "  [TARGET MISSING]"
+                success(f"{flag:<22s}  {link}  →  {target}{exists_marker}")
+            else:
+                info(f"{flag:<22s}  <not pinned>")
+        # Auto-managed pins
+        for name, label in (
+            (_PIN_LATEST_EXPERIMENT, "latest_experiment (auto)"),
+            (_PIN_LATEST_PIPELINE, "latest_pipeline   (auto)"),
+        ):
+            link = PINS_DIR / name
+            label_col = f"  {label}"
+            if link.is_symlink():
+                target = os.readlink(str(link))
+                exists_marker = "" if link.exists() else "  [TARGET MISSING]"
+                success(f"{label_col:<32s}  {link}  →  {target}{exists_marker}")
+            else:
+                info(f"{label_col:<32s}  <not yet set>")
+        return
+
+    def _set_pin(key: str, raw_path: str) -> None:
+        src = Path(raw_path)
+        if not src.is_absolute():
+            src = (Path.cwd() / src).resolve()
+        else:
+            src = src.resolve()
+        if not src.exists():
+            warn(f"Target does not exist (pinning anyway): {src}")
+        PINS_DIR.mkdir(parents=True, exist_ok=True)
+        link = PINS_DIR / _PINS[key]
+        if link.is_symlink() or link.exists():
+            link.unlink()
+        link.symlink_to(src)
+        success(f"Pinned --{key.replace('_', '-')}: {link}  →  {src}")
+
+    any_set = False
+    for key in _PINS:
+        val = getattr(args, key, None)
+        if val is not None:
+            _set_pin(key, val)
+            any_set = True
+
+    if not any_set:
+        error(
+            "No pin target specified. Pass at least one of: "
+            + ", ".join(f"--{k.replace('_', '-')}" for k in _PINS)
+            + "  (or --list to view current pins)"
+        )
+        sys.exit(1)
 
 
 def cmd_doctor(args) -> None:
@@ -773,6 +874,67 @@ def cmd_viz_pipeline(args) -> None:
     run_subprocess(cmd)
 
 
+def cmd_sweep(args) -> None:
+    resolve_x11(getattr(args, "display", None))
+    sys.path.insert(0, str(Path(__file__).parent))
+    from sweep import SweepOrchestrator
+
+    # For dry-runs, a missing/invalid ISAAC_LAB_PATH is non-fatal: the path
+    # is shown in the printed commands so the user can verify them without a
+    # live Isaac Lab installation.  For real runs require_isaac_lab() enforces
+    # the check strictly and exits on failure.
+    if args.dry_run:
+        isaac_lab_path = (
+            os.environ.get("ISAAC_LAB_PATH", "").strip() or "<ISAAC_LAB_PATH>"
+        )
+    else:
+        isaac_lab_path = require_isaac_lab()
+
+    if args.resume:
+        sweep_dir = Path(args.resume).resolve()
+        orchestrator = SweepOrchestrator.from_existing(
+            sweep_dir=sweep_dir,
+            isaac_lab_path=isaac_lab_path,
+            project_root=PROJECT_ROOT,
+        )
+    else:
+        if not args.sweep:
+            error("--sweep is required when not resuming with --resume")
+            sys.exit(1)
+        sweep_path = Path(args.sweep)
+        if not sweep_path.is_absolute():
+            sweep_path = PROJECT_ROOT / sweep_path
+        sweep_path = sweep_path.resolve()
+        if not sweep_path.is_file():
+            error(f"Sweep config not found: {sweep_path}")
+            sys.exit(1)
+        with open(sweep_path) as f:
+            import yaml as _yaml
+
+            config = _yaml.safe_load(f)
+
+        sweep_name = config.get("name", "sweep")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        base = (
+            Path(args.output).resolve()
+            if getattr(args, "output", None)
+            else PROJECT_ROOT / "sweeps"
+        )
+        sweep_dir = base / f"sweep_{sweep_name}_{timestamp}"
+        orchestrator = SweepOrchestrator(
+            config=config,
+            config_path=sweep_path,
+            sweep_dir=sweep_dir,
+            isaac_lab_path=isaac_lab_path,
+            project_root=PROJECT_ROOT,
+        )
+
+    orchestrator.run(
+        from_experiment=getattr(args, "from_experiment", None),
+        dry_run=args.dry_run,
+    )
+
+
 def cmd_pipeline(args) -> None:
     resolve_x11(getattr(args, "display", None))
     sys.path.insert(0, str(Path(__file__).parent))
@@ -816,6 +978,7 @@ def cmd_pipeline(args) -> None:
             project_root=PROJECT_ROOT,
             ad_hoc_experiment=getattr(args, "experiment", None),
             ad_hoc_input=getattr(args, "input", None),
+            ad_hoc_cnn_checkpoint=getattr(args, "cnn_checkpoint", None),
             force_display=getattr(args, "display", None) is not None,
         )
 
@@ -909,6 +1072,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--envs", type=int, metavar="N", help="Override num_envs")
     p.add_argument("--headless", action="store_true")
     p.add_argument("--checkpoint", metavar="PATH", help="Override checkpoint path")
+    p.add_argument(
+        "--cnn-checkpoint",
+        metavar="PATH",
+        dest="cnn_checkpoint",
+        help="CNN backbone checkpoint (.pt); auto-detected from experiment dir if omitted",
+    )
     p.add_argument("--display", type=int, metavar="N")
     p.set_defaults(func=cmd_collect)
 
@@ -1113,6 +1282,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Input dir (required for ad-hoc --from curate or --from train-cnn)",
     )
     p.add_argument(
+        "--cnn-checkpoint",
+        metavar="PATH",
+        dest="cnn_checkpoint",
+        help="Pretrained CNN backbone checkpoint passed to the train step",
+    )
+    p.add_argument(
         "--dry-run",
         action="store_true",
         dest="dry_run",
@@ -1130,6 +1305,113 @@ def build_parser() -> argparse.ArgumentParser:
         help="Base output dir; pipeline dir created as <output>/pipeline_<timestamp>/ (default: artifacts/)",
     )
     p.set_defaults(func=cmd_pipeline)
+
+    # ── pin ───────────────────────────────────────────────────────────────────
+    p = sub.add_parser(
+        "pin",
+        help="Create named symlinks for frequently-used paths",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "Creates persistent symlinks under scripts/pins/ so long absolute paths\n"
+            "can be referenced by short stable names in subsequent commands.\n"
+            "\n"
+            "Pin a CNN checkpoint:\n"
+            "  ./scripts/run.py pin --cnn-checkpoint /mnt/nas/runs/2026-04-09/cnn/best.pt\n"
+            "  ./scripts/run.py train ... --cnn-checkpoint scripts/pins/cnn_checkpoint.pt\n"
+            "\n"
+            "Pin an experiment directory:\n"
+            "  ./scripts/run.py pin --experiment /mnt/nas/experiments/2026-04-09_12-31-41\n"
+            "  ./scripts/run.py collect --experiment scripts/pins/experiment ...\n"
+            "\n"
+            "List all current pins:\n"
+            "  ./scripts/run.py pin --list\n"
+        ),
+    )
+    p.add_argument(
+        "--cnn-checkpoint",
+        metavar="PATH",
+        dest="cnn_checkpoint",
+        help="Pin a CNN backbone checkpoint (.pt)  →  scripts/pins/cnn_checkpoint.pt",
+    )
+    p.add_argument(
+        "--checkpoint",
+        metavar="PATH",
+        dest="checkpoint",
+        help="Pin an RL policy checkpoint (.pt)  →  scripts/pins/checkpoint.pt",
+    )
+    p.add_argument(
+        "--experiment",
+        metavar="PATH",
+        dest="experiment",
+        help="Pin an RL experiment directory  →  scripts/pins/experiment",
+    )
+    p.add_argument(
+        "--input",
+        metavar="PATH",
+        dest="input",
+        help="Pin a telemetry or curated-data directory  →  scripts/pins/input",
+    )
+    p.add_argument(
+        "--output",
+        metavar="PATH",
+        dest="output",
+        help="Pin a base output directory  →  scripts/pins/output",
+    )
+    p.add_argument(
+        "--list",
+        action="store_true",
+        help="List all currently pinned paths and their targets",
+    )
+    p.set_defaults(func=cmd_pin)
+
+    # ── sweep ─────────────────────────────────────────────────────────────────
+    p = sub.add_parser(
+        "sweep",
+        help="Run a named sequence of Train+Eval experiments and summarise results",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "Runs a set of named experiments sequentially (train → eval).\n"
+            "Each experiment applies YAML overrides on top of base env/agent configs.\n"
+            "\n"
+            "New sweep:    --sweep configs/my_sweep.yaml [--output sweeps/]\n"
+            "Resume sweep: --resume sweeps/sweep_name_TS/ [--from-experiment NAME]\n"
+            "Dry run:      --sweep configs/my_sweep.yaml --dry-run\n"
+        ),
+    )
+    p.add_argument(
+        "--sweep",
+        metavar="PATH",
+        help="Sweep definition YAML (required for new sweeps)",
+    )
+    p.add_argument(
+        "--resume",
+        metavar="PATH",
+        help="Resume an existing sweep from its directory",
+    )
+    p.add_argument(
+        "--output",
+        metavar="PATH",
+        help="Base output dir; sweep dir created as <output>/sweep_<name>_<ts>/ (default: sweeps/)",
+    )
+    p.add_argument(
+        "--from-experiment",
+        metavar="NAME",
+        dest="from_experiment",
+        help="Start (or restart) from this named experiment; earlier done experiments are skipped",
+    )
+    p.add_argument(
+        "--dry-run",
+        action="store_true",
+        dest="dry_run",
+        help="Print resolved commands for each experiment without executing anything",
+    )
+    p.add_argument(
+        "--display",
+        type=int,
+        metavar="N",
+        help="X display socket number (e.g. 2 for DISPLAY=:2)",
+    )
+    p.set_defaults(func=cmd_sweep)
 
     return parser
 

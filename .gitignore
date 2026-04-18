@@ -3,3 +3,6 @@ logs
 artifacts
 __pycache__/
 *.egg-info/
+dev
+scripts/pins
+scripts/output

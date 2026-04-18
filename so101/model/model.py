@@ -1,7 +1,7 @@
 """Multi-task CNN model for supervised backbone pretraining.
 
 :class:`MultiTaskCnn` contains a CNN backbone (conv trunk → SpatialSoftmax →
-projection MLP) plus three task-specific prediction heads::
+projection MLP) plus five task-specific prediction heads::
 
     image (C, H, W)
         ↓
@@ -11,9 +11,11 @@ projection MLP) plus three task-specific prediction heads::
         ↓
     Projection MLP   ← shared latent (output_dim,)
         ↓
-        ├── GripPositionHead  → logit  (1,)  [BCE with is_cube_in_grip_position]
-        ├── OrientationHead   → quat   (4,)  [MSE with cube_quat_gripzone_wxyz]
-        └── VisibilityHead    → logit  (1,)  [BCE with cube_in_camera_frame]
+        ├── CubePosGzHead            → (3,) normalised position  [Huber with cube_pos_gz]
+        ├── GripperCubeAlignmentHead → (1,) alignment scalar     [MSE  with gripper_cube_alignment]
+        ├── CubeRot6dGzHead          → (6,) rotation6D           [MSE  with cube_rot6d_gz]
+        ├── CubeHeightWHead          → (1,) normalised height     [Huber with cube_height_w]
+        └── CubeInCameraFrameHead    → (1,) visibility logit      [BCE  with cube_in_camera_frame]
 
 After supervised pretraining, :meth:`MultiTaskCnn.backbone_state_dict` returns
 only the backbone weights.  :class:`~so101.utils.feature_extraction.feature_extraction.CnnSpatialSoftmaxFeatureExtractor`
@@ -132,13 +134,14 @@ def _require_keys(d: dict, keys: list[str], section: str) -> None:
 
 
 class MultiTaskCnn(nn.Module):
-    """Multi-task CNN backbone with three supervised prediction heads.
+    """Multi-task CNN backbone with five supervised prediction heads.
 
     Args:
         backbone_cfg: Dict with keys ``in_channels``, ``channels``,
             ``kernel_sizes``, ``strides``, ``mlp_hidden_dims``, ``output_dim``.
-        heads_cfg: Dict with keys ``grip_position``, ``orientation``,
-            ``visibility``; each must contain a ``hidden_dims`` list.
+        heads_cfg: Dict with keys ``cube_pos_gz``, ``gripper_cube_alignment``,
+            ``cube_rot6d_gz``, ``cube_height_w``, ``cube_in_camera_frame``;
+            each must contain a ``hidden_dims`` list.
             Pass ``None`` when only the backbone is needed (e.g. inside
             :class:`~so101.utils.feature_extraction.feature_extraction.CnnSpatialSoftmaxFeatureExtractor`).
 
@@ -153,9 +156,11 @@ class MultiTaskCnn(nn.Module):
           output_dim: 256
 
         heads:
-          grip_position: {hidden_dims: [128]}
-          orientation:   {hidden_dims: [128]}
-          visibility:    {hidden_dims: []}
+          cube_pos_gz:             {hidden_dims: [128]}
+          gripper_cube_alignment:  {hidden_dims: []}
+          cube_rot6d_gz:           {hidden_dims: [128]}
+          cube_height_w:           {hidden_dims: []}
+          cube_in_camera_frame:    {hidden_dims: []}
     """
 
     def __init__(self, backbone_cfg: dict, heads_cfg: dict | None = None) -> None:
@@ -185,30 +190,43 @@ class MultiTaskCnn(nn.Module):
         )
 
         if heads_cfg is not None:
-            _require_keys(
-                heads_cfg,
-                ["grip_position", "orientation", "visibility"],
-                section="heads",
-            )
-            for name in ("grip_position", "orientation", "visibility"):
+            _required_head_keys = [
+                "cube_pos_gz",
+                "gripper_cube_alignment",
+                "cube_rot6d_gz",
+                "cube_height_w",
+                "cube_in_camera_frame",
+            ]
+            _require_keys(heads_cfg, _required_head_keys, section="heads")
+            for name in _required_head_keys:
                 if "hidden_dims" not in heads_cfg[name]:
                     raise ValueError(
                         f"heads.{name}.hidden_dims must be set explicitly."
                     )
 
-            self.grip_position_head = _build_head(
+            self.cube_pos_gz_head = _build_head(
                 output_dim,
-                list(heads_cfg["grip_position"]["hidden_dims"]),
+                list(heads_cfg["cube_pos_gz"]["hidden_dims"]),
+                output_dim=3,
+            )
+            self.gripper_cube_alignment_head = _build_head(
+                output_dim,
+                list(heads_cfg["gripper_cube_alignment"]["hidden_dims"]),
                 output_dim=1,
             )
-            self.orientation_head = _build_head(
+            self.cube_rot6d_gz_head = _build_head(
                 output_dim,
-                list(heads_cfg["orientation"]["hidden_dims"]),
-                output_dim=4,
+                list(heads_cfg["cube_rot6d_gz"]["hidden_dims"]),
+                output_dim=6,
             )
-            self.visibility_head = _build_head(
+            self.cube_height_w_head = _build_head(
                 output_dim,
-                list(heads_cfg["visibility"]["hidden_dims"]),
+                list(heads_cfg["cube_height_w"]["hidden_dims"]),
+                output_dim=1,
+            )
+            self.cube_in_camera_frame_head = _build_head(
+                output_dim,
+                list(heads_cfg["cube_in_camera_frame"]["hidden_dims"]),
                 output_dim=1,
             )
 
@@ -221,20 +239,28 @@ class MultiTaskCnn(nn.Module):
         Returns:
             Dict with keys:
 
-            - ``grip_position_logit`` — ``(N, 1)`` raw BCE logit.
-            - ``orientation_pred``    — ``(N, 4)`` raw quaternion prediction.
-            - ``visibility_logit``    — ``(N, 1)`` raw BCE logit.
+            - ``cube_pos_gz_pred``            — ``(N, 3)`` normalised position.
+            - ``gripper_cube_alignment_pred`` — ``(N, 1)`` alignment scalar.
+            - ``cube_rot6d_gz_pred``          — ``(N, 6)`` rotation6D.
+            - ``cube_height_w_pred``          — ``(N, 1)`` normalised height.
+            - ``cube_in_camera_frame_logit``  — ``(N, 1)`` raw BCE logit.
         """
-        if not hasattr(self, "grip_position_head"):
+        if not hasattr(self, "cube_pos_gz_head"):
             raise RuntimeError(
                 "MultiTaskCnn was constructed without heads_cfg; "
                 "forward() is not available."
             )
         latent = self.backbone(images)  # (N, output_dim)
         return {
-            "grip_position_logit": self.grip_position_head(latent),  # (N, 1)
-            "orientation_pred": self.orientation_head(latent),  # (N, 4)
-            "visibility_logit": self.visibility_head(latent),  # (N, 1)
+            "cube_pos_gz_pred": self.cube_pos_gz_head(latent),  # (N, 3)
+            "gripper_cube_alignment_pred": self.gripper_cube_alignment_head(
+                latent
+            ),  # (N, 1)
+            "cube_rot6d_gz_pred": self.cube_rot6d_gz_head(latent),  # (N, 6)
+            "cube_height_w_pred": self.cube_height_w_head(latent),  # (N, 1)
+            "cube_in_camera_frame_logit": self.cube_in_camera_frame_head(
+                latent
+            ),  # (N, 1)
         }
 
     def backbone_state_dict(self) -> dict[str, Any]:

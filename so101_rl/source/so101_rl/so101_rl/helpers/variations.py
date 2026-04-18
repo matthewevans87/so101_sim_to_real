@@ -313,7 +313,7 @@ def randomize_camera_pose(
             device=device,
         )
 
-        camera_prim_path = f"/World/envs/env_{env_id}/Robot/gripper/gripper_camera"
+        camera_prim_path = f"/World/envs/env_{env_id}/Robot/gripper/mountscrew/camera_mount/CameraXframe"
 
         try:
             camera_prim = stage.GetPrimAtPath(camera_prim_path)
@@ -417,6 +417,7 @@ def randomize_camera_pose(
             )
             # Keep training from dying if one env/camera misbehaves
             pass
+
 
 def randomize_rigid_object_color(env_ids, object_name: str):
     """Randomize rigid object color by modifying UsdPreviewSurface.inputs:diffuseColor.

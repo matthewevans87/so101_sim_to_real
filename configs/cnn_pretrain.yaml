@@ -46,6 +46,22 @@ curation:
   # change which episodes go into which split.
   split_seed: 0
 
+  # ── Distance-bin rebalancing ───────────────────────────────────────────────
+  # A second rebalancing pass (applied after step-bin rebalancing) that bins
+  # samples by grip-zone distance and caps over-represented mid-approach bins.
+  # This prevents the dominant ~10-25 mm hover zone from overwhelming the
+  # near-contact samples that are critical for accurate CNN predictions at
+  # small distances (cube_pos_gz, gripper_cube_alignment, etc.).
+  distance_rebalancing:
+    enabled: true
+    # Upper-bound edges of each distance bin (metres).  An implicit "+∞" bucket
+    # captures all samples beyond the last edge.
+    bin_edges_m: [0.010, 0.025, 0.060, 0.150, 0.400]
+    # Cap multiplier: bins with more than floor(median × cap_factor) samples
+    # are randomly downsampled.  More lenient than step-bin cap (1.5) to
+    # preserve natural distance variation while preventing dominance.
+    bin_cap_factor: 2.0
+
 # ── Image preprocessing ───────────────────────────────────────────────────────
 # Applied to RGB images (H, W, C) uint8 inside TelemetryDataset.__getitem__.
 # Step 1 (uint8_to_float_chw) is always applied; normalisation is optional.
@@ -65,36 +81,61 @@ backbone:
   mlp_hidden_dims: [512]
   output_dim: 256
 
-# ── Prediction heads ──────────────────────────────────────────────────────────
+# ── Target normalisation ─────────────────────────────────────────────────────
+# Applied in TelemetryDataset.__getitem__ to bring regression targets into
+# a common scale alongside the [-1, 1]-ranged rotation and alignment targets.
+# Raw metres are stored in the NPZ shards; these constants divide them at load
+# time.  Changing these values does NOT require re-collecting data.
+normalization:
+  # Maximum grip-zone distance (metres).  cube_pos_gz is divided by this value.
+  pos_norm_scale: 0.4
+  # Target lift height (metres).  cube_height_w is divided by this value.
+  height_norm_scale: 0.1
+
+# ── Prediction heads ─────────────────────────────────────────────────────────
 # Each head is an MLP on top of the shared backbone latent.
-# hidden_dims controls layers between the backbone output and the head's output.
+# hidden_dims controls layers between the backbone output and the head output.
 # An empty list produces a single direct linear layer.
 heads:
-  # Head A: binary grip-position prediction (is_cube_in_grip_position).
-  # Output: single logit; trained with BCE loss.
-  grip_position:
+  # Head A: cube position in grip-zone frame (cube_pos_gz), normalised metres.
+  # Output: (3,); trained with Huber loss.
+  cube_pos_gz:
     hidden_dims: [128]
 
-  # Head B: quaternion orientation prediction (cube_quat_gripzone_wxyz).
-  # Output: 4-D raw quaternion; L2-normalised before MSE loss.
-  orientation:
-    hidden_dims: [128]
-
-  # Head C: cube visibility prediction (cube_in_camera_frame).
-  # Output: single logit; trained with BCE loss.
-  visibility:
+  # Head B: gripper-cube alignment scalar in [-1, 1].
+  # Output: (1,); trained with MSE loss.
+  gripper_cube_alignment:
     hidden_dims: []
 
-# ── Multi-task loss ────────────────────────────────────────────────────────────
+  # Head C: cube orientation in grip-zone frame as rotation6D.
+  # Output: (6,); trained with MSE loss.
+  cube_rot6d_gz:
+    hidden_dims: [128]
+
+  # Head D: cube height above resting position, normalised metres.
+  # Output: (1,); trained with Huber loss.
+  cube_height_w:
+    hidden_dims: []
+
+  # Head E: cube visibility (cube_in_camera_frame).
+  # Output: single logit; trained with BCE loss.
+  cube_in_camera_frame:
+    hidden_dims: []
+
+# ── Multi-task loss ───────────────────────────────────────────────────────────
 loss:
   # Per-head loss weights (must be set explicitly; no defaults).
-  weight_grip_position: 1.0
-  weight_orientation: 1.0
-  weight_visibility: 1.0
+  # Start equal; calibrate against epoch-0 per-head loss magnitudes in TensorBoard
+  # so that no single head dominates gradient updates.
+  weight_cube_pos_gz: 1.0
+  weight_gripper_cube_alignment: 1.0
+  weight_cube_rot6d_gz: 1.0
+  weight_cube_height_w: 1.0
+  weight_cube_in_camera_frame: 1.0
 
-  # Normalise predicted quaternion to unit length before computing MSE.
-  # Should be true to match the unit-quaternion target convention.
-  orientation_normalization: true
+  # Delta parameter for Huber loss applied to cube_pos_gz and cube_height_w.
+  # At error <= huber_delta the loss is quadratic; above it is linear.
+  huber_delta: 1.0
 
 # ── Training ──────────────────────────────────────────────────────────────────
 training:
@@ -121,9 +162,10 @@ training:
   pin_memory: true
 
   # Metric used to select the best checkpoint.
-  # Must be a key in the val metrics dict: loss_total, loss_grip_position,
-  # loss_orientation, loss_visibility, grip_position_acc, visibility_acc,
-  # orientation_mse.
+  # Must be a key in the val metrics dict: loss_total, loss_cube_pos_gz,
+  # loss_gripper_cube_alignment, loss_cube_rot6d_gz, loss_cube_height_w,
+  # loss_cube_in_camera_frame, cube_pos_gz_mae, gripper_cube_alignment_mae,
+  # cube_rot6d_gz_mse, cube_height_w_mae, cube_in_camera_frame_acc.
   best_metric: loss_total
 
   # Stop training if the best_metric does not improve for this many epochs.

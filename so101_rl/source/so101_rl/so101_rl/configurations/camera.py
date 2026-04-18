@@ -1,5 +1,9 @@
+import os
+
 from isaaclab.sensors import CameraCfg, TiledCameraCfg
 import isaaclab.sim as sim_utils
+
+WORKSPACE_PATH = os.environ.get("ISAAC_LAB_WORKSPACE_PATH", "/workspace")
 
 # Camera calibration from actual hardware:
 # - Mount angle: 146.31° (bend on mount)
@@ -10,8 +14,19 @@ import isaaclab.sim as sim_utils
 CAMERA_TRANSLATE_VEC = (0, 0.06400000303983688, -0.03500000014901161)
 CAMERA_ROTATION_QUAT_WXYZ = (0.0, 0.0, 0.29237170472273677, 0.9563047559630354)
 
+# Camera mount (SO-ARM101_camera_wrist_mount) USD asset and gripper-relative transform.
+# The mount Xform prim is placed at the same gripper-relative position/rotation as the
+# camera lens — the mount USD mesh origin coincides with the camera lens position.
+# After visual inspection in Isaac Sim the values may be adjusted independently.
+# Path resolves via ISAAC_LAB_WORKSPACE_PATH (same pattern as so101.py).
+CAMERA_MOUNT_USD_PATH = os.path.join(WORKSPACE_PATH, "assets/robots/camera_mount.usd")
+CAMERA_MOUNT_RELATIVE_POS = CAMERA_TRANSLATE_VEC
+CAMERA_MOUNT_RELATIVE_QUAT_WXYZ = CAMERA_ROTATION_QUAT_WXYZ
+
 CAMERA_CFG = CameraCfg(
-    prim_path="{ENV_REGEX_NS}/Robot/gripper/gripper_camera",
+    # Camera is parented under CameraXframe in the robot USD, which has the full
+    # gripper-relative transform baked in.  The camera offset is identity here.
+    prim_path="{ENV_REGEX_NS}/Robot/gripper/mountscrew/camera_mount/CameraXframe/gripper_camera",
     # resnet18 input size is 224x224, but the pytorch implementation can accept lower inputs; here we use 96x96 for efficiency
     # 30 Hz (rather than the simulations 120 Hz) is a realistic camera frame rate and saves on compute
     update_period=(1.0 / 30.0),
@@ -28,8 +43,12 @@ CAMERA_CFG = CameraCfg(
         clipping_range=(0.01, 10.0),
     ),
     offset=CameraCfg.OffsetCfg(
-        pos=CAMERA_TRANSLATE_VEC,  # Camera position relative to gripper link
-        rot=CAMERA_ROTATION_QUAT_WXYZ,  # w, x, y, z quaternion
+        pos=(
+            0.0,
+            0.0,
+            0.0,
+        ),  # identity — mount Xform carries the gripper-relative transform
+        rot=(1.0, 0.0, 0.0, 0.0),  # identity (w, x, y, z)
         convention="opengl",
     ),
 )
@@ -40,7 +59,9 @@ CAMERA_CFG = CameraCfg(
 # colorize_instance_segmentation=False → segmentation tensor is [B, H, W, 1] int32
 # (integer IDs rather than RGBA colours, which simplifies cube-label lookup).
 TILED_CAMERA_CFG = TiledCameraCfg(
-    prim_path="{ENV_REGEX_NS}/Robot/gripper/gripper_camera",
+    # Camera is parented under CameraXframe in the robot USD, which has the full
+    # gripper-relative transform baked in.  The camera offset is identity here.
+    prim_path="{ENV_REGEX_NS}/Robot/gripper/mountscrew/camera_mount/CameraXframe/gripper_camera",
     update_period=(1.0 / 30.0),
     height=128,
     width=128,
@@ -53,8 +74,12 @@ TILED_CAMERA_CFG = TiledCameraCfg(
         clipping_range=(0.01, 10.0),
     ),
     offset=TiledCameraCfg.OffsetCfg(
-        pos=CAMERA_TRANSLATE_VEC,
-        rot=CAMERA_ROTATION_QUAT_WXYZ,
+        pos=(
+            0.0,
+            0.0,
+            0.0,
+        ),  # identity — mount Xform carries the gripper-relative transform
+        rot=(1.0, 0.0, 0.0, 0.0),  # identity (w, x, y, z)
         convention="opengl",
     ),
 )

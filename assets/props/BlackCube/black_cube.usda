@@ -1,0 +1,179 @@
+#usda 1.0
+(
+    defaultPrim = "BlackCube"
+    metersPerUnit = 1
+    upAxis = "Z"
+    doc = """3 cm dexterous cube — 14.71 g (0.01471 kg), textured with a 2x3 face atlas.
+
+    Geometry: 3 cm cube (half-size 0.015 m) centred at the origin.
+    Physics  : PhysicsRigidBodyAPI + PhysicsMassAPI on the root Xform.
+               PhysicsCollisionAPI + PhysicsMeshCollisionAPI (convexHull) on the mesh.
+               PhysicsMaterialAPI (static/dynamic friction 2.0, restitution 0.0).
+
+    Texture  : ../../black_dex_cube.png — 2-column × 3-row atlas (portrait).
+               UV layout (V=0 at image bottom, standard USD/OpenGL convention):
+
+               Image layout (row 0 = top of image; USD V=0 = bottom of image):
+
+               Atlas cell    Letter  Face       U range      V range (USD)
+               ─────────────────────────────────────────────────────────────
+               Row 0, Col 0  M       -X left    [0.0, 0.5]   [0.667, 1.0]
+               Row 0, Col 1  J       +X right   [0.5, 1.0]   [0.667, 1.0]
+               Row 1, Col 0  E       +Y front   [0.0, 0.5]   [0.333, 0.667]
+               Row 1, Col 1  A       -Y back    [0.5, 1.0]   [0.333, 0.667]
+               Row 2, Col 0  D       +Z top     [0.0, 0.5]   [0.0,   0.333]
+               Row 2, Col 1  X       -Z bottom  [0.5, 1.0]   [0.0,   0.333]
+    """
+)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Root prim — rigid body + mass
+# ─────────────────────────────────────────────────────────────────────────────
+def Xform "BlackCube" (
+    kind = "component"
+    prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+)
+{
+    # Default resting pose: bottom face on Z=0 when viewed standalone.
+    # Isaac Lab overrides this with init_state.pos at spawn, so it has no
+    # effect on simulation behaviour.
+    double3 xformOp:translate = (0, 0, 0.015)
+    uniform token[] xformOpOrder = ["xformOp:translate"]
+
+    # 14.71 grams → kilograms
+    float physics:mass = 0.01471
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Collision + visual mesh
+    #
+    # Vertex indices (0-based):
+    #   0: (-0.015, -0.015, -0.015)    4: (-0.015, -0.015,  0.015)
+    #   1: ( 0.015, -0.015, -0.015)    5: ( 0.015, -0.015,  0.015)
+    #   2: ( 0.015,  0.015, -0.015)    6: ( 0.015,  0.015,  0.015)
+    #   3: (-0.015,  0.015, -0.015)    7: (-0.015,  0.015,  0.015)
+    #
+    # Face winding: CCW from outside (outward normals).
+    # ─────────────────────────────────────────────────────────────────────────
+    def Mesh "CubeMesh" (
+        prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsMeshCollisionAPI"]
+    )
+    {
+        # convexHull is exact and cheapest for a convex box
+        uniform token physics:approximation = "convexHull"
+
+        float3[] extent = [(-0.015, -0.015, -0.015), (0.015, 0.015, 0.015)]
+
+        int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+
+        # Face order: +Z, -Z, +Y, -Y, +X, -X
+        int[] faceVertexIndices = [
+            4, 5, 6, 7,    # +Z  (top)
+            1, 0, 3, 2,    # -Z  (bottom)
+            3, 7, 6, 2,    # +Y  (front)
+            0, 1, 5, 4,    # -Y  (back)
+            1, 2, 6, 5,    # +X  (right)
+            0, 4, 7, 3     # -X  (left)
+        ]
+
+        point3f[] points = [
+            (-0.015, -0.015, -0.015),
+            ( 0.015, -0.015, -0.015),
+            ( 0.015,  0.015, -0.015),
+            (-0.015,  0.015, -0.015),
+            (-0.015, -0.015,  0.015),
+            ( 0.015, -0.015,  0.015),
+            ( 0.015,  0.015,  0.015),
+            (-0.015,  0.015,  0.015)
+        ]
+
+        # One outward normal per face-vertex (faceVarying), 24 entries total
+        normal3f[] normals = [
+            (0, 0, 1),  (0, 0, 1),  (0, 0, 1),  (0, 0, 1),    # +Z
+            (0, 0, -1), (0, 0, -1), (0, 0, -1), (0, 0, -1),   # -Z
+            (0, 1, 0),  (0, 1, 0),  (0, 1, 0),  (0, 1, 0),    # +Y
+            (0, -1, 0), (0, -1, 0), (0, -1, 0), (0, -1, 0),   # -Y
+            (1, 0, 0),  (1, 0, 0),  (1, 0, 0),  (1, 0, 0),    # +X
+            (-1, 0, 0), (-1, 0, 0), (-1, 0, 0), (-1, 0, 0)    # -X
+        ] (
+            interpolation = "faceVarying"
+        )
+
+        # UV atlas — one (u,v) per face-vertex (faceVarying), 24 entries total.
+        # Each face maps to its atlas cell; first vertex → (u_min, v_min),
+        # going CCW around the cell to match the face winding.
+        texCoord2f[] primvars:st = [
+            # +Z  top    — D: atlas row 2 col 0: U[0.0, 0.5],  V[0.0,    0.3333]  (90° CW)
+            (0.5, 0.0), (0.5, 0.3333), (0.0, 0.3333), (0.0, 0.0),
+            # -Z  bottom — X: atlas row 2 col 1: U[0.5, 1.0],  V[0.0,    0.3333]  (90° CW)
+            (1.0, 0.0), (1.0, 0.3333), (0.5, 0.3333), (0.5, 0.0),
+            # +Y  front  — E: atlas row 1 col 0: U[0.0, 0.5],  V[0.3333, 0.6667]  (90° CW)
+            (0.5, 0.3333), (0.5, 0.6667), (0.0, 0.6667), (0.0, 0.3333),
+            # -Y  back   — A: atlas row 1 col 1: U[0.5, 1.0],  V[0.3333, 0.6667]  (unrotated)
+            (0.5, 0.3333), (1.0, 0.3333), (1.0, 0.6667), (0.5, 0.6667),
+            # +X  right  — J: atlas row 0 col 1: U[0.5, 1.0],  V[0.6667, 1.0]     (unrotated)
+            (0.5, 0.6667), (1.0, 0.6667), (1.0, 1.0), (0.5, 1.0),
+            # -X  left   — M: atlas row 0 col 0: U[0.0, 0.5],  V[0.6667, 1.0]     (90° CW)
+            (0.5, 0.6667), (0.5, 1.0), (0.0, 1.0), (0.0, 0.6667)
+        ] (
+            interpolation = "faceVarying"
+        )
+
+        # Visual material binding
+        rel material:binding = </BlackCube/Looks/CubeMaterial>
+
+        # Physics material binding (friction / restitution)
+        rel material:binding:physics = </BlackCube/Looks/PhysicsMaterial>
+    }
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Materials
+    # ─────────────────────────────────────────────────────────────────────────
+    def Scope "Looks"
+    {
+        # ── Physics material ─────────────────────────────────────────────────
+        def "PhysicsMaterial" (
+            prepend apiSchemas = ["PhysicsMaterialAPI"]
+        )
+        {
+            # 3D-printed PLA with partial infill, ~14.71 g total mass.
+            # Static/dynamic friction representative of PLA on a smooth surface.
+            # Restitution ~0.3 gives the modest bounce characteristic of rigid PLA.
+            float physics:staticFriction  = 0.5
+            float physics:dynamicFriction = 0.35
+            float physics:restitution     = 0.3
+        }
+
+        # ── Visual / texture material ─────────────────────────────────────────
+        def Material "CubeMaterial"
+        {
+            token outputs:surface.connect = </BlackCube/Looks/CubeMaterial/PreviewSurface.outputs:surface>
+
+            def Shader "PreviewSurface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor.connect = </BlackCube/Looks/CubeMaterial/DiffuseTexture.outputs:rgb>
+                float inputs:metallic  = 0.0
+                float inputs:roughness = 0.8
+                token outputs:surface
+            }
+
+            def Shader "DiffuseTexture"
+            {
+                uniform token info:id = "UsdUVTexture"
+                # Relative path: assets/props/BlackCube/ → ../../ → assets/
+                asset inputs:file = @../../black_dex_cube.png@
+                token inputs:wrapS = "clamp"
+                token inputs:wrapT = "clamp"
+                float2 inputs:st.connect = </BlackCube/Looks/CubeMaterial/PrimvarReader.outputs:result>
+                color3f outputs:rgb
+            }
+
+            def Shader "PrimvarReader"
+            {
+                uniform token info:id = "UsdPrimvarReader_float2"
+                token inputs:varname = "st"
+                float2 outputs:result
+            }
+        }
+    }
+}

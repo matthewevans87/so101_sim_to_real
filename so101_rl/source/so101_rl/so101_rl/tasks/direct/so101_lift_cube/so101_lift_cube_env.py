@@ -28,15 +28,15 @@ from so101.utils.image_processing import (
     ResizePipelineStep,
     Uint8ToFloatCHWPipelineStep,
 )
-from torch import zeros_like
-
 from so101_rl.helpers.visual_markers import (
     define_grip_zone_markers,
     define_gripper_arrow_markers,
     define_camera_frame_markers,
+    define_goal_zone_markers,
     visualize_grip_zone_markers,
     visualize_gripper_arrow,
     visualize_camera_frame_markers,
+    visualize_goal_zone_markers,
 )
 from so101_rl.helpers.utils import set_material
 
@@ -58,6 +58,7 @@ from so101_rl.env_pipeline import (
     build_env_metric_pipeline,
     build_metric_pipeline,
     build_reward_pipeline,
+    validate_gate_metrics,
     KEY_OBS_DIMS,
 )
 import torch
@@ -70,6 +71,7 @@ from isaaclab.utils.math import sample_uniform, quat_apply
 from isaaclab.sensors import Camera, TiledCamera, ContactSensor, FrameTransformer
 import isaaclab.utils.math as math_utils
 import isaaclab.sim as sim_utils
+
 
 # Sequence of hook calls
 # pre_physics_step
@@ -100,6 +102,13 @@ class So101LiftCube(DirectRLEnv):
         self._dof_idx, _ = self.robot.find_joints(self.cfg.joints.active)
         self._all_joint_idx, _ = self.robot.find_joints(self.cfg.joints.all)
         self._ee_body_idx, _ = self.robot.find_bodies(self.cfg.gripper.ee_link_name)
+        self._moving_jaw_body_idx, _ = self.robot.find_bodies("moving_jaw_so101_v1")
+        self._gripper_joint_idx, _ = self.robot.find_joints(
+            [self.cfg.gripper.ee_link_name]
+        )
+        self._wrist_roll_joint_idx, _ = self.robot.find_joints(
+            [self.cfg.joints.wrist_roll_name]
+        )
 
         # tip offset as tensor
         self._tip_offset = torch.tensor(
@@ -162,6 +171,7 @@ class So101LiftCube(DirectRLEnv):
             device=self.device,
             dtype=torch.float32,
         )  # type: ignore
+        self.prev_actions = torch.zeros_like(self.actions)
 
         self.step_metrics: dict[str, torch.Tensor] = None  # type: ignore
         self.env_metrics: dict[str, torch.Tensor] = {}
@@ -175,16 +185,18 @@ class So101LiftCube(DirectRLEnv):
             self.reward_pipeline,
             extra_keys=frozenset(
                 {
-                    # consumed by _get_dones
-                    "is_success_lift_fraction_terminal",
-                    "is_success_point_at_cube_terminal",
-                    "is_success_touch_terminal",
-                    "is_table_touched",
+                    # consumed by _get_observations (actor features)
+                    *(self.cfg.observations.actor_obs_metrics or []),
                     # consumed by _get_observations (critic features)
-                    *self.cfg.observations.critic_obs_metrics,
+                    *(self.cfg.observations.critic_obs_metrics or []),
+                    # always computed for telemetry collection (does not affect obs space)
+                    *self.cfg.observations.telemetry_metrics,
                 }
             ),
             env_metric_pipeline=self.env_metric_pipeline,
+        )
+        validate_gate_metrics(
+            self.reward_pipeline, self.metric_pipeline, self.env_metric_pipeline
         )
         self.dr_pipeline: DRPipeline = build_dr_pipeline(self.cfg)
         _dr_feed = self.cfg.domain_randomization.camera.feed
@@ -319,6 +331,7 @@ class So101LiftCube(DirectRLEnv):
         self.table = RigidObject(self.cfg.table_cfg)
         self.robot = Articulation(self.cfg.robot_cfg)
         self.cube = RigidObject(self.cfg.cube_cfg)
+
         self.camera = TiledCamera(self.cfg.camera_cfg)
         self.overhead_camera = (
             Camera(self.cfg.overhead_camera_cfg)
@@ -326,6 +339,9 @@ class So101LiftCube(DirectRLEnv):
             else None
         )
         self.gripper_contact_sensor = ContactSensor(self.cfg.gripper_contact_sensor_cfg)
+        self.moving_jaw_contact_sensor = ContactSensor(
+            self.cfg.moving_jaw_contact_sensor_cfg
+        )
         self.table_contact_sensor = ContactSensor(self.cfg.table_contact_sensor_cfg)
         self.gripper_tf = FrameTransformer(self.cfg.gripper_transforms_cfg)
 
@@ -343,6 +359,7 @@ class So101LiftCube(DirectRLEnv):
         if self.overhead_camera is not None:
             self.scene.sensors["overhead_camera"] = self.overhead_camera
         self.scene.sensors["gripper_contact_sensor"] = self.gripper_contact_sensor
+        self.scene.sensors["moving_jaw_contact_sensor"] = self.moving_jaw_contact_sensor
         self.scene.sensors["table_contact_sensor"] = self.table_contact_sensor
         self.scene.sensors["gripper_tf"] = self.gripper_tf
 
@@ -374,6 +391,11 @@ class So101LiftCube(DirectRLEnv):
         if self.cfg.debug.enable_grip_zone_markers:
             self.grip_zone_markers = define_grip_zone_markers()
 
+        if self.cfg.debug.enable_goal_zone_markers:
+            self.goal_zone_markers = define_goal_zone_markers(
+                radius=self.cfg.metrics.goal_zone_distance.distance_threshold
+            )
+
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
         """Called before stepping the physics; store and scale actions."""
         if actions is None:
@@ -381,6 +403,7 @@ class So101LiftCube(DirectRLEnv):
 
         actions = torch.clamp(actions, -1.0, 1.0)
         t = 0.5 * (actions + 1.0)  # (num_envs, num_actions)
+        self.prev_actions = self.actions.clone()
         self.actions = actions.clone()
 
         if self.cfg.behavior.binary_gripper_action.enabled:
@@ -420,6 +443,14 @@ class So101LiftCube(DirectRLEnv):
             )
             visualize_grip_zone_markers(
                 self.grip_zone_markers, gz_pos_w, gripper_quat_w, self.device
+            )
+
+        if (
+            self.cfg.debug.enable_goal_zone_markers
+            and self.env_metrics.get("goal_zone_pos_w") is not None
+        ):
+            visualize_goal_zone_markers(
+                self.goal_zone_markers, self.env_metrics["goal_zone_pos_w"], self.device
             )
 
     def _apply_action(self) -> None:
@@ -481,7 +512,23 @@ class So101LiftCube(DirectRLEnv):
             print("Computing initial step metrics...")
             self._compute_step_metrics()
 
-        critic_obs = torch.cat(
+        # Append any configured actor-only metric observations (e.g. goal_zone_pos_local).
+        if self.cfg.observations.actor_obs_metrics:
+            actor_obs = torch.cat(
+                [
+                    actor_obs,
+                    *[
+                        self.step_metrics[key].reshape(self.num_envs, KEY_OBS_DIMS[key])
+                        for key in self.cfg.observations.actor_obs_metrics
+                    ],
+                ],
+                dim=-1,
+            )
+
+        critic_obs_parts: list[torch.Tensor] = []
+        if self.cfg.observations.critic_include_vision_features:
+            critic_obs_parts.append(visual_features)  # (N, vision_feature_dim)
+        critic_obs_parts.extend(
             [
                 q,  # (N, num_joints)
                 dq,  # (N, num_joints)
@@ -489,9 +536,9 @@ class So101LiftCube(DirectRLEnv):
                     self.step_metrics[key].reshape(self.num_envs, KEY_OBS_DIMS[key])
                     for key in self.cfg.observations.critic_obs_metrics
                 ],
-            ],
-            dim=-1,
-        )  # (N, state_space)
+            ]
+        )
+        critic_obs = torch.cat(critic_obs_parts, dim=-1)  # (N, state_space)
 
         observations = {"policy": actor_obs, "critic": critic_obs}
 
@@ -509,35 +556,31 @@ class So101LiftCube(DirectRLEnv):
 
         self._compute_step_metrics()
         for key in self.step_metrics:
-            if (
-                self.step_metrics[key].size(-1) == 1
-                or self.step_metrics[key].dim() == 1
-            ):
-                val = self.step_metrics[key].float()
+            t = self.step_metrics[key].float()
+            if t.dim() == 1 or t.size(-1) == 1:
+                # Scalar metric — log directly.
+                val = t.reshape(self.num_envs)
                 self.extras["log"][f"Step_Metrics/{key}"] = val.mean()
                 self.extras["per_env_log"][f"Step_Metrics/{key}"] = val
+            else:
+                # Vector metric — log the L2 norm so it's visible in TensorBoard.
+                val = t.norm(dim=-1)  # (num_envs,)
+                self.extras["log"][f"Step_Metrics/{key}_norm"] = val.mean()
+                self.extras["per_env_log"][f"Step_Metrics/{key}_norm"] = val
 
         # Episode timeout
         time_out = self.episode_length_buf >= self.max_episode_length - 1
 
-        terminal = zeros_like(self.episode_length_buf, dtype=torch.bool)
-        if self.cfg.rewards.success_lift_fraction_terminal.enabled:
-            terminal = torch.logical_or(
-                terminal, self.step_metrics["is_success_lift_fraction_terminal"]
-            )
+        terminal = self.reward_pipeline.get_dones(self._step_ctx)
 
-        if self.cfg.rewards.success_point_at_cube_terminal.enabled:
-            terminal = torch.logical_or(
-                terminal, self.step_metrics["is_success_point_at_cube_terminal"]
-            )
-
-        if self.cfg.rewards.success_touch_terminal.enabled:
-            is_success_touch_terminal = self.step_metrics["is_success_touch_terminal"]
-            terminal = torch.logical_or(terminal, is_success_touch_terminal)
-
-        if self.cfg.rewards.safety_touch_table_terminal.enabled:
-            is_table_touched_terminal = self.step_metrics["is_table_touched"]
-            terminal = torch.logical_or(terminal, is_table_touched_terminal)
+        # Log per-reason termination signals for TensorBoard diagnostics.
+        self.extras["log"]["Termination/time_out"] = time_out.float().mean()
+        self.extras["per_env_log"]["Termination/time_out"] = time_out.float()
+        for name, flags in self.reward_pipeline.get_done_reasons(
+            self._step_ctx
+        ).items():
+            self.extras["log"][f"Termination/{name}"] = flags.mean()
+            self.extras["per_env_log"][f"Termination/{name}"] = flags
 
         return terminal, time_out
 
@@ -572,6 +615,7 @@ class So101LiftCube(DirectRLEnv):
         # Write changes back to simulation
         self.joint_pos[env_ids] = joint_pos
         self.joint_vel[env_ids] = joint_vel
+        self.prev_actions[env_ids] = 0.0
 
         self.robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
         self.robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
@@ -584,8 +628,25 @@ class So101LiftCube(DirectRLEnv):
         # Domain Randomization
         self.dr_pipeline.apply(DRContext(env=self, env_ids=env_ids))
 
+        # Compute post-reset metrics and initialize prev_metrics for the reset envs so
+        # that progressive rewards see a delta of 0 on the first step of each episode.
+        self.metric_pipeline.compute(self._step_ctx)
+        self.step_metrics = self._step_ctx.metrics
+        for key, val in self._step_ctx.metrics.items():
+            if key in self._step_ctx.prev_metrics:
+                self._step_ctx.prev_metrics[key][env_ids] = val[env_ids].clone()
+            else:
+                self._step_ctx.prev_metrics[key] = val.clone()
+
+        # Clear fire_once state for reset envs so terminal steps can fire again.
+        self.reward_pipeline.reset_idx(env_ids)
+
     def _compute_step_metrics(self) -> None:
         """Compute custom metrics at each step for logging purposes."""
+        # Snapshot the current metrics as prev_metrics before the pipeline clears and
+        # repopulates ctx.metrics. This gives progressive reward steps their delta baseline.
+        for key, val in self._step_ctx.metrics.items():
+            self._step_ctx.prev_metrics[key] = val.clone()
         self.metric_pipeline.compute(self._step_ctx)
         self.step_metrics = self._step_ctx.metrics
 

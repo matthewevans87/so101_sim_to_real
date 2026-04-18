@@ -113,6 +113,16 @@ parser.add_argument(
         "--algorithm determines the default entry point."
     ),
 )
+parser.add_argument(
+    "--cnn_checkpoint",
+    type=str,
+    default=None,
+    help=(
+        "Path to a pretrained CNN backbone checkpoint (.pt). "
+        "If omitted, the script auto-detects cnn_checkpoint.pt inside the experiment directory. "
+        "Required when vision_encoder.type == 'frozen_cnn' and no embedded checkpoint exists."
+    ),
+)
 
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
@@ -185,7 +195,9 @@ def _ensure_positive(name: str, value: int) -> None:
 
 
 def _find_checkpoint_and_task(experiment_path: Path) -> tuple[Path, str]:
-    checkpoint_path = experiment_path / "skrl" / "checkpoints" / "best_agent.pt"
+    checkpoint_path = (
+        experiment_path / "skrl" / "agent" / "checkpoints" / "best_agent.pt"
+    )
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Checkpoint not found at {checkpoint_path}")
     return checkpoint_path, ""
@@ -479,12 +491,16 @@ def _flush_shard(
         shard_path,
         rgb=np.stack(buffer["rgb"], axis=0).astype(np.uint8, copy=False),
         joint_pos=np.stack(buffer["joint_pos"], axis=0).astype(np.float32, copy=False),
-        is_cube_in_grip_position=np.asarray(
-            buffer["is_cube_in_grip_position"], dtype=np.bool_
+        cube_pos_gz=np.stack(buffer["cube_pos_gz"], axis=0).astype(
+            np.float32, copy=False
         ),
-        cube_quat_gripzone_wxyz=np.stack(
-            buffer["cube_quat_gripzone_wxyz"], axis=0
-        ).astype(np.float32, copy=False),
+        gripper_cube_alignment=np.asarray(
+            buffer["gripper_cube_alignment"], dtype=np.float32
+        ),
+        cube_rot6d_gz=np.stack(buffer["cube_rot6d_gz"], axis=0).astype(
+            np.float32, copy=False
+        ),
+        cube_height_w=np.asarray(buffer["cube_height_w"], dtype=np.float32),
         cube_in_camera_frame=np.asarray(buffer["cube_in_camera_frame"], dtype=np.bool_),
         env_id=np.asarray(buffer["env_id"], dtype=np.int32),
         episode_id=np.asarray(buffer["episode_id"], dtype=np.int32),
@@ -543,6 +559,34 @@ def main(
     env_config_path = experiment_path / "env_config.yaml"
     if env_config_path.exists():
         os.environ["SO101_ENV_CONFIG"] = str(env_config_path)
+
+    # Resolve CNN checkpoint for frozen_cnn experiments.
+    # Priority: explicit --cnn_checkpoint flag > embedded cnn_checkpoint.pt in experiment dir.
+    cnn_checkpoint_path: Path | None = None
+    if args_cli.cnn_checkpoint:
+        cnn_checkpoint_path = Path(args_cli.cnn_checkpoint).resolve()
+        if not cnn_checkpoint_path.is_file():
+            raise FileNotFoundError(
+                f"--cnn_checkpoint not found: {cnn_checkpoint_path}"
+            )
+    else:
+        embedded = experiment_path / "cnn_checkpoint.pt"
+        if embedded.is_file():
+            cnn_checkpoint_path = embedded
+            print(
+                f"[INFO] Auto-detected embedded CNN checkpoint: {cnn_checkpoint_path}"
+            )
+
+    if cnn_checkpoint_path is not None:
+        vision_encoder = getattr(env_cfg, "vision_encoder", None)
+        if vision_encoder is not None and vision_encoder.type == "frozen_cnn":
+            env_cfg.vision_encoder.cnn_checkpoint = str(cnn_checkpoint_path)
+            print(f"[INFO] CNN checkpoint wired into env_cfg: {cnn_checkpoint_path}")
+        else:
+            print(
+                "[WARNING] --cnn_checkpoint supplied but vision_encoder.type != 'frozen_cnn'; "
+                "checkpoint will be ignored."
+            )
 
     env_cfg.scene.num_envs = (
         args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
@@ -628,8 +672,10 @@ def main(
     buffer: dict[str, list] = {
         "rgb": [],
         "joint_pos": [],
-        "is_cube_in_grip_position": [],
-        "cube_quat_gripzone_wxyz": [],
+        "cube_pos_gz": [],
+        "gripper_cube_alignment": [],
+        "cube_rot6d_gz": [],
+        "cube_height_w": [],
         "cube_in_camera_frame": [],
         "env_id": [],
         "episode_id": [],
@@ -696,10 +742,18 @@ def main(
                 )
             if not hasattr(env.unwrapped, "step_metrics"):
                 raise RuntimeError("Environment does not expose step_metrics.")
-            if "is_cube_in_grip_position" not in env.unwrapped.step_metrics:
-                raise RuntimeError(
-                    "step_metrics is missing required key 'is_cube_in_grip_position'."
-                )
+            for _required_key in (
+                "cube_pos_gz",
+                "gripper_cube_alignment",
+                "cube_rot6d_gz",
+                "cube_height_w",
+            ):
+                if _required_key not in env.unwrapped.step_metrics:
+                    raise RuntimeError(
+                        f"step_metrics is missing required key {_required_key!r}. "
+                        "Ensure the env config includes this key in critic_obs_metrics "
+                        "or telemetry_metrics."
+                    )
             _startup_validated = True
 
         # Only pay the cost of camera tensor reads on steps where at least one env
@@ -717,12 +771,12 @@ def main(
             tiled_seg_info = _get_tiled_segmentation_info(gripper_cam.data.info)
 
             joint_pos_batch = env.unwrapped.joint_pos[:, env.unwrapped._dof_idx]
-            is_cube_in_grip_batch = env.unwrapped.step_metrics[
-                "is_cube_in_grip_position"
+            cube_pos_gz_batch = env.unwrapped.step_metrics["cube_pos_gz"]
+            gripper_cube_alignment_batch = env.unwrapped.step_metrics[
+                "gripper_cube_alignment"
             ]
-            cube_quat_batch = quat_unique(
-                env.unwrapped.grip_zone_tf.data.target_quat_source[:, 0, :]
-            )
+            cube_rot6d_gz_batch = env.unwrapped.step_metrics["cube_rot6d_gz"]
+            cube_height_w_batch = env.unwrapped.step_metrics["cube_height_w"]
 
             for env_idx in sampling_envs:
                 if env_idx not in cube_targets_by_env:
@@ -744,11 +798,17 @@ def main(
                 buffer["joint_pos"].append(
                     _to_numpy(joint_pos_batch[env_idx], dtype=np.float32)
                 )
-                buffer["is_cube_in_grip_position"].append(
-                    bool(_to_numpy(is_cube_in_grip_batch[env_idx], dtype=np.bool_))
+                buffer["cube_pos_gz"].append(
+                    _to_numpy(cube_pos_gz_batch[env_idx], dtype=np.float32)
                 )
-                buffer["cube_quat_gripzone_wxyz"].append(
-                    _to_numpy(cube_quat_batch[env_idx], dtype=np.float32)
+                buffer["gripper_cube_alignment"].append(
+                    float(gripper_cube_alignment_batch[env_idx].item())
+                )
+                buffer["cube_rot6d_gz"].append(
+                    _to_numpy(cube_rot6d_gz_batch[env_idx], dtype=np.float32)
+                )
+                buffer["cube_height_w"].append(
+                    float(cube_height_w_batch[env_idx].item())
                 )
                 buffer["cube_in_camera_frame"].append(bool(cube_in_frame))
                 buffer["env_id"].append(env_idx)
@@ -823,8 +883,10 @@ def main(
         "schema": {
             "rgb": "uint8 [S, H, W, 3]",
             "joint_pos": "float32 [S, num_active_joints]",
-            "is_cube_in_grip_position": "bool [S]",
-            "cube_quat_gripzone_wxyz": "float32 [S, 4]",
+            "cube_pos_gz": "float32 [S, 3]",
+            "gripper_cube_alignment": "float32 [S]",
+            "cube_rot6d_gz": "float32 [S, 6]",
+            "cube_height_w": "float32 [S]",
             "cube_in_camera_frame": "bool [S]",
             "env_id": "int32 [S]",
             "episode_id": "int32 [S]",

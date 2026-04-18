@@ -29,7 +29,7 @@ env_config: configs/baseline.yaml
 seed: 42
 
 # Run Isaac Sim in headless mode (no GUI window). Recommended for server runs.
-headless: true
+headless: false
 
 # Enable Isaac cameras. Required for the collect step to capture RGB frames.
 cameras: true
@@ -50,6 +50,10 @@ collect:
   # Number of samples to buffer before flushing an NPZ shard to disk.
   # null uses the collect_telemetry.py default (2048).
   shard_size: 2048
+
+  # Override num_envs for the collect step only.
+  # More envs → faster collection. null inherits the value from env_config.
+  envs: 8
 
 # ── CNN parameters (curate + train-cnn) ──────────────────────────────────────
 

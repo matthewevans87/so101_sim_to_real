@@ -5,11 +5,13 @@
 
 import os
 
+from so101_rl.configurations.black_cube import BLACK_CUBE_CFG
+from so101_rl.configurations.debug import VIS_MARKER_CFG
 from so101_rl.configurations.so101 import (
     SO101_CFG,
     GRIPPER_CONTACT_SENSOR_CFG,
+    MOVING_JAW_CONTACT_SENSOR_CFG,
 )
-from so101_rl.configurations.cube import DEX_CUBE_CFG
 from so101_rl.configurations.camera import (
     CAMERA_CFG,
     OVERHEAD_CAMERA_CFG,
@@ -28,6 +30,8 @@ from isaaclab.sensors.camera import CameraCfg, TiledCameraCfg
 from isaaclab.sensors import FrameTransformerCfg
 from isaaclab.sensors.frame_transformer.frame_transformer_cfg import OffsetCfg
 
+
+import types as _types
 
 from so101_rl.configurations.so101_env_params import So101EnvParams
 from so101_rl.env_pipeline import KEY_OBS_DIMS
@@ -62,7 +66,7 @@ class So101LiftCubeCfg(DirectRLEnvCfg):
 
     if _Y.vision_encoder.type == "frozen_resnet18":
         # Frozen ResNet18 + SpatialSoftmax: 2 × 512 channels = 1024-D features
-        observation_space = 1024 + NUM_ACTIVE_JOINTS
+        _VISION_FEATURE_DIM = 1024
     elif _Y.vision_encoder.type == "frozen_cnn":
         # CnnSpatialSoftmaxFeatureExtractor bypasses the backbone MLP and feeds the
         # final conv layer output through a fresh SpatialSoftmax, producing
@@ -73,17 +77,23 @@ class So101LiftCubeCfg(DirectRLEnvCfg):
                 "'frozen_cnn'. Add a 'backbone:' section to vision_encoder in the "
                 "env config YAML."
             )
-        observation_space = (
-            2 * _Y.vision_encoder.backbone.channels[-1] + NUM_ACTIVE_JOINTS
-        )
+        _VISION_FEATURE_DIM = 2 * _Y.vision_encoder.backbone.channels[-1]
     else:
         raise ValueError(
             f"Unknown vision_encoder.type: {_Y.vision_encoder.type!r}. "
             "Must be 'frozen_resnet18' or 'frozen_cnn'."
         )
 
-    state_space = 2 * NUM_ACTIVE_JOINTS + sum(
-        KEY_OBS_DIMS[k] for k in _Y.observations.critic_obs_metrics
+    observation_space = (
+        _VISION_FEATURE_DIM
+        + NUM_ACTIVE_JOINTS
+        + sum(KEY_OBS_DIMS[k] for k in (_Y.observations.actor_obs_metrics or []))
+    )
+
+    state_space = (
+        (_VISION_FEATURE_DIM if _Y.observations.critic_include_vision_features else 0)
+        + 2 * NUM_ACTIVE_JOINTS
+        + sum(KEY_OBS_DIMS[k] for k in _Y.observations.critic_obs_metrics)
     )
 
     # ── Asset configs ───────────────────────────────────────────────────────
@@ -91,10 +101,10 @@ class So101LiftCubeCfg(DirectRLEnvCfg):
 
     table_cfg: RigidObjectCfg = TABLE_CFG.replace(prim_path="/World/envs/env_.*/Table")  # type: ignore
 
-    cube_cfg: RigidObjectCfg = DEX_CUBE_CFG.replace(prim_path="/World/envs/env_.*/Object")  # type: ignore
+    cube_cfg: RigidObjectCfg = BLACK_CUBE_CFG.replace(prim_path="/World/envs/env_.*/Object")  # type: ignore
 
     camera_cfg: TiledCameraCfg = TILED_CAMERA_CFG.replace(  # type: ignore
-        prim_path="/World/envs/env_.*/Robot/gripper/gripper_camera",
+        prim_path="/World/envs/env_.*/Robot/gripper/mountscrew/camera_mount/CameraXframe/gripper_camera",
         height=_Y.sensors.camera.height,
         width=_Y.sensors.camera.width,
     )
@@ -114,9 +124,16 @@ class So101LiftCubeCfg(DirectRLEnvCfg):
         debug_vis=_Y.sensors.gripper_contact.debug_vis,
     )
 
+    moving_jaw_contact_sensor_cfg = MOVING_JAW_CONTACT_SENSOR_CFG.replace(  # type: ignore
+        prim_path="/World/envs/env_.*/Robot/moving_jaw_so101_v1",
+        filter_prim_paths_expr=["/World/envs/env_.*/Object"],
+        debug_vis=_Y.sensors.moving_jaw_contact.debug_vis,
+    )
+
     table_contact_sensor_cfg = TABLE_CONTACT_SENSOR_CFG.replace(  # type: ignore
         prim_path="/World/envs/env_.*/Table",
         filter_prim_paths_expr=[
+            "/World/envs/env_.*/Robot/shoulder",
             "/World/envs/env_.*/Robot/upper_arm",
             "/World/envs/env_.*/Robot/lower_arm",
             "/World/envs/env_.*/Robot/wrist",
@@ -132,9 +149,10 @@ class So101LiftCubeCfg(DirectRLEnvCfg):
         target_frames=[
             FrameTransformerCfg.FrameCfg(
                 prim_path="/World/envs/env_.*/Object", name="cube"
-            )
+            ),
         ],
         debug_vis=_Y.sensors.gripper_transform.debug_vis,
+        visualizer_cfg=VIS_MARKER_CFG,
     )
 
     # ── Distractor rigid object configs ─────────────────────────────────────
@@ -170,7 +188,35 @@ class So101LiftCubeCfg(DirectRLEnvCfg):
     distractors = _Y.distractors
     debug = _Y.debug
     behavior = _Y.behavior
+    metrics = _Y.metrics
     rewards = _Y.rewards
     domain_randomization = _Y.domain_randomization
     observations = _Y.observations
     vision_encoder = _Y.vision_encoder
+
+    def get_reward_cfg(self, type_name: str) -> _types.SimpleNamespace:
+        """Return the first reward list entry with matching ``type`` as a namespace.
+
+        Mirrors :meth:`So101EnvParams.get_reward_cfg` so that metric steps can
+        access reward-type parameters via ``env.cfg.get_reward_cfg(type_name)``.
+        Raises ``KeyError`` if no entry with the given type is found.
+        Supports both the new list format and the old named-map format for
+        backward compatibility with saved experiment configs.
+        """
+        if isinstance(self.rewards, dict):
+            # Old named-map format.
+            if type_name in self.rewards:
+                return _types.SimpleNamespace(**self.rewards[type_name])
+            raise KeyError(
+                f"No reward entry with type='{type_name}'. "
+                f"Present types: {sorted(self.rewards)}"
+            )
+        for entry in self.rewards:
+            if entry.get("type") == type_name:
+                return _types.SimpleNamespace(
+                    **{k: v for k, v in entry.items() if k != "type"}
+                )
+        raise KeyError(
+            f"No reward list entry with type='{type_name}'. "
+            f"Present types: {[e.get('type') for e in self.rewards]}"
+        )

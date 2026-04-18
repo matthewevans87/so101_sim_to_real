@@ -86,6 +86,16 @@ GRIPPER_CONTACT_SENSOR_CFG = ContactSensorCfg(
     update_period=0.0,
 )
 
+# Contact sensor for the movable jaw — same filter as the fixed-jaw sensor so that
+# GraspPhaseMetricStep can compute a bilateral (geometric-mean) force signal.
+# Option C (axis projection) can be added inside the two per-jaw metric steps
+# without touching GraspPhaseMetricStep.
+MOVING_JAW_CONTACT_SENSOR_CFG = ContactSensorCfg(
+    prim_path="{ENV_REGEX_NS}/Robot/moving_jaw_so101_v1",
+    track_air_time=False,
+    update_period=0.0,
+)
+
 
 SO101_NUM_JOINTS = 6
 

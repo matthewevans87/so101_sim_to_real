@@ -10,7 +10,7 @@ import dataclasses
 import os
 import types
 import typing
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import get_type_hints
 
@@ -84,6 +84,16 @@ def _from_dict(cls: type, data: dict) -> object:
             kwargs[f.name] = None if val is None else _from_dict(inner_dc, val)
         elif getattr(ft, "__origin__", None) is tuple and isinstance(val, list):
             kwargs[f.name] = tuple(val)
+        elif getattr(ft, "__origin__", None) is list and isinstance(val, list):
+            inner_args = getattr(ft, "__args__", None)
+            if (
+                inner_args
+                and len(inner_args) == 1
+                and dataclasses.is_dataclass(inner_args[0])
+            ):
+                kwargs[f.name] = [_from_dict(inner_args[0], item) for item in val]
+            else:
+                kwargs[f.name] = val
         else:
             kwargs[f.name] = val
 
@@ -149,7 +159,6 @@ class GripperCfg:
     ee_link_name: str
     grip_zone_rot: tuple[float, float, float, float]
     tip_offset: tuple[float, float, float]
-    grip_zone_offset: tuple[float, float, float]
     open_target: float
     closed_target: float
 
@@ -236,6 +245,7 @@ class DebugCfg:
     enable_gripper_arrow_markers: bool
     enable_camera_frame_markers: bool
     enable_grip_zone_markers: bool
+    enable_goal_zone_markers: bool
     vision_debug: VisionDebugCfg
 
 
@@ -247,6 +257,7 @@ class BinaryGripperActionCfg:
 @dataclass
 class BehaviorCfg:
     binary_gripper_action: BinaryGripperActionCfg
+    max_cube_distance: float
 
 
 # ---------------------------------------------------------------------------
@@ -255,94 +266,189 @@ class BehaviorCfg:
 
 
 @dataclass
+class GateCfg:
+    """A single gate condition: reward fires only when ``metric op threshold``.
+
+    Exactly one of ``gt`` / ``gte`` / ``lt`` / ``lte`` / ``eq`` must be set.
+    Multiple :class:`GateCfg` on a reward step are conjunctive (ALL must pass).
+    """
+
+    metric: str
+    gt: float | None = None
+    gte: float | None = None
+    lt: float | None = None
+    lte: float | None = None
+    eq: float | None = None
+
+    def __post_init__(self) -> None:
+        ops = [
+            x for x in (self.gt, self.gte, self.lt, self.lte, self.eq) if x is not None
+        ]
+        if len(ops) != 1:
+            raise ValueError(
+                f"GateCfg for metric '{self.metric}' must declare exactly one "
+                f"operator (gt/gte/lt/lte/eq); got {len(ops)}."
+            )
+
+
+@dataclass
 class RewardCfg:
     enabled: bool
     scale: float
+    mode: str = "absolute"
+    """Reward computation mode.
+
+    ``'absolute'``: reward = base * scale each step.
+    ``'unsigned_progressive'``: reward = max(0, \u0394base) * scale; only improvements
+    are rewarded, regressions yield zero.
+    ``'signed_progressive'``: reward = \u0394base * scale; regressions yield negative
+    reward, discouraging lift\u2192lower\u2192lift cycles."""
+    gates: list[GateCfg] = field(default_factory=list)
+    """Optional gate conditions. Reward (and termination for terminal steps) is
+    suppressed for any environment where a gate condition is not met."""
+    terminate: bool = True
+    """For terminal reward steps only: whether firing this step actually ends the
+    episode.  Set ``terminate: false`` to give a large one-off bonus without
+    resetting the environment, allowing subsequent phases (e.g. grasp_phase) to
+    continue in the same episode."""
+    fire_once: bool = False
+    """When ``True``, the reward fires at most once per episode, on the first
+    step the (post-gate) reward is non-zero.  Subsequent steps yield no
+    additional reward.  Valid for any reward step type.  Use with ``gates`` to
+    express milestone bonuses (e.g. gate on ``cube_height_w >= 0.10``)."""
 
 
-@dataclass
-class GripCubeRewardCfg:
-    enabled: bool
-    scale: float
-    distance_threshold: float
+@dataclass(kw_only=True)
+class DistanceRewardCfg(RewardCfg):
+    distance_pressure: float
 
 
-@dataclass
-class CloseGripperRewardCfg:
-    enabled: bool
-    scale: float
+@dataclass(kw_only=True)
+class CloseGripperRewardCfg(RewardCfg):
     close_target: float
     max_open: float
 
 
-@dataclass
-class GripperForceRewardCfg:
-    enabled: bool
-    scale: float
-    force_target: float
-
-
-@dataclass
-class EeLinearSpeedRewardCfg:
-    enabled: bool
-    scale: float
+@dataclass(kw_only=True)
+class EeLinearSpeedRewardCfg(RewardCfg):
     safe_speed: float
 
 
 @dataclass
-class SuccessLiftFractionRewardCfg:
-    enabled: bool
-    scale: float
-    height_threshold: float
+class ApproachDistanceMetricCfg:
+    pressure: float
+    linear_weight: float
 
 
 @dataclass
-class SuccessTouchTerminalRewardCfg:
-    enabled: bool
-    scale: float
+class ApproachAlignmentMetricCfg:
+    pressure: float
+    linear_weight: float
+
+
+@dataclass
+class ApproachGripperPoseMetricCfg:
+    gripper_pos_target: float
+    pressure: float
+    linear_weight: float
+
+
+@dataclass
+class ApproachPhaseMetricCfg:
+    distance_pressure: float
+    alignment_pressure: float
+    gripper_pos_pressure: float
+    gripper_pos_target: float
+
+
+@dataclass
+class GraspPhaseMetricCfg:
+    grip_force_sat_threshold: float
+    """Bilateral pinch force (N) at which grasp_phase saturates to 1.0."""
+
+
+@dataclass
+class GripCubeMetricCfg:
+    distance_threshold: float
+    """Grip-zone-to-cube distance (m) within which the cube is in grip position."""
     touch_force_threshold: float
+    """Minimum gripper contact force (N) to count as a confirmed grip."""
 
 
 @dataclass
-class VantageRewardCfg:
-    enabled: bool
-    scale: float
-    ideal_distance: float
-    ideal_distance_sigma: float
-    ideal_height: float
-    ideal_height_sigma: float
-    min_distance_threshold: float
-    far_distance_threshold: float
+class CubeOutOfRangeMetricCfg:
+    distance_threshold: float
+    """Cube-to-base distance (m) beyond which the cube is considered out of range."""
 
 
 @dataclass
-class ApproachPhaseRewardCfg:
-    enabled: bool
-    scale: float
+class LiftPhaseMetricCfg:
+    height_threshold: float
+    """Cube height above resting position (m) at which cube_lift_fraction reaches 1.0."""
 
 
 @dataclass
-class RewardsCfg:
-    distance: RewardCfg
-    grip_cube: GripCubeRewardCfg
-    lift_cube: RewardCfg
-    gripper_cube_alignment: RewardCfg
-    camera_cube_alignment: RewardCfg
-    close_gripper: CloseGripperRewardCfg
-    gripper_force: GripperForceRewardCfg
-    gripper_look_at_cube: RewardCfg
-    action: RewardCfg
-    ee_linear_speed: EeLinearSpeedRewardCfg
-    joint_speed: RewardCfg
-    ee_height_safety: RewardCfg
-    safety_touch_table: RewardCfg
-    success_lift_fraction_terminal: SuccessLiftFractionRewardCfg
-    success_touch_terminal: SuccessTouchTerminalRewardCfg
-    success_point_at_cube_terminal: RewardCfg
-    safety_touch_table_terminal: RewardCfg
-    vantage: VantageRewardCfg
-    keep_camera_upright: RewardCfg
-    approach_phase: ApproachPhaseRewardCfg
+class ApproachPhaseTerminalMetricCfg:
+    threshold: float
+    """approach_phase value above which approach_phase_terminal is True."""
+
+
+@dataclass
+class GraspPhaseTerminalMetricCfg:
+    threshold: float
+    """grasp_phase value above which grasp_phase_terminal is True (when approach is also terminal)."""
+
+
+@dataclass
+class GoalZoneDistanceMetricCfg:
+    """Configuration for the goal zone distance metric.
+
+    ``goal_zone_distance`` is a shaped scalar in (0, 1] that is highest (1.0)
+    when the cube centroid coincides with the goal zone and decays
+    exponentially with distance.
+    """
+
+    pressure: float
+    """Exponential decay rate: ``exp(-pressure * dist / env_cube_width)``.
+    Higher values create a sharper peak around the goal zone."""
+    distance_threshold: float
+    """Euclidean distance (m) within which the cube centroid is considered to
+    have *reached* the goal zone (``is_goal_zone_reached = True``)."""
+
+
+@dataclass
+class MetricsCfg:
+    approach_distance: ApproachDistanceMetricCfg
+    approach_alignment: ApproachAlignmentMetricCfg
+    approach_gripper_pose: ApproachGripperPoseMetricCfg
+    approach_phase: ApproachPhaseMetricCfg
+    grasp_phase: GraspPhaseMetricCfg
+    grip_cube: GripCubeMetricCfg
+    cube_out_of_range: CubeOutOfRangeMetricCfg
+    lift_phase: LiftPhaseMetricCfg
+    approach_phase_terminal: ApproachPhaseTerminalMetricCfg
+    grasp_phase_terminal: GraspPhaseTerminalMetricCfg
+    goal_zone_distance: GoalZoneDistanceMetricCfg
+
+
+@dataclass(kw_only=True)
+class AvoidBumpingCubeRewardCfg(RewardCfg):
+    cube_widths: float  # multiplier on CUBE_WIDTH to define "near cube" region
+
+
+@dataclass(kw_only=True)
+class WristRollPoseRewardCfg(RewardCfg):
+    target_rad: float
+    """Target wrist roll joint position in radians. -1.5707963267948966 = -90°."""
+    pressure: float
+    """Exponential pressure: reward = exp(-pressure * |q - target_rad|) * scale."""
+
+
+@dataclass(kw_only=True)
+class ActionRewardCfg(RewardCfg):
+    joints: list[str] = field(default_factory=list)
+    """Joint names to include in the action-smoothing penalty.
+    An empty list means all active joints are used."""
 
 
 # ---------------------------------------------------------------------------
@@ -461,12 +567,31 @@ class GroundDRCfg:
 
 
 @dataclass
+class GoalZonePositionDRCfg:
+    """Domain randomisation config for the per-episode goal zone target position.
+
+    The goal zone is sampled in polar coordinates relative to the robot base
+    at episode reset.  Set ``enabled: false`` to disable the feature entirely
+    (no :class:`GoalZoneEnvMetricStep` will be added to the pipeline).
+    """
+
+    enabled: bool
+    radius_range: tuple[float, float]
+    """Radial distance from the robot base (m) in which the goal zone is sampled."""
+    angle_range: tuple[float, float]
+    """Azimuthal angle range (degrees) for the goal zone."""
+    z_range: tuple[float, float]
+    """Height range (m) above the table surface for the goal zone."""
+
+
+@dataclass
 class DomainRandomizationCfg:
     camera: DRCameraCfg
     world_lighting: WorldLightingCfg
     env_lighting: EnvLightingCfg
     cube: DRCubeCfg
     ground: GroundDRCfg
+    goal_zone: GoalZonePositionDRCfg
 
 
 # ---------------------------------------------------------------------------
@@ -495,6 +620,7 @@ class TableContactSensorCfg:
 class SensorsCfg:
     camera: CameraSensorCfg
     gripper_contact: DebugVisCfg
+    moving_jaw_contact: DebugVisCfg
     table_contact: TableContactSensorCfg
     gripper_transform: DebugVisCfg
 
@@ -507,6 +633,20 @@ class SensorsCfg:
 @dataclass
 class ObservationsCfg:
     critic_obs_metrics: list[str]
+    actor_obs_metrics: list[str] = field(default_factory=list)
+    """Extra metric keys appended to the actor observation vector after the
+    frozen vision features and joint positions.  Defaults to an empty list
+    (no change to actor obs space).  Each key must appear in
+    :data:`KEY_OBS_DIMS` so its column width is known."""
+    telemetry_metrics: list[str] = field(default_factory=list)
+    """Extra metric keys to include in the metric pipeline for telemetry collection.
+    Unlike critic_obs_metrics, these do not become part of the critic observation
+    vector — they are computed and exposed via step_metrics but not fed to the model.
+    Adding keys here does not change the observation space or invalidate checkpoints."""
+    critic_include_vision_features: bool = False
+    """When True, prepend the same frozen vision features used by the actor into the
+    critic observation vector.  Default False preserves the privileged-state-only
+    critic and keeps backward compatibility with saved checkpoints."""
 
 
 @dataclass
@@ -555,11 +695,40 @@ class So101EnvParams:
     distractors: DistractorsCfg
     debug: DebugCfg
     behavior: BehaviorCfg
-    rewards: RewardsCfg
+    metrics: MetricsCfg
+    rewards: list[dict]
     domain_randomization: DomainRandomizationCfg
     sensors: SensorsCfg
     observations: ObservationsCfg
     vision_encoder: VisionEncoderCfg
+
+    def get_reward_cfg(self, type_name: str) -> types.SimpleNamespace:
+        """Return the first reward list entry with matching ``type`` as a namespace.
+
+        Used by metric steps to access reward-type parameters (e.g. thresholds)
+        without requiring the reward step to be enabled.
+        Raises ``KeyError`` if no entry with the given type is found.
+        Supports both the new list format (``[{type: ..., ...}]``) and the old
+        named-map format (``{type_name: {...}}``) for backward compatibility with
+        saved experiment configs.
+        """
+        if isinstance(self.rewards, dict):
+            # Old named-map format.
+            if type_name in self.rewards:
+                return types.SimpleNamespace(**self.rewards[type_name])
+            raise KeyError(
+                f"No reward entry with type='{type_name}'. "
+                f"Present types: {sorted(self.rewards)}"
+            )
+        for entry in self.rewards:
+            if entry.get("type") == type_name:
+                return types.SimpleNamespace(
+                    **{k: v for k, v in entry.items() if k != "type"}
+                )
+        raise KeyError(
+            f"No reward list entry with type='{type_name}'. "
+            f"Present types: {[e.get('type') for e in self.rewards]}"
+        )
 
     @classmethod
     def load(cls, path: str | Path) -> "So101EnvParams":

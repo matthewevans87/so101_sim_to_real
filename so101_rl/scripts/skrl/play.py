@@ -216,7 +216,7 @@ def main(
     else:
         resume_path = get_checkpoint_path(
             log_root_path,
-            run_dir=f".*_{algorithm}_{args_cli.ml_framework}",
+            run_dir="agent",
             other_dirs=["checkpoints"],
         )
     log_dir = os.path.dirname(os.path.dirname(resume_path))
