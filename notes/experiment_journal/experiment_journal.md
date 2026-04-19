@@ -586,8 +586,9 @@ Todo
 - Run training on new cube
   - [x] Achieves lifting despite not retraining CNN. CNN will likely improve performance. See run `2026-04-18_12-29-55/`
     - Retrain Steps:
-      - [ ] Step 0: RN18 -> CNN1
-      - [ ] Step 1: CNN1 -> CNN2
+      - [ ] Train RN18 policy
+      - [ ] Pipeline: Collect w/ RN18 -> CNN1
+      - [ ] Pipeline: Train Policy w/ CNN1 -> CNN2
 - Lift Task
   - Re-train with latest changes (but with config set to lift goal only)
   - Commit changes
@@ -597,8 +598,8 @@ Todo
   - Design Ablation studies
   - Configure Training pipeline and verify it is working
 - Create metrics for these and add to Critic network:
-  - Add Cube's angular and linear velocity
-  - Computed opening width between the tips of the gripper
+  - [x] Add Cube's angular and linear velocity
+  - [x] Computed opening width between the tips of the gripper
 - Upgrade to latest version of Isaac Sim (?)
 
 

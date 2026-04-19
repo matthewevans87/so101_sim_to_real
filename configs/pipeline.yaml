@@ -21,8 +21,8 @@
 # [required] RL task name registered with Isaac Lab
 task: So101-LiftCube-v0
 
-# [required] Environment config YAML for the train step
-env_config: configs/baseline.yaml
+# # [required] Environment config YAML for the train step
+# env_config: configs/baseline.yaml
 
 # [required] RNG seed — used by collect, curate, and train-cnn for reproducibility.
 # Must be an explicit integer; null is rejected at validation time.

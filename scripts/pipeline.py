@@ -861,19 +861,19 @@ class PipelineOrchestrator:
 
                 if step == "train":
                     _update_auto_pin(_PIN_LATEST_EXPERIMENT, actual_output_dir)
-                else:
-                    self._state["steps"][step].update(
-                        {
-                            "status": "failed",
-                            "completed_at": now,
-                            "return_code": rc,
-                        }
-                    )
-                    self._write_state()
-                    _error(f"Step '{step}' failed (exit code {rc})")
-                    _error(f"Log:            {log_path}")
-                    _error(f"Pipeline state: {self.pipeline_dir / STATE_FILE}")
-                    sys.exit(rc)
+            else:
+                self._state["steps"][step].update(
+                    {
+                        "status": "failed",
+                        "completed_at": now,
+                        "return_code": rc,
+                    }
+                )
+                self._write_state()
+                _error(f"Step '{step}' failed (exit code {rc})")
+                _error(f"Log:            {log_path}")
+                _error(f"Pipeline state: {self.pipeline_dir / STATE_FILE}")
+                sys.exit(rc)
 
         _success(f"Pipeline complete — {len(steps_to_run)} step(s) finished.")
         _success(f"Pipeline dir: {self.pipeline_dir}")
