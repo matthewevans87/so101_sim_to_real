@@ -41,6 +41,20 @@ class RewardStep(ABC, Generic[CfgT]):
     """Keys from ``env.env_metrics`` (produced by :class:`EnvMetricStep`) that
     this step reads during :meth:`compute`."""
 
+    @property
+    def log_name(self) -> str:
+        """TensorBoard logging key for this step instance.
+
+        Returns ``"{name}[{id}]"`` when :attr:`RewardCfg.id` is set, or
+        ``"{name}"`` otherwise.  Using the log name instead of :attr:`name`
+        allows multiple instances of the same reward type to appear as
+        separate curves in TensorBoard and to be targeted independently by
+        sweep overrides.
+        """
+        if self._cfg.id is not None:
+            return f"{self.name}[{self._cfg.id}]"
+        return self.name
+
     def __init__(self, cfg: CfgT) -> None:
         self._cfg: CfgT = cfg
         self._gates: list[GateCfg] = cfg.gates
@@ -211,7 +225,7 @@ class RewardPipeline:
             done_flags = step.done(ctx)
             if step._gates:
                 done_flags = done_flags & self._evaluate_gate_mask(step._gates, ctx)
-            reasons[step.name] = done_flags.float()
+            reasons[step.log_name] = done_flags.float()
         return reasons
 
     def get_dones(self, ctx: StepContext) -> torch.Tensor:
@@ -262,9 +276,9 @@ class RewardPipeline:
             if step._cfg.fire_once:
                 rew = rew * step._apply_fire_once(rew != 0, env).float()
             totals_by_name.setdefault(
-                step.name, torch.zeros(env.num_envs, device=env.device)
+                step.log_name, torch.zeros(env.num_envs, device=env.device)
             )
-            totals_by_name[step.name] = totals_by_name[step.name] + rew
+            totals_by_name[step.log_name] = totals_by_name[step.log_name] + rew
             total += rew
         for name, t in totals_by_name.items():
             env.extras["log"][f"Episode_Reward/{name}"] = t.mean()

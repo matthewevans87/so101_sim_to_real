@@ -33,7 +33,7 @@ from isaaclab.sensors.frame_transformer.frame_transformer_cfg import OffsetCfg
 
 import types as _types
 
-from so101_rl.configurations.so101_env_params import So101EnvParams
+from so101_rl.configurations.so101_env_params import EpisodeStatsCfg, So101EnvParams
 from so101_rl.env_pipeline import KEY_OBS_DIMS
 
 _Y: So101EnvParams = So101EnvParams.load(os.environ["SO101_ENV_CONFIG"])
@@ -189,6 +189,7 @@ class So101LiftCubeCfg(DirectRLEnvCfg):
     debug = _Y.debug
     behavior = _Y.behavior
     metrics = _Y.metrics
+    episode_stats: EpisodeStatsCfg = _Y.episode_stats
     rewards = _Y.rewards
     domain_randomization = _Y.domain_randomization
     observations = _Y.observations

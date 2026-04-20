@@ -60,6 +60,7 @@ from so101_rl.env_pipeline import (
     build_reward_pipeline,
     validate_gate_metrics,
     KEY_OBS_DIMS,
+    EpisodeStatsPipeline,
 )
 import torch
 from collections.abc import Sequence
@@ -181,6 +182,11 @@ class So101LiftCube(DirectRLEnv):
         self.env_metric_pipeline: EnvMetricPipeline = build_env_metric_pipeline(
             self.cfg
         )
+        self.episode_stats_pipeline = EpisodeStatsPipeline(
+            num_envs=self.num_envs,
+            device=self.device,
+            lift_height_threshold=self.cfg.episode_stats.lift_height_threshold,
+        )
         self.metric_pipeline: MetricPipeline = build_metric_pipeline(
             self.reward_pipeline,
             extra_keys=frozenset(
@@ -191,6 +197,8 @@ class So101LiftCube(DirectRLEnv):
                     *(self.cfg.observations.critic_obs_metrics or []),
                     # always computed for telemetry collection (does not affect obs space)
                     *self.cfg.observations.telemetry_metrics,
+                    # consumed by episode_stats_pipeline
+                    *EpisodeStatsPipeline.required_metric_keys,
                 }
             ),
             env_metric_pipeline=self.env_metric_pipeline,
@@ -582,6 +590,10 @@ class So101LiftCube(DirectRLEnv):
             self.extras["log"][f"Termination/{name}"] = flags.mean()
             self.extras["per_env_log"][f"Termination/{name}"] = flags
 
+        self.episode_stats_pipeline.step(self._step_ctx, terminal, time_out)
+        for key, val in self.episode_stats_pipeline.get_log_dict().items():
+            self.extras["log"][key] = torch.tensor(val, device=self.device)
+
         return terminal, time_out
 
     def _reset_idx(self, env_ids: Sequence[int] | None):
@@ -589,6 +601,7 @@ class So101LiftCube(DirectRLEnv):
         if env_ids is None:
             env_ids = self.robot._ALL_INDICES.tolist()
         super()._reset_idx(env_ids)
+        self.episode_stats_pipeline.reset_envs(env_ids)
 
         # Reset robot to default joint state and root from asset
         joint_pos = self.robot.data.default_joint_pos[env_ids].clone()

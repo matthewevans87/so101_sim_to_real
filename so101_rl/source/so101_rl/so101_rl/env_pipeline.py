@@ -94,6 +94,7 @@ from so101_rl.env_metric_pipeline import (
     ALL_ENV_METRIC_STEPS,
     build_env_metric_pipeline,
 )
+from so101_rl.episode_stats_pipeline import EpisodeStatsPipeline
 
 __all__ = [
     # Contexts
@@ -174,4 +175,6 @@ __all__ = [
     "GoalZoneEnvMetricStep",
     "ALL_ENV_METRIC_STEPS",
     "build_env_metric_pipeline",
+    # Episode stats pipeline
+    "EpisodeStatsPipeline",
 ]

@@ -113,6 +113,12 @@ metrics:
     pressure: 0.3   # exp(-pressure * dist / cube_width); higher = sharper peak at goal
     distance_threshold: 0.05  # metres — cube centroid within this distance is considered reached
 
+episode_stats:
+  lift_height_threshold: 0.02  # cube height above resting position (m) at which cube is considered 'lifted'
+                               # for lift_rate, drop_rate, and time_to_lift statistics.
+                               # Must be above physics jitter (~0.001–0.002 m); 0.02 m (2 cm) is a safe margin.
+                               # Intentionally smaller than metrics.lift_phase.height_threshold (0.20).
+
 rewards:
   # mode: absolute (default)     — reward the current metric value each step.
   # mode: unsigned_progressive    — reward only the improvement delta vs the previous step
@@ -136,11 +142,13 @@ rewards:
     scale: 1.0
 
   - type: approach_phase
+    id: progressive
     enabled: true
     scale: 5.0
     mode: unsigned_progressive
 
   - type: approach_phase
+    id: absolute
     enabled: true
     scale: 1.0
     mode: absolute
@@ -153,6 +161,7 @@ rewards:
 
   # GRASP
   - type: grasp_phase
+    id: progressive
     enabled: true
     scale: 10.0
     mode: unsigned_progressive
@@ -163,6 +172,7 @@ rewards:
         lte: 0.04
 
   - type: grasp_phase
+    id: absolute
     enabled: true
     scale: 5.0
     mode: absolute
@@ -180,6 +190,7 @@ rewards:
         
   # LIFT
   - type: lift_phase
+    id: progressive
     enabled: true
     scale: 1000.0
     mode: signed_progressive
@@ -190,6 +201,7 @@ rewards:
         gte: 0.7
 
   - type: lift_phase
+    id: absolute
     enabled: true
     scale: 5.0
     mode: absolute
@@ -344,7 +356,7 @@ vision_encoder:
   # 'frozen_resnet18' — frozen pretrained ResNet18 + SpatialSoftmax (1024-D)
   # 'frozen_cnn'      — frozen pretrained CNN + SpatialSoftmax (2×channels[-1]-D = 1024-D)
   #                     Model weights loaded via --cnn_checkpoint.
-  type: frozen_resnet18
+  type: frozen_cnn
   # Image dimensions passed to the CNN. The env's ResizePipelineStep resizes to these.
   # 16:9 aspect ratio matching the physical Arducam 1080P (1920x1080) camera.
   # 108x192 is a 10x downscale; a no-op during sim training when the camera renders at this size.

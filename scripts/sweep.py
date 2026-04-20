@@ -132,34 +132,72 @@ def _merge_rewards_list(base_rewards: list, reward_overrides: list) -> list:
     """
     Merge reward override entries into *base_rewards*.
 
-    Entries are matched by their ``type`` field.  For each override entry:
-    - If a base entry with the same ``type`` exists, only the explicitly listed
-      fields are patched; all other fields on that entry are preserved.
-    - If no base entry matches, the override entry is appended.
+    Matching rules (checked in order for each base entry):
+    1. **Exact match** — override entry has both ``type`` and ``id`` fields that
+       match a base entry's ``type`` and ``id``.  Patches only that specific
+       instance, leaving any sibling entries of the same ``type`` untouched.
+    2. **Type-only match** — override entry has a ``type`` field but no ``id``.
+       Patches the **first** base entry whose ``type`` matches (legacy behaviour,
+       backward-compatible with sweep configs written before ``id`` was added).
+    3. **No match** — the override entry is appended as a new reward step.
 
-    Reward entries that have no corresponding override are left unchanged.
-    The original list is not mutated.
+    Only the fields explicitly listed in the override entry are patched; all
+    other fields on the matched base entry are preserved unchanged.
+
+    The original lists are not mutated.
     """
     if not reward_overrides:
         return copy.deepcopy(base_rewards)
     result = copy.deepcopy(base_rewards)
-    # Index overrides by type for O(1) lookup
-    override_by_type: Dict[str, dict] = {
-        r["type"]: r for r in reward_overrides if "type" in r
-    }
-    matched: set = set()
+
+    # Build two override indexes:
+    #   by_type_and_id — keyed by (type, id); used for exact-match targeting
+    #   by_type_only   — keyed by type; used for broad/legacy matching
+    by_type_and_id: Dict[Tuple[str, str], dict] = {}
+    by_type_only: Dict[str, dict] = {}
+    for r in reward_overrides:
+        t = r.get("type")
+        if t is None:
+            continue
+        rid = r.get("id")
+        if rid is not None:
+            by_type_and_id[(t, rid)] = r
+        else:
+            by_type_only[t] = r
+
+    matched_type_id: set = set()
+    matched_type: set = set()
+
     for entry in result:
         t = entry.get("type")
-        if t and t in override_by_type:
-            override = override_by_type[t]
+        if not t:
+            continue
+        rid = entry.get("id")
+
+        # Exact-match check first
+        if rid is not None and (t, rid) in by_type_and_id:
+            override = by_type_and_id[(t, rid)]
+            for field, value in override.items():
+                if field not in ("type", "id"):
+                    entry[field] = copy.deepcopy(value)
+            matched_type_id.add((t, rid))
+
+        # Type-only fallback (first matching base entry wins)
+        elif t in by_type_only and t not in matched_type:
+            override = by_type_only[t]
             for field, value in override.items():
                 if field != "type":
                     entry[field] = copy.deepcopy(value)
-            matched.add(t)
-    # Any override types that didn't match an existing entry are appended
-    for t, entry in override_by_type.items():
-        if t not in matched:
+            matched_type.add(t)
+
+    # Append unmatched override entries as new reward steps
+    for (t, rid), entry in by_type_and_id.items():
+        if (t, rid) not in matched_type_id:
             result.append(copy.deepcopy(entry))
+    for t, entry in by_type_only.items():
+        if t not in matched_type:
+            result.append(copy.deepcopy(entry))
+
     return result
 
 

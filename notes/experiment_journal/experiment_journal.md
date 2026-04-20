@@ -586,9 +586,11 @@ Todo
 - Run training on new cube
   - [x] Achieves lifting despite not retraining CNN. CNN will likely improve performance. See run `2026-04-18_12-29-55/`
     - Retrain Steps:
-      - [ ] Train RN18 policy
-      - [ ] Pipeline: Collect w/ RN18 -> CNN1
-      - [ ] Pipeline: Train Policy w/ CNN1 -> CNN2
+      - [x] Train RN18 policy
+      - [x] Pipeline: Collect w/ RN18 -> CNN1
+        - `/mnt/nas_1/matthew-evans/so101_sim_to_real/pipelines/pipeline_20260418_162511/04_train_cnn/checkpoints/best_model.pt`
+      - [x] Train CNN1 policy
+      - [...] Pipeline: Train Policy w/ CNN1 -> CNN2
 - Lift Task
   - Re-train with latest changes (but with config set to lift goal only)
   - Commit changes
@@ -605,3 +607,22 @@ Todo
 
 *Contemplations:*
 The goal zone, as currently designed, as a known location. This means we're just trying to train the policy to do FK, which isn't novel or needed. There's no great learned capability here. The impressive bit is finding and picking the object. If you want to create a visual target for placement, that's fine, but that's a different task.
+
+
+## April 20, 2026
+
+We need to document performance of the following
+- policy model training
+  - entropy curve
+  - ppo updates to first successful approach
+  - ppo updates to first successful grasp
+  - ppo updates to first successful lift
+- policy model
+  - lift rate: the perfect of episodes that lifted the cube > 1cm
+  - drop rate: the percent episodes with where the cube was lifted > 1cm but then dropped it back to the table (i.e., no longer grasped and is in contact with table)
+  - success rate: the percent of episodes that lift the cube to the height threshold before episode timeout
+  - cube bump: the sum of the norm of cube linear velocity when the cube not grasped
+  - time to lift: the mean time to lift the cube to the threshold, ignoring episodes that timed out
+
+
+

@@ -316,6 +316,17 @@ class RewardCfg:
     step the (post-gate) reward is non-zero.  Subsequent steps yield no
     additional reward.  Valid for any reward step type.  Use with ``gates`` to
     express milestone bonuses (e.g. gate on ``cube_height_w >= 0.10``)."""
+    id: str | None = None
+    """Optional human-readable identifier for this reward instance.
+
+    When set, the TensorBoard logging key becomes ``Episode_Reward/<type>[<id>]``
+    instead of ``Episode_Reward/<type>``.  This is required when the same
+    ``type`` appears more than once in the rewards list (e.g. two
+    ``approach_phase`` entries with different modes) so that each instance
+    can be monitored and targeted by sweep overrides independently.
+
+    Sweep override entries are matched by ``(type, id)`` when ``id`` is
+    present, or by ``type`` alone when ``id`` is absent."""
 
 
 @dataclass(kw_only=True)
@@ -683,6 +694,16 @@ class VisionEncoderCfg:
 
 
 @dataclass
+class EpisodeStatsCfg:
+    lift_height_threshold: float
+    """Cube height above resting position (m) at which the cube is considered
+    'lifted' for the purposes of ``lift_rate``, ``drop_rate``, and
+    ``time_to_lift`` statistics.  Should be a small positive value (e.g. 0.01)
+    to detect any departure from the table, rather than the full
+    ``lift_phase.height_threshold`` used for the success condition."""
+
+
+@dataclass
 class So101EnvParams:
     decimation: int
     episode_length_s: float
@@ -696,6 +717,7 @@ class So101EnvParams:
     debug: DebugCfg
     behavior: BehaviorCfg
     metrics: MetricsCfg
+    episode_stats: EpisodeStatsCfg
     rewards: list[dict]
     domain_randomization: DomainRandomizationCfg
     sensors: SensorsCfg
