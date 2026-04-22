@@ -663,6 +663,8 @@ class SweepOrchestrator:
             str(exp_dir),
             "--agent_config",
             str(exp_dir / "agent_config.yaml"),
+            "--env_config",
+            str(exp_dir / "env_config.yaml"),
             f"hydra.run.dir={exp_dir}/hydra",
             "--seed",
             str(settings["seed"]),

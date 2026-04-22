@@ -142,6 +142,44 @@ os.environ["SO101_ENABLE_OVERHEAD_CAMERA"] = (
     "1" if (args_cli.num_videos > 0 and args_cli.record_overhead_cam) else "0"
 )
 
+# ── Resolve env-config contract from the run manifest BEFORE any so101_rl import ─
+# Reading the manifest here lets us set SO101_ENV_CONFIG (which is consumed at
+# module-import time by so101_lift_cube_env_cfg) and verify on-disk integrity
+# of every artifact in the experiment dir before any heavy initialisation.
+_experiment_path = Path(args_cli.experiment_path).resolve()
+if not _experiment_path.is_dir():
+    raise FileNotFoundError(
+        f"--experiment-path is not a directory: {_experiment_path}"
+    )
+
+# Local import so we can use the manifest before AppLauncher fires.
+# so101_rl is installed via `isaaclab.sh -p -m pip install -e ...` so this is
+# available even though we have not yet imported the heavy Isaac Lab modules.
+from so101_rl.run_manifest import RunManifest, MANIFEST_FILENAME  # noqa: E402
+
+_manifest_path = _experiment_path / MANIFEST_FILENAME
+if _manifest_path.is_file():
+    _manifest = RunManifest.load(_experiment_path)
+    _manifest.verify_against_disk(_experiment_path)
+    os.environ["SO101_ENV_CONFIG"] = str(_manifest.env_config_abs(_experiment_path))
+    print(f"[INFO] Loaded run manifest: {_manifest_path}")
+    print(f"[INFO] Manifest verified against disk (env_config + cnn_checkpoint hashes match).")
+else:
+    # Backward-compat fallback for experiments produced before the manifest
+    # contract.  Auto-detects env_config.yaml in the experiment dir; raises
+    # FileNotFoundError if absent.  This branch will be removed once the
+    # active sweep dirs have been re-trained.
+    _legacy_env_cfg = _experiment_path / "env_config.yaml"
+    if not _legacy_env_cfg.is_file():
+        raise FileNotFoundError(
+            f"Neither {_manifest_path} nor legacy env_config.yaml was found in "
+            f"{_experiment_path}.  This experiment dir is unusable for evaluation."
+        )
+    _manifest = None
+    os.environ["SO101_ENV_CONFIG"] = str(_legacy_env_cfg)
+    print(f"[WARNING] No run_manifest.json found at {_manifest_path}; falling back "
+          f"to legacy env_config.yaml auto-detect at {_legacy_env_cfg}.")
+
 # clear out sys.argv for Hydra
 sys.argv = [sys.argv[0]] + hydra_args
 # launch omniverse app
@@ -309,63 +347,88 @@ def main(
 ):
     """Evaluate skrl agent."""
 
-    # Parse experiment path
-    experiment_path = Path(args_cli.experiment_path).resolve()
-    if not experiment_path.exists():
-        raise FileNotFoundError(f"Experiment path not found: {experiment_path}")
-
+    # The experiment path was already resolved at module load time and the
+    # manifest was loaded into the module-level _manifest.  We re-bind here
+    # for clarity.
+    experiment_path = _experiment_path
     print(f"[INFO] Loading experiment from: {experiment_path}")
 
-    # Find checkpoint and task name
-    checkpoint_path, task_name_from_checkpoint = find_checkpoint_and_task(
-        experiment_path
-    )
-    print(f"[INFO] Found checkpoint: {checkpoint_path}")
-    print(f"[INFO] Task name from checkpoint: {task_name_from_checkpoint}")
-
-    # Ensure task name matches if provided
-    task_name = (
-        args_cli.task.split(":")[-1] if args_cli.task else task_name_from_checkpoint
-    )
-
-    # Load env_config.yaml if it exists
-    env_config_path = experiment_path / "env_config.yaml"
-    if env_config_path.exists():
-        print(f"[INFO] Found env_config.yaml: {env_config_path}")
-        # Set environment variable for the environment to load
-        os.environ["SO101_ENV_CONFIG"] = str(env_config_path)
+    # ── Resolve checkpoint and CNN-checkpoint via the manifest ─────────────
+    # When a manifest is present (the modern path), it is the single source of
+    # truth.  When absent (legacy experiment dirs), we fall back to filename
+    # auto-detect for one release cycle, and the existing helper functions
+    # below preserve the old contract.
+    if _manifest is not None:
+        checkpoint_path = _manifest.final_checkpoint_abs(experiment_path)
+        if not checkpoint_path.is_file():
+            raise FileNotFoundError(
+                f"Manifest names final checkpoint at {checkpoint_path} but the file "
+                f"is not present.  Manifest may be stale."
+            )
+        print(
+            f"[INFO] Using manifest-recorded final checkpoint: {checkpoint_path} "
+            f"(step {_manifest.final_checkpoint_step})"
+        )
     else:
-        print(f"[WARNING] No env_config.yaml found at {env_config_path}")
+        checkpoint_path, _ = find_checkpoint_and_task(experiment_path)
+        print(f"[INFO] Found checkpoint: {checkpoint_path}")
 
-    # Resolve CNN checkpoint for frozen_cnn experiments.
-    # Auto-detect the embedded cnn_checkpoint.pt copied into the experiment dir at training time.
-    # Without this the vision encoder initialises with random weights, producing garbage
-    # observations that cause the policy to output a constant action (the "static pose" bug).
-    embedded_cnn = experiment_path / "cnn_checkpoint.pt"
+    # Ensure task name matches if provided (kept for legacy callers).
+    task_name = (
+        args_cli.task.split(":")[-1] if args_cli.task else ""
+    )
+
+    # SO101_ENV_CONFIG was already set at module load time (manifest path or
+    # legacy fallback).  Confirm for the user.
+    print(f"[INFO] SO101_ENV_CONFIG = {os.environ.get('SO101_ENV_CONFIG')}")
+
+    # ── Wire CNN checkpoint into vision_encoder via the manifest ──────────
     vision_encoder = getattr(env_cfg, "vision_encoder", None)
     _is_frozen_cnn = (
         vision_encoder is not None
         and getattr(vision_encoder, "type", None) == "frozen_cnn"
     )
-    if embedded_cnn.is_file():
-        if not _is_frozen_cnn:
-            raise RuntimeError(
-                f"Found cnn_checkpoint.pt at {embedded_cnn} but env_cfg.vision_encoder.type "
-                f"is not 'frozen_cnn' (got {getattr(vision_encoder, 'type', None)!r}). "
-                f"Cannot safely wire the checkpoint — aborting."
-            )
-        env_cfg.vision_encoder.cnn_checkpoint = str(embedded_cnn)
-        print(f"[INFO] Auto-detected embedded CNN checkpoint: {embedded_cnn}")
+    if _manifest is not None:
+        cnn_ckpt = _manifest.cnn_checkpoint_abs(experiment_path)
+        if cnn_ckpt is not None:
+            if not _is_frozen_cnn:
+                raise RuntimeError(
+                    f"Manifest declares cnn_checkpoint at {cnn_ckpt} but env_cfg."
+                    f"vision_encoder.type is {getattr(vision_encoder, 'type', None)!r}, "
+                    f"not 'frozen_cnn'.  Cannot safely wire the checkpoint."
+                )
+            env_cfg.vision_encoder.cnn_checkpoint = str(cnn_ckpt)
+            print(f"[INFO] Wired CNN checkpoint from manifest: {cnn_ckpt}")
+        else:
+            if _is_frozen_cnn:
+                raise RuntimeError(
+                    "env_cfg.vision_encoder.type == 'frozen_cnn' but the manifest "
+                    "records no cnn_checkpoint.  Evaluation would run with random "
+                    "CNN weights — aborting."
+                )
+            print("[INFO] Manifest declares no CNN checkpoint (not a frozen_cnn experiment).")
     else:
-        if _is_frozen_cnn:
-            raise FileNotFoundError(
-                f"env_cfg.vision_encoder.type == 'frozen_cnn' but no cnn_checkpoint.pt found "
-                f"in experiment dir {experiment_path}. Evaluation would run with random CNN "
-                f"weights — aborting."
+        # Legacy fallback: original auto-detect behaviour.
+        embedded_cnn = experiment_path / "cnn_checkpoint.pt"
+        if embedded_cnn.is_file():
+            if not _is_frozen_cnn:
+                raise RuntimeError(
+                    f"Found cnn_checkpoint.pt at {embedded_cnn} but env_cfg.vision_encoder.type "
+                    f"is not 'frozen_cnn' (got {getattr(vision_encoder, 'type', None)!r}). "
+                    f"Cannot safely wire the checkpoint — aborting."
+                )
+            env_cfg.vision_encoder.cnn_checkpoint = str(embedded_cnn)
+            print(f"[INFO] Auto-detected embedded CNN checkpoint: {embedded_cnn}")
+        else:
+            if _is_frozen_cnn:
+                raise FileNotFoundError(
+                    f"env_cfg.vision_encoder.type == 'frozen_cnn' but no cnn_checkpoint.pt found "
+                    f"in experiment dir {experiment_path}. Evaluation would run with random CNN "
+                    f"weights — aborting."
+                )
+            print(
+                "[INFO] No embedded cnn_checkpoint.pt found in experiment dir (not a frozen_cnn experiment)."
             )
-        print(
-            "[INFO] No embedded cnn_checkpoint.pt found in experiment dir (not a frozen_cnn experiment)."
-        )
 
     # Override configurations for evaluation
     env_cfg.scene.num_envs = (

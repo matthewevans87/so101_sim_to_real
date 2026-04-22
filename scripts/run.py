@@ -391,6 +391,8 @@ def cmd_train(args) -> None:
         args.task,
         "--artifacts_dir",
         str(artifacts_dir),
+        "--env_config",
+        str(artifacts_dir / "env_config.yaml"),
         f"hydra.run.dir={artifacts_dir}/hydra",
     ]
     if args.headless:

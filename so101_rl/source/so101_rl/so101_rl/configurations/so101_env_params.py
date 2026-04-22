@@ -762,4 +762,28 @@ class So101EnvParams:
         if not isinstance(data, dict):
             raise TypeError("Top-level YAML must be a mapping.")
         print(f"[So101EnvParams] Loading from: {config_path}")
-        return _from_dict(cls, data)  # type: ignore[return-value]
+        params = _from_dict(cls, data)  # type: ignore[assignment]
+        params._validate_cross_field_invariants(config_path)
+        return params
+
+    def _validate_cross_field_invariants(self, config_path: Path) -> None:
+        """Cross-field invariants that single-dataclass validation cannot express.
+
+        The two lift-related thresholds live in different sections (so they
+        can be swept independently), but they have a fixed semantic ordering:
+        a cube must be 'lifted' (episode_stats.lift_height_threshold) before
+        it can be a 'success' (metrics.lift_phase.height_threshold).  A typo
+        in either is otherwise silent — caught here loudly.
+        """
+        lift_min = self.episode_stats.lift_height_threshold
+        lift_success = self.metrics.lift_phase.height_threshold
+        if not (0.0 < lift_min <= lift_success):
+            raise ValueError(
+                f"Invalid lift threshold ordering in {config_path}:\n"
+                f"  episode_stats.lift_height_threshold     = {lift_min} m  "
+                f"(any-lift detection)\n"
+                f"  metrics.lift_phase.height_threshold     = {lift_success} m  "
+                f"(success threshold)\n"
+                f"Required: 0 < episode_stats.lift_height_threshold "
+                f"<= metrics.lift_phase.height_threshold."
+            )
