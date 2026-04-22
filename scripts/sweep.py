@@ -863,16 +863,24 @@ class SweepOrchestrator:
             print()
 
     # ── summary generation ────────────────────────────────────────────────────
-    def generate_summary(self) -> None:
+    def generate_summary(
+        self,
+        eval_subdir: str = "evaluation",
+        out_suffix: str = "",
+    ) -> None:
         """
-        Read evaluation/results.json for each done experiment and write:
-          - sweep_dir/summary.json  (machine-readable)
-          - sweep_dir/summary.md    (human-readable Markdown table)
+        Read <eval_subdir>/results.json for each done experiment and write:
+          - sweep_dir/summary<out_suffix>.json  (machine-readable)
+          - sweep_dir/summary<out_suffix>.md    (human-readable Markdown table)
+
+        ``eval_subdir`` defaults to "evaluation" (the canonical eval output
+        directory).  Pass e.g. "evaluation_v2" together with out_suffix="_v2"
+        to render a side-by-side summary against a re-eval pass.
         """
         rows: List[Dict[str, Any]] = []
         for exp_name, info in self._state["experiments"].items():
             exp_dir = Path(info["exp_dir"])
-            results_path = exp_dir / "evaluation" / "results.json"
+            results_path = exp_dir / eval_subdir / "results.json"
             status = info["status"]
 
             row: Dict[str, Any] = {
@@ -960,7 +968,7 @@ class SweepOrchestrator:
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "experiments": rows,
         }
-        summary_json_path = self.sweep_dir / "summary.json"
+        summary_json_path = self.sweep_dir / f"summary{out_suffix}.json"
         with open(summary_json_path, "w") as f:
             json.dump(summary, f, indent=2)
         _success(f"Summary JSON: {summary_json_path}")
@@ -1065,7 +1073,7 @@ class SweepOrchestrator:
                 )
             lines.append("")
 
-        summary_md_path = self.sweep_dir / "summary.md"
+        summary_md_path = self.sweep_dir / f"summary{out_suffix}.md"
         with open(summary_md_path, "w") as f:
             f.write("\n".join(lines) + "\n")
         _success(f"Summary Markdown: {summary_md_path}")

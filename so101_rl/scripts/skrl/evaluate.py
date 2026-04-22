@@ -126,6 +126,16 @@ parser.add_argument(
     choices=["full", "basic"],
     help="Output verbosity for results.json (full includes step arrays).",
 )
+parser.add_argument(
+    "--eval-subdir",
+    type=str,
+    default="evaluation",
+    help=(
+        "Subdirectory under the experiment directory where eval outputs "
+        "(results.json, videos) are written.  Override (e.g. 'evaluation_v2') "
+        "to re-evaluate without overwriting a prior eval."
+    ),
+)
 
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
@@ -461,8 +471,15 @@ def main(
     experiment_cfg["seed"] = _eval_seed
     env_cfg.seed = _eval_seed
 
-    # Create evaluation output directory
-    eval_dir = experiment_path / "evaluation"
+    # Create evaluation output directory.  The subdir is configurable so a
+    # re-evaluation pass (e.g. with an updated eval pipeline) can be written
+    # alongside the original results without clobbering them.
+    _eval_subdir = args_cli.eval_subdir
+    if not _eval_subdir or "/" in _eval_subdir or _eval_subdir.startswith("."):
+        raise ValueError(
+            f"--eval-subdir must be a single non-empty directory name (got {_eval_subdir!r})"
+        )
+    eval_dir = experiment_path / _eval_subdir
     eval_dir.mkdir(parents=True, exist_ok=True)
     print(f"[INFO] Evaluation results will be saved to: {eval_dir}")
 
