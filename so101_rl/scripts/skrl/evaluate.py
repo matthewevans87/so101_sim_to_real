@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any
 
 import cv2
+import math
 import numpy as np
 import torch
 from statistics import StatisticsError, mode
@@ -50,9 +51,6 @@ parser.add_argument(
 )
 parser.add_argument(
     "--task", type=str, default=None, help="Name of the task (e.g., So101-LiftCube-v0)."
-)
-parser.add_argument(
-    "--seed", type=int, default=42, help="Seed used for the environment"
 )
 parser.add_argument(
     "--ml_framework",
@@ -179,6 +177,12 @@ else:
     os.environ["SO101_ENV_CONFIG"] = str(_legacy_env_cfg)
     print(f"[WARNING] No run_manifest.json found at {_manifest_path}; falling back "
           f"to legacy env_config.yaml auto-detect at {_legacy_env_cfg}.")
+
+# Eval seed: always equals the training seed from the manifest for reproducibility.
+# Legacy experiments (no manifest) fall back to seed=42 with a warning.
+_eval_seed: int = _manifest.seed if _manifest is not None else 42
+if _manifest is None:
+    print("[WARNING] No manifest — using fallback seed=42. Eval reproducibility not guaranteed.")
 
 # clear out sys.argv for Hydra
 sys.argv = [sys.argv[0]] + hydra_args
@@ -353,6 +357,13 @@ def main(
     experiment_path = _experiment_path
     print(f"[INFO] Loading experiment from: {experiment_path}")
 
+    # Seed all RNGs to match training conditions for deterministic DR sampling.
+    random.seed(_eval_seed)
+    np.random.seed(_eval_seed)
+    torch.manual_seed(_eval_seed)
+    torch.cuda.manual_seed_all(_eval_seed)
+    print(f"[INFO] Seeded RNG (training seed={_eval_seed})")
+
     # ── Resolve checkpoint and CNN-checkpoint via the manifest ─────────────
     # When a manifest is present (the modern path), it is the single source of
     # truth.  When absent (legacy experiment dirs), we fall back to filename
@@ -442,9 +453,9 @@ def main(
     if args_cli.ml_framework.startswith("jax"):
         skrl.config.jax.backend = "jax" if args_cli.ml_framework == "jax" else "numpy"
 
-    # Set seed
-    experiment_cfg["seed"] = args_cli.seed
-    env_cfg.seed = experiment_cfg["seed"]
+    # Set seed — always use the training seed from the manifest.
+    experiment_cfg["seed"] = _eval_seed
+    env_cfg.seed = _eval_seed
 
     # Create evaluation output directory
     eval_dir = experiment_path / "evaluation"
@@ -518,6 +529,8 @@ def main(
     NUM_EPISODES = args_cli.num_episodes
     NUM_VIDEO_EPISODES = args_cli.num_videos
     num_envs = env_cfg.scene.num_envs
+    episodes_per_env = math.ceil(NUM_EPISODES / num_envs)
+    actual_episodes = episodes_per_env * num_envs
     # In "basic" mode per-step trace is not written to JSON.  We skip the per-step
     # dict allocation and the episode-end re-scan by maintaining per-key value lists
     # directly.  In "full" mode we additionally build the step trace as before.
@@ -528,12 +541,13 @@ def main(
     all_episode_stats: list[dict] = []  # drained from EpisodeStatsPipeline each step
     completed_episodes = 0
     recorded_episodes = 0
-    # Per-cause termination counts keyed by reason name (e.g. "time_out",
-    # "success_lift_fraction_terminal").  Built from Termination/* keys in
-    # extras_per_env_log at the step each episode ends.  Multiple reasons can
-    # fire simultaneously (e.g. success on the final step triggers both the
-    # success terminal and time_out), so counts may sum to > NUM_EPISODES.
-    termination_counts: dict[str, int] = {}
+    env_episodes_done = [0] * num_envs
+    # Raw per-flag termination counts (may sum > actual_episodes when multiple
+    # reasons fire simultaneously, e.g. success on the final timeout step).
+    termination_flag_counts: dict[str, int] = {}
+    # Primary-cause counts: each episode contributes exactly 1 entry.
+    # Precedence: success > other terminal > time_out.
+    termination_primary_counts: dict[str, int] = {}
 
     global_step_values: dict[str, list[float]] = {}
     global_reward_values: dict[str, list[float]] = {}
@@ -568,7 +582,10 @@ def main(
     # reset environment
     obs, info = env.reset()
 
-    print(f"[INFO] Starting evaluation: {NUM_EPISODES} episodes across {num_envs} envs")
+    print(
+        f"[INFO] Starting evaluation: {actual_episodes} episodes across {num_envs} envs "
+        f"({episodes_per_env} per env, requested={NUM_EPISODES})"
+    )
     _active_cams = [
         c
         for c, flag in [
@@ -589,8 +606,8 @@ def main(
         )
 
     # Run evaluation
-    progress = tqdm(total=NUM_EPISODES, desc="Evaluating", unit="episode")
-    while simulation_app.is_running() and completed_episodes < NUM_EPISODES:
+    progress = tqdm(total=actual_episodes, desc="Evaluating", unit="episode")
+    while simulation_app.is_running() and not all(c >= episodes_per_env for c in env_episodes_done):
         # Run inference
         with torch.inference_mode():
             # agent stepping
@@ -677,6 +694,7 @@ def main(
                 and (args_cli.record_wrist_cam or args_cli.record_overhead_cam)
                 and episode_steps[env_idx] == 0
                 and not record_active[env_idx]
+                and env_episodes_done[env_idx] < episodes_per_env
             ):
                 available_slots = (
                     NUM_VIDEO_EPISODES - recorded_episodes - active_record_count
@@ -774,62 +792,81 @@ def main(
             done_flag = bool(done_np[env_idx])
 
             if done_flag:
-                # Record which termination reason(s) fired for this env this step.
-                for key, arr in extras_np.items():
-                    if key.startswith("Termination/"):
-                        val = float(arr[env_idx]) if _is_per_env else float(arr)
-                        if val > 0.5:
-                            cause = key[len("Termination/") :]
-                            termination_counts[cause] = (
-                                termination_counts.get(cause, 0) + 1
-                            )
+                _within_budget = env_episodes_done[env_idx] < episodes_per_env
 
-                current_episode_metrics[env_idx]["episode_length"] = episode_steps[
-                    env_idx
-                ]
-                episode_entry = current_episode_metrics[env_idx].copy()
+                if _within_budget:
+                    # Collect termination flags and determine primary cause.
+                    _ep_term_flags: list[str] = []
+                    for key, arr in extras_np.items():
+                        if key.startswith("Termination/"):
+                            val = float(arr[env_idx]) if _is_per_env else float(arr)
+                            if val > 0.5:
+                                cause = key[len("Termination/"):]
+                                _ep_term_flags.append(cause)
+                                termination_flag_counts[cause] = termination_flag_counts.get(cause, 0) + 1
+                    # Primary cause: success > other terminal > time_out
+                    if _ep_term_flags:
+                        _success_causes = [c for c in _ep_term_flags if "success" in c.lower()]
+                        if _success_causes:
+                            _primary = _success_causes[0]
+                        else:
+                            _non_timeout = [c for c in _ep_term_flags if c != "time_out"]
+                            _primary = _non_timeout[0] if _non_timeout else "time_out"
+                        termination_primary_counts[_primary] = termination_primary_counts.get(_primary, 0) + 1
 
-                # Use the directly-accumulated per-key lists — no re-scan of step dicts.
-                sv = step_lists[env_idx]
-                rv = reward_lists[env_idx]
+                    current_episode_metrics[env_idx]["episode_length"] = episode_steps[
+                        env_idx
+                    ]
+                    episode_entry = current_episode_metrics[env_idx].copy()
 
-                episode_entry["metrics"] = {
-                    key: _summary_for_values(values) for key, values in sv.items()
-                }
-                episode_entry["rewards"] = {
-                    key: _summary_for_values(values) for key, values in rv.items()
-                }
+                    # Use the directly-accumulated per-key lists — no re-scan of step dicts.
+                    sv = step_lists[env_idx]
+                    rv = reward_lists[env_idx]
 
-                for key, values in sv.items():
-                    global_step_values.setdefault(key, []).extend(values)
-                for key, values in rv.items():
-                    global_reward_values.setdefault(key, []).extend(values)
+                    episode_entry["metrics"] = {
+                        key: _summary_for_values(values) for key, values in sv.items()
+                    }
+                    episode_entry["rewards"] = {
+                        key: _summary_for_values(values) for key, values in rv.items()
+                    }
 
-                for key, ep_summary in episode_entry["metrics"].items():
-                    global_step_summaries.setdefault(key, []).append(ep_summary)
-                for key, ep_summary in episode_entry["rewards"].items():
-                    global_reward_summaries.setdefault(key, []).append(ep_summary)
+                    for key, values in sv.items():
+                        global_step_values.setdefault(key, []).extend(values)
+                    for key, values in rv.items():
+                        global_reward_values.setdefault(key, []).extend(values)
 
-                if args_cli.verbosity == "basic":
-                    episode_entry.pop("steps", None)
+                    for key, ep_summary in episode_entry["metrics"].items():
+                        global_step_summaries.setdefault(key, []).append(ep_summary)
+                    for key, ep_summary in episode_entry["rewards"].items():
+                        global_reward_summaries.setdefault(key, []).append(ep_summary)
 
-                all_episode_data.append(episode_entry)
-                completed_episodes += 1
-                progress.update(1)
+                    if args_cli.verbosity == "basic":
+                        episode_entry.pop("steps", None)
 
-                if record_active[env_idx]:
-                    wrist_writer = wrist_writers.pop(env_idx, None)
-                    overhead_writer = overhead_writers.pop(env_idx, None)
-                    if wrist_writer is not None:
-                        wrist_writer.release()
-                    if overhead_writer is not None:
-                        overhead_writer.release()
-                    record_active[env_idx] = False
-                    recorded_episodes += 1
-                    print(
-                        f"[INFO] Saved camera videos for env {env_idx} episode {episode_counts[env_idx]}"
-                    )
+                    all_episode_data.append(episode_entry)
+                    env_episodes_done[env_idx] += 1
+                    completed_episodes = sum(env_episodes_done)
+                    progress.update(1)
 
+                    if record_active[env_idx]:
+                        wrist_writer = wrist_writers.pop(env_idx, None)
+                        overhead_writer = overhead_writers.pop(env_idx, None)
+                        if wrist_writer is not None:
+                            wrist_writer.release()
+                        if overhead_writer is not None:
+                            overhead_writer.release()
+                        record_active[env_idx] = False
+                        recorded_episodes += 1
+                        print(
+                            f"[INFO] Saved camera videos for env {env_idx} episode {episode_counts[env_idx]}"
+                        )
+
+                    if completed_episodes % 10 == 0:
+                        print(
+                            f"[INFO] Completed {completed_episodes}/{actual_episodes} episodes"
+                        )
+
+                # Always reset per-env state so the env continues running cleanly.
                 episode_counts[env_idx] += 1
                 episode_steps[env_idx] = 0
                 # Reset per-key accumulators for the next episode.
@@ -843,14 +880,6 @@ def main(
                     "episode_length": 0,
                 }
 
-                if completed_episodes % 10 == 0:
-                    print(
-                        f"[INFO] Completed {completed_episodes}/{NUM_EPISODES} episodes"
-                    )
-
-                if completed_episodes >= NUM_EPISODES:
-                    break
-
         # Drain EpisodeStatsPipeline after every env step (outside env loop).
         # get_completed_episodes() clears its buffer, so calling once per step
         # is both correct and cheap.
@@ -860,10 +889,10 @@ def main(
     progress.close()
     print(f"[INFO] Evaluation complete: {completed_episodes} episodes")
 
-    # Trim all_episode_stats to NUM_EPISODES to match all_episode_data's denominator.
-    # The pipeline drain runs after the per-env break and can capture up to
-    # num_envs-1 extra episodes from the same step.
-    all_episode_stats = all_episode_stats[:NUM_EPISODES]
+    # Trim pipeline stats to recorded-episode count.  With per-env budgets,
+    # the pipeline may capture a few extra episodes from envs that continued
+    # running after another env completed its final budget episode.
+    all_episode_stats = all_episode_stats[:len(all_episode_data)]
 
     # Compute summary statistics
     episode_rewards = [ep["total_reward"] for ep in all_episode_data]
@@ -894,21 +923,23 @@ def main(
                 np.mean([e["cube_bump"] for e in all_episode_stats])
             ),
             "mean_time_to_lift": float(np.mean(lift_steps)) if lift_steps else None,
-            # Per-cause breakdown.  Counts may sum to > n_episodes when multiple
-            # reasons fire on the same step (e.g. success on the last timeout step).
-            "termination_counts": dict(sorted(termination_counts.items())),
         }
     else:
         episode_stats_block = None
 
     summary = {
         "num_envs": num_envs,
+        "requested_episodes": NUM_EPISODES,
+        "episodes_per_env": episodes_per_env,
+        "actual_episodes": actual_episodes,
         "num_episodes": len(all_episode_data),
-        "requested_num_episodes": NUM_EPISODES,
         "verbosity": args_cli.verbosity,
         "checkpoint_path": str(checkpoint_path),
+        "checkpoint_step": _manifest.final_checkpoint_step if _manifest is not None else None,
         "task_name": task_name,
-        "seed": args_cli.seed,
+        "training_seed": _eval_seed,
+        "termination_flag_counts": dict(sorted(termination_flag_counts.items())),
+        "termination_primary_counts": dict(sorted(termination_primary_counts.items())),
         "metrics_summary": {
             key: _global_summary_for_key(values, global_step_summaries.get(key, []))
             for key, values in global_step_values.items()
@@ -953,21 +984,28 @@ def main(
         print(
             f"  mean_time_to_lift: {f'{ttl:.1f} steps' if ttl is not None else 'n/a (no lifts)'}"
         )
-        tc = episode_stats_block["termination_counts"]
-        if tc:
-            print(
-                f"[INFO] Termination causes ({episode_stats_block['n_episodes']} episodes, may sum > 100%):"
-            )
-            for cause, count in sorted(tc.items(), key=lambda kv: -kv[1]):
-                print(
-                    f"  {cause:<45s} {count:>6d}  ({count / episode_stats_block['n_episodes'] * 100:.1f}%)"
-                )
-        else:
-            print(
-                "[WARNING] No termination causes recorded (Termination/* keys absent from extras)"
-            )
     else:
         print("[WARNING] No episode stats collected (EpisodeStatsPipeline unavailable)")
+    if termination_flag_counts:
+        print(
+            f"[INFO] Termination causes ({completed_episodes} episodes, may sum > 100%):"
+        )
+        for cause, count in sorted(termination_flag_counts.items(), key=lambda kv: -kv[1]):
+            print(
+                f"  {cause:<45s} {count:>6d}  ({count / completed_episodes * 100:.1f}%)"
+            )
+        if termination_primary_counts:
+            print(
+                f"[INFO] Primary termination causes ({completed_episodes} episodes, sums to 100%):"
+            )
+            for cause, count in sorted(termination_primary_counts.items(), key=lambda kv: -kv[1]):
+                print(
+                    f"  {cause:<45s} {count:>6d}  ({count / completed_episodes * 100:.1f}%)"
+                )
+    else:
+        print(
+            "[WARNING] No termination causes recorded (Termination/* keys absent from extras)"
+        )
 
     # close the simulator
     env.close()
