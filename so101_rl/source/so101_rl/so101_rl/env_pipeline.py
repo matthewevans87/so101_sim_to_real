@@ -44,7 +44,6 @@ from so101_rl.metric_pipeline import (
 )
 from so101_rl.reward_pipeline import (
     RewardStep,
-    TerminalRewardStep,
     RewardPipeline,
     DistanceRewardStep,
     GripCubeRewardStep,
@@ -70,6 +69,13 @@ from so101_rl.reward_pipeline import (
     GoalZoneDistanceRewardStep,
     build_reward_pipeline,
     validate_gate_metrics,
+)
+from so101_rl.termination_pipeline import (
+    TerminationCondition,
+    TerminationPipeline,
+    MetricThresholdTerminationCondition,
+    build_termination_pipeline,
+    validate_termination_gate_metrics,
 )
 from so101_rl.dr_pipeline import (
     DRContext,
@@ -129,7 +135,6 @@ __all__ = [
     "build_metric_pipeline",
     # Reward pipeline
     "RewardStep",
-    "TerminalRewardStep",
     "RewardPipeline",
     "DistanceRewardStep",
     "GripCubeRewardStep",
@@ -155,6 +160,12 @@ __all__ = [
     "GoalZoneDistanceRewardStep",
     "build_reward_pipeline",
     "validate_gate_metrics",
+    # Termination pipeline
+    "TerminationCondition",
+    "TerminationPipeline",
+    "MetricThresholdTerminationCondition",
+    "build_termination_pipeline",
+    "validate_termination_gate_metrics",
     # DR pipeline
     "DRStep",
     "DRPipeline",

@@ -54,11 +54,14 @@ from so101_rl.env_pipeline import (
     StepContext,
     MetricPipeline,
     RewardPipeline,
+    TerminationPipeline,
     build_dr_pipeline,
     build_env_metric_pipeline,
     build_metric_pipeline,
     build_reward_pipeline,
+    build_termination_pipeline,
     validate_gate_metrics,
+    validate_termination_gate_metrics,
     KEY_OBS_DIMS,
     EpisodeStatsPipeline,
 )
@@ -179,6 +182,9 @@ class So101LiftCube(DirectRLEnv):
 
         self._step_ctx = StepContext(env=self)
         self.reward_pipeline: RewardPipeline = build_reward_pipeline(self.cfg)
+        self.termination_pipeline: TerminationPipeline = build_termination_pipeline(
+            self.cfg
+        )
         self.env_metric_pipeline: EnvMetricPipeline = build_env_metric_pipeline(
             self.cfg
         )
@@ -199,12 +205,19 @@ class So101LiftCube(DirectRLEnv):
                     *self.cfg.observations.telemetry_metrics,
                     # consumed by episode_stats_pipeline
                     *EpisodeStatsPipeline.required_metric_keys,
+                    # consumed by termination_pipeline gates
+                    *self.termination_pipeline.required_metric_keys,
                 }
             ),
             env_metric_pipeline=self.env_metric_pipeline,
         )
         validate_gate_metrics(
             self.reward_pipeline, self.metric_pipeline, self.env_metric_pipeline
+        )
+        validate_termination_gate_metrics(
+            self.termination_pipeline,
+            self.metric_pipeline,
+            self.env_metric_pipeline,
         )
         self.dr_pipeline: DRPipeline = build_dr_pipeline(self.cfg)
         _dr_feed = self.cfg.domain_randomization.camera.feed
@@ -579,12 +592,12 @@ class So101LiftCube(DirectRLEnv):
         # Episode timeout
         time_out = self.episode_length_buf >= self.max_episode_length - 1
 
-        terminal = self.reward_pipeline.get_dones(self._step_ctx)
+        terminal = self.termination_pipeline.get_dones(self._step_ctx)
 
         # Log per-reason termination signals for TensorBoard diagnostics.
         self.extras["log"]["Termination/time_out"] = time_out.float().mean()
         self.extras["per_env_log"]["Termination/time_out"] = time_out.float()
-        for name, flags in self.reward_pipeline.get_done_reasons(
+        for name, flags in self.termination_pipeline.get_done_reasons(
             self._step_ctx
         ).items():
             self.extras["log"][f"Termination/{name}"] = flags.mean()
@@ -658,6 +671,7 @@ class So101LiftCube(DirectRLEnv):
 
         # Clear fire_once state for reset envs so terminal steps can fire again.
         self.reward_pipeline.reset_idx(env_ids)
+        self.termination_pipeline.reset_idx(env_ids)
 
     def _compute_step_metrics(self) -> None:
         """Compute custom metrics at each step for logging purposes."""

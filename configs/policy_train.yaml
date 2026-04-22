@@ -156,7 +156,6 @@ rewards:
   - type: approach_phase_terminal
     enabled: true
     scale: 500.0
-    terminate: false
     fire_once: true
 
   # GRASP
@@ -185,7 +184,6 @@ rewards:
   - type: grasp_phase_terminal
     enabled: true
     scale: 500.0
-    terminate: false
     fire_once: true
         
   # LIFT
@@ -212,10 +210,10 @@ rewards:
         gte: 0.7
 
   - type: static
+    id: success_terminal
     enabled: true
     scale: 1000.0
     fire_once: true
-    terminate: true
     gates:
       - metric: cube_lift_fraction
         gte: 1.0
@@ -269,6 +267,40 @@ rewards:
   - type: safety_touch_table_terminal
     enabled: true
     scale: 0.0
+
+
+# ===========================================================================
+# Termination conditions
+# ---------------------------------------------------------------------------
+# Each entry produces a TerminationCondition that ends the episode when its
+# gates evaluate True for an env on a step.  Termination is fully decoupled
+# from rewards: reward shaping that should accompany an end-of-episode event
+# is configured separately above (typically with `fire_once: true` and the
+# same gates).  Exactly one enabled entry must declare `is_success: true` so
+# the eval pipeline can classify the primary termination cause without
+# string-matching reward names.
+# ===========================================================================
+terminations:
+  - id: success_lift_fraction_terminal
+    enabled: true
+    is_success: true
+    gates:
+      - metric: cube_lift_fraction
+        gte: 1.0
+
+  - id: cube_out_of_range_terminal
+    enabled: true
+    is_success: false
+    gates:
+      - metric: is_cube_out_of_range
+        gte: 0.5
+
+  - id: safety_touch_table_terminal
+    enabled: true
+    is_success: false
+    gates:
+      - metric: is_table_touched
+        gte: 0.5
 
 
 domain_randomization:

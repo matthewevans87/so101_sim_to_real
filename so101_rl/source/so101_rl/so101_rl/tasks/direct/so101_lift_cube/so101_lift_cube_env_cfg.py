@@ -191,6 +191,7 @@ class So101LiftCubeCfg(DirectRLEnvCfg):
     metrics = _Y.metrics
     episode_stats: EpisodeStatsCfg = _Y.episode_stats
     rewards = _Y.rewards
+    terminations = _Y.terminations
     domain_randomization = _Y.domain_randomization
     observations = _Y.observations
     vision_encoder = _Y.vision_encoder
