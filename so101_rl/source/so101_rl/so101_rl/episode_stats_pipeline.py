@@ -341,6 +341,7 @@ class EpisodeStatsPipeline:
 
         Each dict contains:
 
+        * ``"env_idx"``      — int: index of the environment that produced this episode.
         * ``"lifted"``       — bool: cube reached lift threshold this episode.
         * ``"dropped"``      — bool: cube was lifted then dropped back to table.
         * ``"success"``      — bool: episode ended with a successful lift terminal.
@@ -394,6 +395,7 @@ class EpisodeStatsPipeline:
 
         self._completed_episodes.append(
             {
+                "env_idx": int(env_idx),
                 "lifted": lifted,
                 "dropped": dropped,
                 "success": success,

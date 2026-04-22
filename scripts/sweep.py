@@ -892,6 +892,10 @@ class SweepOrchestrator:
                 "success_rate": None,
                 "mean_cube_bump": None,
                 "mean_time_to_lift": None,
+                # termination causes (from results.json — Phase B)
+                "success_termination_id": None,
+                "termination_primary_counts": None,
+                "termination_flag_counts": None,
                 # training milestones (from milestones.json; env_transitions at first event)
                 "milestone_first_approach": None,
                 "milestone_first_grasp": None,
@@ -915,6 +919,15 @@ class SweepOrchestrator:
                     row["success_rate"] = es.get("success_rate")
                     row["mean_cube_bump"] = es.get("mean_cube_bump")
                     row["mean_time_to_lift"] = es.get("mean_time_to_lift")
+                    row["success_termination_id"] = results.get(
+                        "success_termination_id"
+                    )
+                    row["termination_primary_counts"] = results.get(
+                        "termination_primary_counts"
+                    )
+                    row["termination_flag_counts"] = results.get(
+                        "termination_flag_counts"
+                    )
                 except (json.JSONDecodeError, OSError) as exc:
                     _error(f"Could not read results for '{exp_name}': {exc}")
 
@@ -1025,6 +1038,23 @@ class SweepOrchestrator:
                     f"- Eval stats: lift {_pct(r['lift_rate'])} | drop {_pct(r['drop_rate'])} "
                     f"| success {_pct(r['success_rate'])} | bump {_fmt(r['mean_cube_bump'], 4)} "
                     f"| time_to_lift {_fmt(r['mean_time_to_lift'], 1)}"
+                )
+            if r["termination_primary_counts"]:
+                _total = sum(r["termination_primary_counts"].values()) or 1
+                _parts = ", ".join(
+                    f"{cause} {count} ({count / _total * 100:.1f}%)"
+                    for cause, count in sorted(
+                        r["termination_primary_counts"].items(),
+                        key=lambda kv: -kv[1],
+                    )
+                )
+                _success_marker = (
+                    f" (success={r['success_termination_id']})"
+                    if r.get("success_termination_id")
+                    else ""
+                )
+                lines.append(
+                    f"- Primary termination causes{_success_marker}: {_parts}"
                 )
             if r["milestone_first_approach"] is not None:
                 lines.append(

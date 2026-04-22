@@ -146,9 +146,7 @@ os.environ["SO101_ENABLE_OVERHEAD_CAMERA"] = (
 # of every artifact in the experiment dir before any heavy initialisation.
 _experiment_path = Path(args_cli.experiment_path).resolve()
 if not _experiment_path.is_dir():
-    raise FileNotFoundError(
-        f"--experiment-path is not a directory: {_experiment_path}"
-    )
+    raise FileNotFoundError(f"--experiment-path is not a directory: {_experiment_path}")
 
 # Local import so we can use the manifest before AppLauncher fires.
 # so101_rl is installed via `isaaclab.sh -p -m pip install -e ...` so this is
@@ -161,7 +159,9 @@ if _manifest_path.is_file():
     _manifest.verify_against_disk(_experiment_path)
     os.environ["SO101_ENV_CONFIG"] = str(_manifest.env_config_abs(_experiment_path))
     print(f"[INFO] Loaded run manifest: {_manifest_path}")
-    print(f"[INFO] Manifest verified against disk (env_config + cnn_checkpoint hashes match).")
+    print(
+        f"[INFO] Manifest verified against disk (env_config + cnn_checkpoint hashes match)."
+    )
 else:
     # Backward-compat fallback for experiments produced before the manifest
     # contract.  Auto-detects env_config.yaml in the experiment dir; raises
@@ -175,14 +175,18 @@ else:
         )
     _manifest = None
     os.environ["SO101_ENV_CONFIG"] = str(_legacy_env_cfg)
-    print(f"[WARNING] No run_manifest.json found at {_manifest_path}; falling back "
-          f"to legacy env_config.yaml auto-detect at {_legacy_env_cfg}.")
+    print(
+        f"[WARNING] No run_manifest.json found at {_manifest_path}; falling back "
+        f"to legacy env_config.yaml auto-detect at {_legacy_env_cfg}."
+    )
 
 # Eval seed: always equals the training seed from the manifest for reproducibility.
 # Legacy experiments (no manifest) fall back to seed=42 with a warning.
 _eval_seed: int = _manifest.seed if _manifest is not None else 42
 if _manifest is None:
-    print("[WARNING] No manifest — using fallback seed=42. Eval reproducibility not guaranteed.")
+    print(
+        "[WARNING] No manifest — using fallback seed=42. Eval reproducibility not guaranteed."
+    )
 
 # clear out sys.argv for Hydra
 sys.argv = [sys.argv[0]] + hydra_args
@@ -385,9 +389,7 @@ def main(
         print(f"[INFO] Found checkpoint: {checkpoint_path}")
 
     # Ensure task name matches if provided (kept for legacy callers).
-    task_name = (
-        args_cli.task.split(":")[-1] if args_cli.task else ""
-    )
+    task_name = args_cli.task.split(":")[-1] if args_cli.task else ""
 
     # SO101_ENV_CONFIG was already set at module load time (manifest path or
     # legacy fallback).  Confirm for the user.
@@ -417,7 +419,9 @@ def main(
                     "records no cnn_checkpoint.  Evaluation would run with random "
                     "CNN weights — aborting."
                 )
-            print("[INFO] Manifest declares no CNN checkpoint (not a frozen_cnn experiment).")
+            print(
+                "[INFO] Manifest declares no CNN checkpoint (not a frozen_cnn experiment)."
+            )
     else:
         # Legacy fallback: original auto-detect behaviour.
         embedded_cnn = experiment_path / "cnn_checkpoint.pt"
@@ -521,9 +525,29 @@ def main(
     if _episode_stats_pipeline is not None:
         print("[INFO] EpisodeStatsPipeline found — will collect episode stats")
     else:
-        print(
-            "[WARNING] EpisodeStatsPipeline not found — episode stats will not be collected"
+        raise RuntimeError(
+            "EpisodeStatsPipeline not found on env.unwrapped — eval requires "
+            "per-episode stats to enforce 1 episode = 1 data point invariants."
         )
+
+    # Termination pipeline: required for primary-cause classification.
+    # success_condition_log_name is the canonical id of the (single) is_success
+    # termination condition; replaces the previous "success" string-match.
+    _termination_pipeline = getattr(env.unwrapped, "termination_pipeline", None)
+    if _termination_pipeline is None:
+        raise RuntimeError(
+            "termination_pipeline not found on env.unwrapped — eval requires "
+            "the Phase A termination pipeline to classify primary termination "
+            "causes without name matching."
+        )
+    _success_log_name: str = _termination_pipeline.success_condition_log_name
+    if not _success_log_name:
+        raise RuntimeError(
+            "termination_pipeline.success_condition_log_name is empty; eval "
+            "cannot classify primary termination cause.  Ensure exactly one "
+            "termination condition declares is_success=true."
+        )
+    print(f"[INFO] Success termination condition: {_success_log_name!r}")
 
     # Evaluation parameters
     NUM_EPISODES = args_cli.num_episodes
@@ -607,7 +631,9 @@ def main(
 
     # Run evaluation
     progress = tqdm(total=actual_episodes, desc="Evaluating", unit="episode")
-    while simulation_app.is_running() and not all(c >= episodes_per_env for c in env_episodes_done):
+    while simulation_app.is_running() and not all(
+        c >= episodes_per_env for c in env_episodes_done
+    ):
         # Run inference
         with torch.inference_mode():
             # agent stepping
@@ -801,18 +827,25 @@ def main(
                         if key.startswith("Termination/"):
                             val = float(arr[env_idx]) if _is_per_env else float(arr)
                             if val > 0.5:
-                                cause = key[len("Termination/"):]
+                                cause = key[len("Termination/") :]
                                 _ep_term_flags.append(cause)
-                                termination_flag_counts[cause] = termination_flag_counts.get(cause, 0) + 1
-                    # Primary cause: success > other terminal > time_out
+                                termination_flag_counts[cause] = (
+                                    termination_flag_counts.get(cause, 0) + 1
+                                )
+                    # Primary cause: declared-success > other terminal > time_out.
+                    # The success cause is identified by its TerminationCfg.id
+                    # (TerminationCondition.log_name), not by name matching.
                     if _ep_term_flags:
-                        _success_causes = [c for c in _ep_term_flags if "success" in c.lower()]
-                        if _success_causes:
-                            _primary = _success_causes[0]
+                        if _success_log_name in _ep_term_flags:
+                            _primary = _success_log_name
                         else:
-                            _non_timeout = [c for c in _ep_term_flags if c != "time_out"]
+                            _non_timeout = [
+                                c for c in _ep_term_flags if c != "time_out"
+                            ]
                             _primary = _non_timeout[0] if _non_timeout else "time_out"
-                        termination_primary_counts[_primary] = termination_primary_counts.get(_primary, 0) + 1
+                        termination_primary_counts[_primary] = (
+                            termination_primary_counts.get(_primary, 0) + 1
+                        )
 
                     current_episode_metrics[env_idx]["episode_length"] = episode_steps[
                         env_idx
@@ -889,55 +922,112 @@ def main(
     progress.close()
     print(f"[INFO] Evaluation complete: {completed_episodes} episodes")
 
-    # Trim pipeline stats to recorded-episode count.  With per-env budgets,
-    # the pipeline may capture a few extra episodes from envs that continued
-    # running after another env completed its final budget episode.
-    all_episode_stats = all_episode_stats[:len(all_episode_data)]
+    # ── Single source of truth: per-episode unified records ────────────────
+    # Both ``all_episode_data`` (filled at done from per-env reward
+    # accumulators) and ``all_episode_stats`` (drained from
+    # EpisodeStatsPipeline) are appended in global completion order.  With
+    # the per-env episode budget, the pipeline drain may include a small
+    # number of extra episodes from envs that continued running after
+    # other envs hit their budget.  We bucket pipeline stats by ``env_idx``,
+    # truncate each bucket to the budget, and join positionally with the
+    # corresponding ``all_episode_data`` entries (which are budget-bounded
+    # at append time).
+    stats_by_env: dict[int, list[dict]] = {i: [] for i in range(num_envs)}
+    for s in all_episode_stats:
+        stats_by_env[int(s["env_idx"])].append(s)
 
-    # Compute summary statistics
-    episode_rewards = [ep["total_reward"] for ep in all_episode_data]
-    episode_lengths = [ep["episode_length"] for ep in all_episode_data]
+    for i in range(num_envs):
+        if len(stats_by_env[i]) < episodes_per_env:
+            raise RuntimeError(
+                f"EpisodeStatsPipeline drained only {len(stats_by_env[i])} "
+                f"episodes for env {i}, but the budget required "
+                f"{episodes_per_env}.  Pipeline drain order is broken or the "
+                f"eval loop exited early."
+            )
+        # Drop overflow past the budget.
+        stats_by_env[i] = stats_by_env[i][:episodes_per_env]
 
-    # Compute episode stats from EpisodeStatsPipeline drain
-    if all_episode_stats:
-        n_eps = len(all_episode_stats)
-        n_lifted = sum(1 for e in all_episode_stats if e["lifted"])
-        n_dropped = sum(1 for e in all_episode_stats if e["dropped"])
-        n_success = sum(1 for e in all_episode_stats if e["success"])
-        n_timed_out = sum(1 for e in all_episode_stats if e["timed_out"])
-        lift_steps = [
-            e["lift_step"]
-            for e in all_episode_stats
-            if e["lifted"] and e["lift_step"] is not None
-        ]
-        episode_stats_block: dict = {
-            "n_episodes": n_eps,
-            "n_lifted": n_lifted,
-            "n_dropped": n_dropped,
-            "n_success": n_success,
-            "n_timed_out": n_timed_out,
-            "lift_rate": n_lifted / n_eps,
-            "drop_rate": n_dropped / n_eps,
-            "success_rate": n_success / n_eps,
-            "mean_cube_bump": float(
-                np.mean([e["cube_bump"] for e in all_episode_stats])
-            ),
-            "mean_time_to_lift": float(np.mean(lift_steps)) if lift_steps else None,
-        }
-    else:
-        episode_stats_block = None
+    # Hard invariants — 1 episode = 1 data point, no double-counting.
+    assert len(all_episode_data) == sum(env_episodes_done) == actual_episodes, (
+        f"Episode count mismatch: len(all_episode_data)={len(all_episode_data)}, "
+        f"sum(env_episodes_done)={sum(env_episodes_done)}, "
+        f"actual_episodes={actual_episodes}"
+    )
+    _stats_total = sum(len(v) for v in stats_by_env.values())
+    assert _stats_total == actual_episodes, (
+        f"EpisodeStatsPipeline post-truncation total ({_stats_total}) does "
+        f"not match actual_episodes ({actual_episodes})."
+    )
+    _primary_total = sum(termination_primary_counts.values())
+    assert _primary_total == actual_episodes, (
+        f"Primary termination counts ({_primary_total}) do not sum to "
+        f"actual_episodes ({actual_episodes}).  Some episodes were not "
+        f"classified."
+    )
+
+    # Join per-episode reward record with per-episode pipeline stats.
+    # ``ep["env_id"]`` and ``ep["episode_num"]`` come from
+    # ``current_episode_metrics`` and increment monotonically per env, so
+    # ``stats_by_env[env_id][episode_num]`` is the matching pipeline record.
+    unified_episodes: list[dict] = []
+    for ep in all_episode_data:
+        env_id = int(ep["env_id"])
+        ep_num = int(ep["episode_num"])
+        stat = stats_by_env[env_id][ep_num]
+        unified = dict(ep)
+        # Pipeline-derived per-episode fields, namespaced to avoid colliding
+        # with reward-loop field names.
+        unified["lifted"] = bool(stat["lifted"])
+        unified["dropped"] = bool(stat["dropped"])
+        unified["success"] = bool(stat["success"])
+        unified["timed_out"] = bool(stat["timed_out"])
+        unified["cube_bump"] = float(stat["cube_bump"])
+        unified["lift_step"] = stat["lift_step"]
+        unified["pipeline_episode_steps"] = int(stat["episode_steps"])
+        unified_episodes.append(unified)
+
+    # Compute summary statistics from the unified records.
+    episode_rewards = [ep["total_reward"] for ep in unified_episodes]
+    episode_lengths = [ep["episode_length"] for ep in unified_episodes]
+
+    # Aggregate episode stats over the unified records (single source).
+    n_eps = len(unified_episodes)
+    n_lifted = sum(1 for e in unified_episodes if e["lifted"])
+    n_dropped = sum(1 for e in unified_episodes if e["dropped"])
+    n_success = sum(1 for e in unified_episodes if e["success"])
+    n_timed_out = sum(1 for e in unified_episodes if e["timed_out"])
+    lift_steps = [
+        e["lift_step"]
+        for e in unified_episodes
+        if e["lifted"] and e["lift_step"] is not None
+    ]
+    episode_stats_block: dict = {
+        "n_episodes": n_eps,
+        "n_lifted": n_lifted,
+        "n_dropped": n_dropped,
+        "n_success": n_success,
+        "n_timed_out": n_timed_out,
+        "lift_rate": n_lifted / n_eps,
+        "drop_rate": n_dropped / n_eps,
+        "success_rate": n_success / n_eps,
+        "mean_cube_bump": float(np.mean([e["cube_bump"] for e in unified_episodes])),
+        "mean_time_to_lift": float(np.mean(lift_steps)) if lift_steps else None,
+    }
 
     summary = {
         "num_envs": num_envs,
         "requested_episodes": NUM_EPISODES,
         "episodes_per_env": episodes_per_env,
         "actual_episodes": actual_episodes,
-        "num_episodes": len(all_episode_data),
+        "num_episodes": len(unified_episodes),
         "verbosity": args_cli.verbosity,
         "checkpoint_path": str(checkpoint_path),
-        "checkpoint_step": _manifest.final_checkpoint_step if _manifest is not None else None,
+        "checkpoint_step": (
+            _manifest.final_checkpoint_step if _manifest is not None else None
+        ),
         "task_name": task_name,
         "training_seed": _eval_seed,
+        "success_termination_id": _success_log_name,
         "termination_flag_counts": dict(sorted(termination_flag_counts.items())),
         "termination_primary_counts": dict(sorted(termination_primary_counts.items())),
         "metrics_summary": {
@@ -957,7 +1047,7 @@ def main(
             "std_episode_length": float(np.std(episode_lengths)),
         },
         "episode_stats": episode_stats_block,
-        "episodes": all_episode_data,
+        "episodes": unified_episodes,
     }
 
     # Save results to JSON
@@ -973,24 +1063,23 @@ def main(
     print(
         f"  Mean episode length: {summary['summary_statistics']['mean_episode_length']:.1f} ± {summary['summary_statistics']['std_episode_length']:.1f}"
     )
-    if episode_stats_block is not None:
-        pct = lambda r: f"{r * 100:.1f}%"
-        print(f"[INFO] Episode stats ({episode_stats_block['n_episodes']} episodes):")
-        print(f"  lift_rate:        {pct(episode_stats_block['lift_rate'])}")
-        print(f"  drop_rate:        {pct(episode_stats_block['drop_rate'])}")
-        print(f"  success_rate:     {pct(episode_stats_block['success_rate'])}")
-        print(f"  mean_cube_bump:   {episode_stats_block['mean_cube_bump']:.4f}")
-        ttl = episode_stats_block["mean_time_to_lift"]
-        print(
-            f"  mean_time_to_lift: {f'{ttl:.1f} steps' if ttl is not None else 'n/a (no lifts)'}"
-        )
-    else:
-        print("[WARNING] No episode stats collected (EpisodeStatsPipeline unavailable)")
+    pct = lambda r: f"{r * 100:.1f}%"
+    print(f"[INFO] Episode stats ({episode_stats_block['n_episodes']} episodes):")
+    print(f"  lift_rate:        {pct(episode_stats_block['lift_rate'])}")
+    print(f"  drop_rate:        {pct(episode_stats_block['drop_rate'])}")
+    print(f"  success_rate:     {pct(episode_stats_block['success_rate'])}")
+    print(f"  mean_cube_bump:   {episode_stats_block['mean_cube_bump']:.4f}")
+    ttl = episode_stats_block["mean_time_to_lift"]
+    print(
+        f"  mean_time_to_lift: {f'{ttl:.1f} steps' if ttl is not None else 'n/a (no lifts)'}"
+    )
     if termination_flag_counts:
         print(
             f"[INFO] Termination causes ({completed_episodes} episodes, may sum > 100%):"
         )
-        for cause, count in sorted(termination_flag_counts.items(), key=lambda kv: -kv[1]):
+        for cause, count in sorted(
+            termination_flag_counts.items(), key=lambda kv: -kv[1]
+        ):
             print(
                 f"  {cause:<45s} {count:>6d}  ({count / completed_episodes * 100:.1f}%)"
             )
@@ -998,7 +1087,9 @@ def main(
             print(
                 f"[INFO] Primary termination causes ({completed_episodes} episodes, sums to 100%):"
             )
-            for cause, count in sorted(termination_primary_counts.items(), key=lambda kv: -kv[1]):
+            for cause, count in sorted(
+                termination_primary_counts.items(), key=lambda kv: -kv[1]
+            ):
                 print(
                     f"  {cause:<45s} {count:>6d}  ({count / completed_episodes * 100:.1f}%)"
                 )
