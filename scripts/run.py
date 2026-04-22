@@ -599,6 +599,8 @@ def cmd_eval(args) -> None:
         cmd += ["--verbosity", args.verbosity]
     if args.headless:
         cmd += ["--headless"]
+    if getattr(args, "cameras", False):
+        cmd += ["--enable_cameras"]
 
     resolve_x11(getattr(args, "display", None))
     env = get_gui_env(Path(isaac_lab_path) / "workspace" / task, staged_cfg)
@@ -1194,6 +1196,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Record Isaac Sim full viewport (all envs tiled) as a single .mp4.",
     )
     p.add_argument("--envs", type=int, metavar="N")
+    p.add_argument("--cameras", action="store_true", help="Enable cameras (required for vision-based policies)")
     p.add_argument("--verbosity", choices=["full", "basic"], default="basic")
     p.add_argument("--headless", action="store_true")
     p.add_argument("--display", type=int, metavar="N")
