@@ -253,6 +253,14 @@ rewards:
     enabled: true
     scale: -1.0
 
+  # Time-based penalty: at step i the per-step penalty is scale * i/N.
+  # Total episode penalty ≈ scale * N/2 (triangular sum), not scale * N.
+  # E.g. scale=-0.01, N≈600 steps → total ≈ -3 per episode (mild shaping).
+  # Tune scale so the total is small relative to sparse terminal rewards (±500).
+  - type: time_penalty
+    enabled: false
+    scale: -1.0
+
   # terminal when cube is pushed out of reach of the robot base
   - type: cube_out_of_range_terminal
     enabled: true

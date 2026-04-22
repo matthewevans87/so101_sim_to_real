@@ -618,6 +618,34 @@ class GoalZoneDistanceRewardStep(RewardStep[RewardCfg]):
         return ctx.metrics["goal_zone_distance"]
 
 
+class TimePenaltyRewardStep(RewardStep[RewardCfg]):
+    """Applies a linearly growing penalty over the episode duration.
+
+    At step ``i`` (0-indexed), ``compute()`` returns ``i / max_steps`` — a
+    value that ramps from 0 at episode start to ``(max_steps - 1) / max_steps``
+    at the final step.  Pair with a negative ``scale`` to penalise slow
+    behaviour and encourage efficient task completion.
+
+    **Total accumulated penalty per episode** (all steps summed):
+
+        sum_{i=0}^{N-1} scale * i/N  =  scale * (N-1) / 2  ≈  scale * N/2
+
+    where ``N = max_episode_length``.  For a 10 s episode at dt=0.008333 s
+    with decimation=2 (N ≈ 600 steps), ``scale=-1.0`` gives a total episode
+    penalty of roughly -300.  Scale accordingly — ``scale=-0.01`` gives ≈ -3
+    total, which is a mild shaping signal relative to the sparse rewards.
+    """
+
+    name = "time_penalty"
+    requires_metrics: frozenset[str] = frozenset()
+
+    def compute(self, ctx: StepContext) -> torch.Tensor:
+        env = ctx.env
+        elapsed = env.episode_length_buf.float()  # (num_envs,)
+        max_steps = float(env.max_episode_length)
+        return elapsed / max_steps
+
+
 # ---------------------------------------------------------------------------
 # Factory helper
 # ---------------------------------------------------------------------------
@@ -649,6 +677,7 @@ REWARD_STEP_REGISTRY: dict[str, tuple[type[RewardStep[Any]], type[RewardCfg]]] =
     "grasp_phase": (GraspPhaseRewardStep, RewardCfg),
     "wrist_roll_pose": (WristRollPoseRewardStep, WristRollPoseRewardCfg),
     "goal_zone_distance": (GoalZoneDistanceRewardStep, RewardCfg),
+    "time_penalty": (TimePenaltyRewardStep, RewardCfg),
 }
 
 

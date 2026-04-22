@@ -590,7 +590,12 @@ class So101LiftCube(DirectRLEnv):
             self.extras["log"][f"Termination/{name}"] = flags.mean()
             self.extras["per_env_log"][f"Termination/{name}"] = flags
 
-        self.episode_stats_pipeline.step(self._step_ctx, terminal, time_out)
+        self.episode_stats_pipeline.step(
+            self._step_ctx,
+            terminal,
+            time_out,
+            common_step_counter=self.common_step_counter,
+        )
         for key, val in self.episode_stats_pipeline.get_log_dict().items():
             self.extras["log"][key] = torch.tensor(val, device=self.device)
 

@@ -433,6 +433,23 @@ def main(
         args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None
     )
 
+    # Inject milestone log into the episode stats pipeline so that exact
+    # env_transitions counts are written to milestones.json at each milestone.
+    from so101_rl.milestone_log import MilestoneLog
+
+    _milestone_log = MilestoneLog(
+        output_path=os.path.join(args_cli.artifacts_dir, "milestones.json"),
+        num_envs=env_cfg.scene.num_envs,
+    )
+    _underlying_env = env.unwrapped
+    if hasattr(_underlying_env, "episode_stats_pipeline"):
+        _underlying_env.episode_stats_pipeline.set_milestone_log(_milestone_log)
+    else:
+        omni.log.warn(
+            "[MilestoneLog] episode_stats_pipeline not found on unwrapped env; "
+            "milestones.json will not be written."
+        )
+
     # convert to single-agent instance if required by the RL algorithm
     if isinstance(env.unwrapped, DirectMARLEnv) and algorithm in ["ppo"]:
         env = multi_agent_to_single_agent(env)

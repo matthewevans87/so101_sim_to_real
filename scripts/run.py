@@ -19,6 +19,17 @@ Commands:
     viz-cnn        Visualize CNN training data and model predictions
     viz-pipeline   Visualize image processing pipeline
     pipeline       Run the full train → collect → curate → train-cnn pipeline
+    sweep          Run a grid of Train+Eval experiments and compare results
+
+Sweep quick-start:
+    New sweep:
+        ./scripts/run.py sweep --sweep configs/sweep_example.yaml
+    Dry run (print commands only):
+        ./scripts/run.py sweep --sweep configs/sweep_example.yaml --dry-run
+    Resume a killed sweep:
+        ./scripts/run.py sweep --resume sweeps/sweep_<name>_<timestamp>/
+    Full help:
+        ./scripts/run.py sweep --help
 
 Environment Variables:
     ISAAC_LAB_PATH   Path to Isaac Lab installation (required for Isaac-dependent commands)
@@ -574,6 +585,12 @@ def cmd_eval(args) -> None:
         cmd += ["--num-episodes", str(args.episodes)]
     if args.videos:
         cmd += ["--num-videos", str(args.videos)]
+    if getattr(args, "record_wrist_cam", False):
+        cmd += ["--record-wrist-cam"]
+    if getattr(args, "record_overhead_cam", False):
+        cmd += ["--record-overhead-cam"]
+    if getattr(args, "record_viewport_cam", False):
+        cmd += ["--record-viewport-cam"]
     if args.envs:
         cmd += ["--num_envs", str(args.envs)]
     if args.verbosity:
@@ -877,7 +894,7 @@ def cmd_viz_pipeline(args) -> None:
 def cmd_sweep(args) -> None:
     resolve_x11(getattr(args, "display", None))
     sys.path.insert(0, str(Path(__file__).parent))
-    from sweep import SweepOrchestrator
+    from sweep import SweepOrchestrator, expand_experiment_definition
 
     # For dry-runs, a missing/invalid ISAAC_LAB_PATH is non-fatal: the path
     # is shown in the printed commands so the user can verify them without a
@@ -913,6 +930,12 @@ def cmd_sweep(args) -> None:
 
             config = _yaml.safe_load(f)
 
+        try:
+            config = expand_experiment_definition(config)
+        except ValueError as exc:
+            error(f"Invalid sweep config: {exc}")
+            sys.exit(1)
+
         sweep_name = config.get("name", "sweep")
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         base = (
@@ -929,9 +952,14 @@ def cmd_sweep(args) -> None:
             project_root=PROJECT_ROOT,
         )
 
+    if getattr(args, "create_configs_only", False):
+        orchestrator.materialize_all()
+        return
+
     orchestrator.run(
         from_experiment=getattr(args, "from_experiment", None),
         dry_run=args.dry_run,
+        retry_eval=getattr(args, "retry_eval", False),
     )
 
 
@@ -1145,6 +1173,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--episodes", type=int, metavar="N")
     p.add_argument("--videos", type=int, metavar="N")
+    p.add_argument(
+        "--record-wrist-cam",
+        action="store_true",
+        default=False,
+        help="Record wrist-camera video for --videos episodes.",
+    )
+    p.add_argument(
+        "--record-overhead-cam",
+        action="store_true",
+        default=False,
+        help="Record overhead-camera video (adds significant VRAM cost).",
+    )
+    p.add_argument(
+        "--record-viewport-cam",
+        action="store_true",
+        default=False,
+        help="Record Isaac Sim full viewport (all envs tiled) as a single .mp4.",
+    )
     p.add_argument("--envs", type=int, metavar="N")
     p.add_argument("--verbosity", choices=["full", "basic"], default="basic")
     p.add_argument("--headless", action="store_true")
@@ -1367,15 +1413,50 @@ def build_parser() -> argparse.ArgumentParser:
     # ── sweep ─────────────────────────────────────────────────────────────────
     p = sub.add_parser(
         "sweep",
-        help="Run a named sequence of Train+Eval experiments and summarise results",
+        help="Run a grid of Train+Eval experiments defined by experiment_definition and summarise results",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description=(
-            "Runs a set of named experiments sequentially (train → eval).\n"
-            "Each experiment applies YAML overrides on top of base env/agent configs.\n"
+            "Run a grid of experiments sequentially (train → eval) and compare results.\n"
             "\n"
-            "New sweep:    --sweep configs/my_sweep.yaml [--output sweeps/]\n"
-            "Resume sweep: --resume sweeps/sweep_name_TS/ [--from-experiment NAME]\n"
-            "Dry run:      --sweep configs/my_sweep.yaml --dry-run\n"
+            "Sweep configs use experiment_definition to define a Cartesian product of\n"
+            "parameter variations.  Each config_set is one grid dimension; the product\n"
+            "of all config_sets produces the full experiment list automatically.\n"
+            "\n"
+            "See configs/sweep_example.yaml for an annotated example.\n"
+            "\n"
+            "Typical usage\n"
+            "─────────────\n"
+            "  New sweep:\n"
+            "    ./scripts/run.py sweep --sweep configs/my_sweep.yaml\n"
+            "\n"
+            "  Dry run (print commands, create nothing):\n"
+            "    ./scripts/run.py sweep --sweep configs/my_sweep.yaml --dry-run\n"
+            "\n"
+            "  Inspect materialised configs without training:\n"
+            "    ./scripts/run.py sweep --sweep configs/my_sweep.yaml --create-configs-only\n"
+            "\n"
+            "  Resume a killed sweep from where it left off:\n"
+            "    ./scripts/run.py sweep --resume sweeps/sweep_<name>_<timestamp>/\n"
+            "\n"
+            "  Resume, skip training for experiments that already trained (e.g. eval-only retry):\n"
+            "    ./scripts/run.py sweep --resume sweeps/sweep_<name>_<ts>/ --retry-eval\n"
+            "\n"
+            "  Resume from a specific experiment:\n"
+            "    ./scripts/run.py sweep --resume sweeps/sweep_<name>_<ts>/ --from-experiment exp_003\n"
+            "\n"
+            "Output\n"
+            "──────\n"
+            "  sweeps/sweep_<name>_<timestamp>/\n"
+            "    sweep.yaml               expanded experiment list (for reproducibility)\n"
+            "    sweep_state.json         per-experiment status, updated after each step\n"
+            "    summary.json / .md       comparison table written when sweep finishes\n"
+            "    experiments/\n"
+            "      01_exp_001/\n"
+            "        env_config.yaml      materialised env config (base + overrides)\n"
+            "        agent_config.yaml    materialised agent config\n"
+            "        milestones.json      env_transitions at first_approach/grasp/lift/success\n"
+            "        skrl/                train.py output (checkpoints, TensorBoard)\n"
+            "        evaluation/          evaluate.py output (results.json)\n"
         ),
     )
     p.add_argument(
@@ -1398,6 +1479,25 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="NAME",
         dest="from_experiment",
         help="Start (or restart) from this named experiment; earlier done experiments are skipped",
+    )
+    p.add_argument(
+        "--retry-eval",
+        action="store_true",
+        dest="retry_eval",
+        help=(
+            "When resuming, skip the training subprocess for any experiment whose "
+            "stored train_return_code is 0 and whose checkpoint is present on disk. "
+            "Useful when all experiments trained successfully but eval failed."
+        ),
+    )
+    p.add_argument(
+        "--create-configs-only",
+        action="store_true",
+        dest="create_configs_only",
+        help=(
+            "Materialise env_config.yaml and agent_config.yaml for every experiment "
+            "then exit without launching any training or evaluation"
+        ),
     )
     p.add_argument(
         "--dry-run",

@@ -8,8 +8,16 @@ Script to evaluate a trained RL agent from skrl and collect comprehensive metric
 
 This script runs evaluation episodes with one or more environments (defaults to 1), recording:
 - Step metrics and rewards for all episodes
-- Videos from overhead and wrist cameras for the first 5 episodes by default
+- Videos from wrist and/or overhead cameras (opt-in via --record-wrist-cam / --record-overhead-cam)
 - Results saved to JSON file
+
+By default no videos are recorded and the overhead camera is not instantiated, keeping VRAM
+usage comparable to training.
+
+Opt-in recording flags:
+  --record-wrist-cam      Per-env wrist camera (one .mp4 per episode per env)
+  --record-overhead-cam   Per-env overhead camera (adds ~1x VRAM cost)
+  --record-viewport-cam   Isaac Sim full viewport (all envs tiled, single .mp4)
 """
 
 """Launch Isaac Sim Simulator first."""
@@ -20,6 +28,7 @@ import os
 import random
 import sys
 from pathlib import Path
+from typing import Any
 
 import cv2
 import numpy as np
@@ -78,7 +87,33 @@ parser.add_argument(
     "--num-videos",
     type=int,
     default=5,
-    help="Number of episodes to record videos for.",
+    help="Number of episodes to record videos for (only used when --record-wrist-cam or --record-overhead-cam is set).",
+)
+parser.add_argument(
+    "--record-wrist-cam",
+    action="store_true",
+    default=False,
+    help="Record wrist-camera video for the first --num-videos episodes.",
+)
+parser.add_argument(
+    "--record-overhead-cam",
+    action="store_true",
+    default=False,
+    help=(
+        "Record overhead-camera video for the first --num-videos episodes. "
+        "Enabling this instantiates an extra camera for every environment, "
+        "roughly doubling eval VRAM compared to training."
+    ),
+)
+parser.add_argument(
+    "--record-viewport-cam",
+    action="store_true",
+    default=False,
+    help=(
+        "Record the Isaac Sim full viewport (all envs tiled) as a single .mp4. "
+        "Activates render_mode='rgb_array', which adds rendering overhead. "
+        "Saved to eval_dir/viewport_video/."
+    ),
 )
 parser.add_argument(
     "--num_envs",
@@ -99,11 +134,13 @@ AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
 args_cli, hydra_args = parser.parse_known_args()
 
-# Always enable cameras for evaluation
+# The wrist camera is always required for policy observations.
 args_cli.enable_cameras = True
-
-# Ensure overhead camera is enabled only for evaluation
-os.environ["SO101_ENABLE_OVERHEAD_CAMERA"] = "1"
+# The overhead camera is an extra viewport (~doubles VRAM vs training).
+# Only instantiate it when overhead video recording is explicitly requested.
+os.environ["SO101_ENABLE_OVERHEAD_CAMERA"] = (
+    "1" if (args_cli.num_videos > 0 and args_cli.record_overhead_cam) else "0"
+)
 
 # clear out sys.argv for Hydra
 sys.argv = [sys.argv[0]] + hydra_args
@@ -163,7 +200,9 @@ else:
 
 def find_checkpoint_and_task(experiment_path: Path) -> tuple[Path, str]:
     """Find the checkpoint file from the experiment directory."""
-    checkpoint_path = experiment_path / "skrl" / "checkpoints" / "best_agent.pt"
+    checkpoint_path = (
+        experiment_path / "skrl" / "agent" / "checkpoints" / "best_agent.pt"
+    )
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Checkpoint not found at {checkpoint_path}")
     return checkpoint_path, ""
@@ -298,6 +337,36 @@ def main(
     else:
         print(f"[WARNING] No env_config.yaml found at {env_config_path}")
 
+    # Resolve CNN checkpoint for frozen_cnn experiments.
+    # Auto-detect the embedded cnn_checkpoint.pt copied into the experiment dir at training time.
+    # Without this the vision encoder initialises with random weights, producing garbage
+    # observations that cause the policy to output a constant action (the "static pose" bug).
+    embedded_cnn = experiment_path / "cnn_checkpoint.pt"
+    vision_encoder = getattr(env_cfg, "vision_encoder", None)
+    _is_frozen_cnn = (
+        vision_encoder is not None
+        and getattr(vision_encoder, "type", None) == "frozen_cnn"
+    )
+    if embedded_cnn.is_file():
+        if not _is_frozen_cnn:
+            raise RuntimeError(
+                f"Found cnn_checkpoint.pt at {embedded_cnn} but env_cfg.vision_encoder.type "
+                f"is not 'frozen_cnn' (got {getattr(vision_encoder, 'type', None)!r}). "
+                f"Cannot safely wire the checkpoint — aborting."
+            )
+        env_cfg.vision_encoder.cnn_checkpoint = str(embedded_cnn)
+        print(f"[INFO] Auto-detected embedded CNN checkpoint: {embedded_cnn}")
+    else:
+        if _is_frozen_cnn:
+            raise FileNotFoundError(
+                f"env_cfg.vision_encoder.type == 'frozen_cnn' but no cnn_checkpoint.pt found "
+                f"in experiment dir {experiment_path}. Evaluation would run with random CNN "
+                f"weights — aborting."
+            )
+        print(
+            "[INFO] No embedded cnn_checkpoint.pt found in experiment dir (not a frozen_cnn experiment)."
+        )
+
     # Override configurations for evaluation
     env_cfg.scene.num_envs = (
         args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
@@ -320,11 +389,39 @@ def main(
     print(f"[INFO] Evaluation results will be saved to: {eval_dir}")
 
     # create isaac environment
-    env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array")
+    # render_mode="rgb_array" activates the Isaac Sim viewport renderer — only enable when
+    # recording the viewport, as it adds measurable GPU overhead on every step.
+    env = gym.make(
+        args_cli.task,
+        cfg=env_cfg,
+        render_mode="rgb_array" if args_cli.record_viewport_cam else None,
+    )
 
     # convert to single-agent instance if required by the RL algorithm
     if isinstance(env.unwrapped, DirectMARLEnv) and algorithm in ["ppo"]:
         env = multi_agent_to_single_agent(env)
+
+    # Wrap with RecordVideo to capture the full viewport (all envs tiled).
+    # Must be applied before SkrlVecEnvWrapper so the gym interface is intact.
+    if args_cli.record_viewport_cam:
+        viewport_video_dir = eval_dir / "viewport_video"
+        viewport_video_dir.mkdir(parents=True, exist_ok=True)
+        # Estimate total steps to record (~num_videos episodes worth).
+        try:
+            _steps_per_ep = int(
+                env_cfg.episode_length_s / (env_cfg.sim.dt * env_cfg.decimation)
+            )
+        except AttributeError:
+            _steps_per_ep = 600  # conservative fallback
+        _viewport_video_length = args_cli.num_videos * _steps_per_ep
+        viewport_video_kwargs = {
+            "video_folder": str(viewport_video_dir),
+            "step_trigger": lambda step: step == 0,
+            "video_length": _viewport_video_length,
+            "disable_logger": True,
+        }
+        print(f"[INFO] Recording viewport video to: {viewport_video_dir}")
+        env = gym.wrappers.RecordVideo(env, **viewport_video_kwargs)
 
     # wrap around environment for skrl
     env = SkrlVecEnvWrapper(env, ml_framework=args_cli.ml_framework)
@@ -344,15 +441,36 @@ def main(
     # set agent to evaluation mode
     runner.agent.set_running_mode("eval")
 
+    # Grab the EpisodeStatsPipeline if available so we can drain per-episode
+    # lift/drop/success/bump/time_to_lift stats during the eval loop.
+    _episode_stats_pipeline = getattr(env.unwrapped, "episode_stats_pipeline", None)
+    if _episode_stats_pipeline is not None:
+        print("[INFO] EpisodeStatsPipeline found — will collect episode stats")
+    else:
+        print(
+            "[WARNING] EpisodeStatsPipeline not found — episode stats will not be collected"
+        )
+
     # Evaluation parameters
     NUM_EPISODES = args_cli.num_episodes
     NUM_VIDEO_EPISODES = args_cli.num_videos
     num_envs = env_cfg.scene.num_envs
+    # In "basic" mode per-step trace is not written to JSON.  We skip the per-step
+    # dict allocation and the episode-end re-scan by maintaining per-key value lists
+    # directly.  In "full" mode we additionally build the step trace as before.
+    _collect_steps = args_cli.verbosity == "full"
 
     # Storage for results
     all_episode_data = []
+    all_episode_stats: list[dict] = []  # drained from EpisodeStatsPipeline each step
     completed_episodes = 0
     recorded_episodes = 0
+    # Per-cause termination counts keyed by reason name (e.g. "time_out",
+    # "success_lift_fraction_terminal").  Built from Termination/* keys in
+    # extras_per_env_log at the step each episode ends.  Multiple reasons can
+    # fire simultaneously (e.g. success on the final step triggers both the
+    # success terminal and time_out), so counts may sum to > NUM_EPISODES.
+    termination_counts: dict[str, int] = {}
 
     global_step_values: dict[str, list[float]] = {}
     global_reward_values: dict[str, list[float]] = {}
@@ -377,11 +495,35 @@ def main(
     wrist_writers = {}
     overhead_writers = {}
 
+    # Per-env, per-key value lists accumulated directly during the loop.
+    # Avoids per-step dict allocation + the O(steps×keys) re-scan at episode end.
+    # step_lists[env_idx] = {"Step_Metrics/foo": [v0, v1, ...]}
+    # reward_lists[env_idx] = {"Episode_Reward/foo": [v0, v1, ...]}
+    step_lists: list[dict[str, list[float]]] = [{} for _ in range(num_envs)]
+    reward_lists: list[dict[str, list[float]]] = [{} for _ in range(num_envs)]
+
     # reset environment
     obs, info = env.reset()
 
     print(f"[INFO] Starting evaluation: {NUM_EPISODES} episodes across {num_envs} envs")
-    print(f"[INFO] Recording videos for first {NUM_VIDEO_EPISODES} episodes")
+    _active_cams = [
+        c
+        for c, flag in [
+            ("wrist", args_cli.record_wrist_cam),
+            ("overhead", args_cli.record_overhead_cam),
+            ("viewport", args_cli.record_viewport_cam),
+        ]
+        if flag
+    ]
+    if _active_cams and NUM_VIDEO_EPISODES > 0:
+        print(
+            f"[INFO] Recording {'/'.join(_active_cams)} camera(s) for first {NUM_VIDEO_EPISODES} episodes"
+        )
+    else:
+        print(
+            "[INFO] Video recording disabled "
+            "(pass --record-wrist-cam / --record-overhead-cam / --record-viewport-cam to enable)"
+        )
 
     # Run evaluation
     progress = tqdm(total=NUM_EPISODES, desc="Evaluating", unit="episode")
@@ -416,38 +558,60 @@ def main(
             if "per_env_log" in env.unwrapped.extras:
                 extras_per_env_log = env.unwrapped.extras["per_env_log"]
 
-        active_record_count = sum(record_active)
+        # ── Batch GPU→CPU ─────────────────────────────────────────────────────
+        # A single .cpu().numpy() on the full (num_envs,) tensor is orders of
+        # magnitude faster than num_envs individual .item() calls because it
+        # issues one DMA transfer instead of serialising one sync per env.
+        reward_np: np.ndarray = (
+            reward.cpu().numpy()
+            if torch.is_tensor(reward)
+            else np.asarray(reward, dtype=np.float32)
+        )
+        done_np: np.ndarray = (
+            done.cpu().numpy().astype(bool)
+            if torch.is_tensor(done)
+            else np.asarray(done, dtype=bool)
+        )
+        # Convert extras tensors to numpy once; per_env values are (num_envs,) arrays,
+        # non-per-env (log) values become plain Python floats.
+        extras_np: dict[str, Any] = {}
+        if extras_per_env_log is not None:
+            for _k, _v in extras_per_env_log.items():
+                extras_np[_k] = _v.cpu().numpy() if torch.is_tensor(_v) else _v
+        elif extras_log is not None:
+            for _k, _v in extras_log.items():
+                extras_np[_k] = float(_v.item()) if torch.is_tensor(_v) else _v
+        # ─────────────────────────────────────────────────────────────────────
+
+        _record_any = NUM_VIDEO_EPISODES > 0 and (
+            args_cli.record_wrist_cam or args_cli.record_overhead_cam
+        )
+        active_record_count = sum(record_active) if _record_any else 0
 
         for env_idx in range(num_envs):
-            reward_val = reward[env_idx]
-            if torch.is_tensor(reward_val):
-                reward_val = reward_val.item()
-            else:
-                reward_val = float(reward_val)
+            reward_val = float(reward_np[env_idx])
 
-            step_data = {
-                "step": episode_steps[env_idx],
-                "reward": reward_val,
-            }
+            # Accumulate per-key metric/reward lists directly (no per-step dict).
+            _is_per_env = extras_per_env_log is not None
+            for key, arr in extras_np.items():
+                val = float(arr[env_idx]) if _is_per_env else float(arr)
+                if key.startswith("Step_Metrics/"):
+                    step_lists[env_idx].setdefault(key, []).append(val)
+                elif key.startswith("Episode_Reward/"):
+                    reward_lists[env_idx].setdefault(key, []).append(val)
 
-            if extras_per_env_log is not None:
-                for key, value in extras_per_env_log.items():
-                    if torch.is_tensor(value):
-                        step_data[key] = float(value[env_idx])
-                    else:
-                        step_data[key] = value
-            elif extras_log is not None:
-                for key, value in extras_log.items():
-                    if torch.is_tensor(value):
-                        step_data[key] = float(value)
-                    else:
-                        step_data[key] = value
+            # In "full" verbosity, additionally build the per-step JSON trace.
+            if _collect_steps:
+                step_data: dict = {"step": episode_steps[env_idx], "reward": reward_val}
+                for key, arr in extras_np.items():
+                    step_data[key] = float(arr[env_idx]) if _is_per_env else float(arr)
+                current_episode_metrics[env_idx]["steps"].append(step_data)
 
-            current_episode_metrics[env_idx]["steps"].append(step_data)
             current_episode_metrics[env_idx]["total_reward"] += reward_val
 
             if (
                 NUM_VIDEO_EPISODES > 0
+                and (args_cli.record_wrist_cam or args_cli.record_overhead_cam)
                 and episode_steps[env_idx] == 0
                 and not record_active[env_idx]
             ):
@@ -462,108 +626,120 @@ def main(
 
                     gripper_cam = env.unwrapped.scene.sensors.get("gripper_camera")
                     overhead_cam = env.unwrapped.scene.sensors.get("overhead_camera")
-                    if (
-                        gripper_cam is None
-                        or "rgb" not in gripper_cam.data.output
-                        or overhead_cam is None
-                        or "rgb" not in overhead_cam.data.output
-                    ):
-                        raise RuntimeError(
-                            "Required cameras are unavailable. Ensure SO101_ENABLE_OVERHEAD_CAMERA is set for evaluation."
-                        )
 
-                    gripper_rgb = gripper_cam.data.output["rgb"][env_idx].cpu().numpy()
-                    overhead_rgb = (
-                        overhead_cam.data.output["rgb"][env_idx].cpu().numpy()
-                    )
+                    if args_cli.record_wrist_cam:
+                        if gripper_cam is None or "rgb" not in gripper_cam.data.output:
+                            raise RuntimeError(
+                                "Wrist (gripper) camera is unavailable for video recording."
+                            )
 
-                    wrist_h, wrist_w = gripper_rgb.shape[:2]
-                    overhead_h, overhead_w = overhead_rgb.shape[:2]
+                    if args_cli.record_overhead_cam:
+                        if (
+                            overhead_cam is None
+                            or "rgb" not in overhead_cam.data.output
+                        ):
+                            raise RuntimeError(
+                                "Overhead camera is unavailable for video recording. "
+                                "Ensure SO101_ENABLE_OVERHEAD_CAMERA=1 is set before AppLauncher is created."
+                            )
+
                     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
 
-                    wrist_video_path = eval_dir / (
-                        f"wrist_cam_env_{env_idx:03d}_ep_{episode_counts[env_idx]:03d}.mp4"
-                    )
-                    overhead_video_path = eval_dir / (
-                        f"overhead_cam_env_{env_idx:03d}_ep_{episode_counts[env_idx]:03d}.mp4"
-                    )
+                    if args_cli.record_wrist_cam:
+                        gripper_rgb = (
+                            gripper_cam.data.output["rgb"][env_idx].cpu().numpy()
+                        )
+                        wrist_h, wrist_w = gripper_rgb.shape[:2]
+                        wrist_video_path = eval_dir / (
+                            f"wrist_cam_env_{env_idx:03d}_ep_{episode_counts[env_idx]:03d}.mp4"
+                        )
+                        wrist_writers[env_idx] = cv2.VideoWriter(
+                            str(wrist_video_path), fourcc, 30, (wrist_w, wrist_h)
+                        )
 
-                    wrist_writers[env_idx] = cv2.VideoWriter(
-                        str(wrist_video_path), fourcc, 30, (wrist_w, wrist_h)
-                    )
-                    overhead_writers[env_idx] = cv2.VideoWriter(
-                        str(overhead_video_path), fourcc, 30, (overhead_w, overhead_h)
-                    )
+                    if args_cli.record_overhead_cam:
+                        overhead_rgb = (
+                            overhead_cam.data.output["rgb"][env_idx].cpu().numpy()
+                        )
+                        overhead_h, overhead_w = overhead_rgb.shape[:2]
+                        overhead_video_path = eval_dir / (
+                            f"overhead_cam_env_{env_idx:03d}_ep_{episode_counts[env_idx]:03d}.mp4"
+                        )
+                        overhead_writers[env_idx] = cv2.VideoWriter(
+                            str(overhead_video_path),
+                            fourcc,
+                            30,
+                            (overhead_w, overhead_h),
+                        )
 
                     record_active[env_idx] = True
                     active_record_count += 1
 
             if record_active[env_idx] and hasattr(env.unwrapped, "scene"):
-                gripper_cam = env.unwrapped.scene.sensors.get("gripper_camera")
-                overhead_cam = env.unwrapped.scene.sensors.get("overhead_camera")
-                if (
-                    gripper_cam is not None
-                    and overhead_cam is not None
-                    and "rgb" in gripper_cam.data.output
-                    and "rgb" in overhead_cam.data.output
-                ):
-                    gripper_frame = (
-                        gripper_cam.data.output["rgb"][env_idx].cpu().numpy()
-                    )
-                    overhead_frame = (
-                        overhead_cam.data.output["rgb"][env_idx].cpu().numpy()
-                    )
-
+                if args_cli.record_wrist_cam:
+                    gripper_cam = env.unwrapped.scene.sensors.get("gripper_camera")
                     wrist_writer = wrist_writers.get(env_idx)
-                    overhead_writer = overhead_writers.get(env_idx)
-                    if wrist_writer is not None:
+                    if (
+                        wrist_writer is not None
+                        and gripper_cam is not None
+                        and "rgb" in gripper_cam.data.output
+                    ):
+                        gripper_frame = (
+                            gripper_cam.data.output["rgb"][env_idx].cpu().numpy()
+                        )
                         wrist_writer.write(
                             cv2.cvtColor(gripper_frame, cv2.COLOR_RGB2BGR)
                         )
-                    if overhead_writer is not None:
+
+                if args_cli.record_overhead_cam:
+                    overhead_cam = env.unwrapped.scene.sensors.get("overhead_camera")
+                    overhead_writer = overhead_writers.get(env_idx)
+                    if (
+                        overhead_writer is not None
+                        and overhead_cam is not None
+                        and "rgb" in overhead_cam.data.output
+                    ):
+                        overhead_frame = (
+                            overhead_cam.data.output["rgb"][env_idx].cpu().numpy()
+                        )
                         overhead_writer.write(
                             cv2.cvtColor(overhead_frame, cv2.COLOR_RGB2BGR)
                         )
 
             episode_steps[env_idx] += 1
 
-            done_flag = done[env_idx]
-            if torch.is_tensor(done_flag):
-                done_flag = bool(done_flag.item())
-            else:
-                done_flag = bool(done_flag)
+            done_flag = bool(done_np[env_idx])
 
             if done_flag:
+                # Record which termination reason(s) fired for this env this step.
+                for key, arr in extras_np.items():
+                    if key.startswith("Termination/"):
+                        val = float(arr[env_idx]) if _is_per_env else float(arr)
+                        if val > 0.5:
+                            cause = key[len("Termination/") :]
+                            termination_counts[cause] = (
+                                termination_counts.get(cause, 0) + 1
+                            )
+
                 current_episode_metrics[env_idx]["episode_length"] = episode_steps[
                     env_idx
                 ]
                 episode_entry = current_episode_metrics[env_idx].copy()
 
-                step_values: dict[str, list[float]] = {}
-                reward_values: dict[str, list[float]] = {}
-                for step_item in episode_entry["steps"]:
-                    for key, value in step_item.items():
-                        if key in ("step", "reward"):
-                            continue
-                        if not isinstance(value, (int, float)):
-                            continue
-                        if key.startswith("Step_Metrics/"):
-                            step_values.setdefault(key, []).append(float(value))
-                        if key.startswith("Episode_Reward/"):
-                            reward_values.setdefault(key, []).append(float(value))
+                # Use the directly-accumulated per-key lists — no re-scan of step dicts.
+                sv = step_lists[env_idx]
+                rv = reward_lists[env_idx]
 
                 episode_entry["metrics"] = {
-                    key: _summary_for_values(values)
-                    for key, values in step_values.items()
+                    key: _summary_for_values(values) for key, values in sv.items()
                 }
                 episode_entry["rewards"] = {
-                    key: _summary_for_values(values)
-                    for key, values in reward_values.items()
+                    key: _summary_for_values(values) for key, values in rv.items()
                 }
 
-                for key, values in step_values.items():
+                for key, values in sv.items():
                     global_step_values.setdefault(key, []).extend(values)
-                for key, values in reward_values.items():
+                for key, values in rv.items():
                     global_reward_values.setdefault(key, []).extend(values)
 
                 for key, ep_summary in episode_entry["metrics"].items():
@@ -593,6 +769,9 @@ def main(
 
                 episode_counts[env_idx] += 1
                 episode_steps[env_idx] = 0
+                # Reset per-key accumulators for the next episode.
+                step_lists[env_idx] = {}
+                reward_lists[env_idx] = {}
                 current_episode_metrics[env_idx] = {
                     "env_id": env_idx,
                     "episode_num": episode_counts[env_idx],
@@ -609,12 +788,55 @@ def main(
                 if completed_episodes >= NUM_EPISODES:
                     break
 
+        # Drain EpisodeStatsPipeline after every env step (outside env loop).
+        # get_completed_episodes() clears its buffer, so calling once per step
+        # is both correct and cheap.
+        if _episode_stats_pipeline is not None:
+            all_episode_stats.extend(_episode_stats_pipeline.get_completed_episodes())
+
     progress.close()
     print(f"[INFO] Evaluation complete: {completed_episodes} episodes")
+
+    # Trim all_episode_stats to NUM_EPISODES to match all_episode_data's denominator.
+    # The pipeline drain runs after the per-env break and can capture up to
+    # num_envs-1 extra episodes from the same step.
+    all_episode_stats = all_episode_stats[:NUM_EPISODES]
 
     # Compute summary statistics
     episode_rewards = [ep["total_reward"] for ep in all_episode_data]
     episode_lengths = [ep["episode_length"] for ep in all_episode_data]
+
+    # Compute episode stats from EpisodeStatsPipeline drain
+    if all_episode_stats:
+        n_eps = len(all_episode_stats)
+        n_lifted = sum(1 for e in all_episode_stats if e["lifted"])
+        n_dropped = sum(1 for e in all_episode_stats if e["dropped"])
+        n_success = sum(1 for e in all_episode_stats if e["success"])
+        n_timed_out = sum(1 for e in all_episode_stats if e["timed_out"])
+        lift_steps = [
+            e["lift_step"]
+            for e in all_episode_stats
+            if e["lifted"] and e["lift_step"] is not None
+        ]
+        episode_stats_block: dict = {
+            "n_episodes": n_eps,
+            "n_lifted": n_lifted,
+            "n_dropped": n_dropped,
+            "n_success": n_success,
+            "n_timed_out": n_timed_out,
+            "lift_rate": n_lifted / n_eps,
+            "drop_rate": n_dropped / n_eps,
+            "success_rate": n_success / n_eps,
+            "mean_cube_bump": float(
+                np.mean([e["cube_bump"] for e in all_episode_stats])
+            ),
+            "mean_time_to_lift": float(np.mean(lift_steps)) if lift_steps else None,
+            # Per-cause breakdown.  Counts may sum to > n_episodes when multiple
+            # reasons fire on the same step (e.g. success on the last timeout step).
+            "termination_counts": dict(sorted(termination_counts.items())),
+        }
+    else:
+        episode_stats_block = None
 
     summary = {
         "num_envs": num_envs,
@@ -640,6 +862,7 @@ def main(
             "mean_episode_length": float(np.mean(episode_lengths)),
             "std_episode_length": float(np.std(episode_lengths)),
         },
+        "episode_stats": episode_stats_block,
         "episodes": all_episode_data,
     }
 
@@ -656,6 +879,32 @@ def main(
     print(
         f"  Mean episode length: {summary['summary_statistics']['mean_episode_length']:.1f} ± {summary['summary_statistics']['std_episode_length']:.1f}"
     )
+    if episode_stats_block is not None:
+        pct = lambda r: f"{r * 100:.1f}%"
+        print(f"[INFO] Episode stats ({episode_stats_block['n_episodes']} episodes):")
+        print(f"  lift_rate:        {pct(episode_stats_block['lift_rate'])}")
+        print(f"  drop_rate:        {pct(episode_stats_block['drop_rate'])}")
+        print(f"  success_rate:     {pct(episode_stats_block['success_rate'])}")
+        print(f"  mean_cube_bump:   {episode_stats_block['mean_cube_bump']:.4f}")
+        ttl = episode_stats_block["mean_time_to_lift"]
+        print(
+            f"  mean_time_to_lift: {f'{ttl:.1f} steps' if ttl is not None else 'n/a (no lifts)'}"
+        )
+        tc = episode_stats_block["termination_counts"]
+        if tc:
+            print(
+                f"[INFO] Termination causes ({episode_stats_block['n_episodes']} episodes, may sum > 100%):"
+            )
+            for cause, count in sorted(tc.items(), key=lambda kv: -kv[1]):
+                print(
+                    f"  {cause:<45s} {count:>6d}  ({count / episode_stats_block['n_episodes'] * 100:.1f}%)"
+                )
+        else:
+            print(
+                "[WARNING] No termination causes recorded (Termination/* keys absent from extras)"
+            )
+    else:
+        print("[WARNING] No episode stats collected (EpisodeStatsPipeline unavailable)")
 
     # close the simulator
     env.close()

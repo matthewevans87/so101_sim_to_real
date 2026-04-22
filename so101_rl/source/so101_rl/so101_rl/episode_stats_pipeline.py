@@ -30,6 +30,7 @@ import torch
 
 if TYPE_CHECKING:
     from so101_rl.metric_pipeline import StepContext
+    from so101_rl.milestone_log import MilestoneLog
 
 
 class EpisodeStatsPipeline:
@@ -103,7 +104,18 @@ class EpisodeStatsPipeline:
         # ------------------------------------------------------------------
         self._first_approach_ever: bool = False
         self._first_grasp_ever: bool = False
+        # _first_robot_lift_ever: cube reached height threshold while gripped
+        # (used for milestones.json "first_lift").
+        # _first_lift_ever: cube held at full success height (terminal condition)
+        # — used for TensorBoard TrainingMilestone/first_lift and
+        # milestones.json "first_success".
+        self._first_robot_lift_ever: bool = False
         self._first_lift_ever: bool = False
+
+        # ------------------------------------------------------------------
+        # Optional milestone log (injected after construction)
+        # ------------------------------------------------------------------
+        self._milestone_log: MilestoneLog | None = None
 
         # ------------------------------------------------------------------
         # Rolling deques  (one entry per completed episode)
@@ -124,11 +136,21 @@ class EpisodeStatsPipeline:
     # Public API
     # ------------------------------------------------------------------
 
+    def set_milestone_log(self, ml: MilestoneLog) -> None:
+        """Attach a :class:`~so101_rl.milestone_log.MilestoneLog` instance.
+
+        Called from ``train.py`` after environment construction.  The log
+        records exact ``env_transitions`` counts the first time each
+        milestone fires.
+        """
+        self._milestone_log = ml
+
     def step(
         self,
         ctx: StepContext,
         terminated: torch.Tensor,
         time_out: torch.Tensor,
+        common_step_counter: int = 0,
     ) -> None:
         """Update per-env buffers for one physics step and flush finished episodes.
 
@@ -166,11 +188,22 @@ class EpisodeStatsPipeline:
         # -- Global milestone flags (set once) --
         if not self._first_approach_ever and approach_terminal.any().item():
             self._first_approach_ever = True
+            if self._milestone_log is not None:
+                self._milestone_log.record("first_approach", common_step_counter)
         if not self._first_grasp_ever and grasp_terminal.any().item():
             self._first_grasp_ever = True
-        # first_lift milestone = first time the cube reached full target height
+            if self._milestone_log is not None:
+                self._milestone_log.record("first_grasp", common_step_counter)
+        # first_robot_lift: cube above threshold while gripped (milestones.json "first_lift")
+        if not self._first_robot_lift_ever and is_lifted.any().item():
+            self._first_robot_lift_ever = True
+            if self._milestone_log is not None:
+                self._milestone_log.record("first_lift", common_step_counter)
+        # first_lift_ever: terminal success condition (TensorBoard + milestones.json "first_success")
         if not self._first_lift_ever and is_success.any().item():
             self._first_lift_ever = True
+            if self._milestone_log is not None:
+                self._milestone_log.record("first_success", common_step_counter)
 
         # -- Record first-lift step index --
         # Use is_lifted (any height off table) rather than full-height success so
