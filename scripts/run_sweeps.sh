@@ -20,15 +20,15 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
 SWEEP_SCRIPT="$SCRIPT_DIR/run.py"
 CONFIGS_DIR="$PROJECT_ROOT/configs/sweeps"
-OUTPUT_DIR="/mnt/nas_1/matthew-evans/so101_sim_to_real/sweeps/ablations"
+OUTPUT_DIR="/mnt/nas_1/matthew-evans/so101_sim_to_real/sweeps/ablations/2026-04-24"
 LOG_DIR="$OUTPUT_DIR/logs"
 
 SWEEPS=(
     baseline.yaml
     comparison_vision_backbone.yaml
-    # ablation_grasp_phase.yaml
-    # ablations_approach_phase.yaml
-    # ablation_shaping.yaml
+    ablation_grasp_phase.yaml
+    ablations_approach_phase.yaml
+    ablation_shaping.yaml
 )
 
 # ── flag parsing ──────────────────────────────────────────────────────────────

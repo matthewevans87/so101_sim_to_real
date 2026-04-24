@@ -123,10 +123,54 @@ class SceneCfg:
 
 
 @dataclass
+class FKSafetyCfg:
+    """Forward-kinematics rejection-sampling guard for the joint-noise reset.
+
+    After sampling per-joint noise, the env writes the candidate pose to sim
+    and queries Isaac Lab's kinematic FK refresh to read tracked link
+    world-positions.  Any env whose minimum tracked-link world-z is below
+    ``table_top_z + min_link_z_above_table`` is resampled, up to
+    ``max_resamples`` times.  Raises ``RuntimeError`` if the cap is exceeded
+    so misconfigurations cannot silently degrade training.
+    """
+
+    enabled: bool
+    min_link_z_above_table: float
+    """Minimum clearance (m) between any tracked link's world-z and the table top.
+
+    The table top is at world-z = 0 in the canonical scene.  Set this to a
+    small positive margin (e.g. 0.005 m = 5 mm) so contact-sensor false
+    positives at exact-zero clearance do not slip through.
+    """
+    tracked_links: list[str]
+    """Names of robot links whose world-z must clear the table top.
+
+    Should mirror the link list filtered by ``table_contact_sensor_cfg`` so
+    that any link that *would* trigger ``safety_touch_table_terminal`` is
+    pre-checked at reset time.
+    """
+    max_resamples: int
+    """Maximum number of resample attempts per env before raising.
+
+    With well-tuned per-joint noise ranges the typical rejection rate is
+    very low (well under 1%), so a small cap (e.g. 32) is plenty.
+    """
+
+
 @dataclass
 class StartingPositionNoiseCfg:
+    """Per-episode joint-noise configuration applied at env reset.
+
+    ``ranges`` is a list of ``(min, max)`` radians, aligned 1:1 with
+    ``joints.all``.  This is intentionally per-joint (not a single global
+    range) because the lift-axis joints (``shoulder_lift``, ``elbow_flex``,
+    ``wrist_flex``) need much tighter noise than the yaw and gripper joints
+    to avoid driving links into the table.
+    """
+
     enabled: bool
-    range: tuple[float, float]
+    ranges: list[tuple[float, float]]
+    fk_safety: FKSafetyCfg
 
 
 @dataclass
@@ -594,6 +638,20 @@ class CubePositionRandomizationCfg:
     radius_range: tuple[float, float]
     angle_range: tuple[float, float]
     z_range: tuple[float, float]
+    robot_root_z_offset_m: float
+    """Signed z-offset (m) of the robot root above the env origin.
+
+    The cube is sampled at ``env_origin + (r·cosθ, r·sinθ, z)`` while the
+    ``cube_out_of_range`` metric measures
+    ``||cube_pos_w − robot.root_pos_w||``.  When the robot's
+    ``init_state.pos[2]`` differs from 0, the worst-case distance is
+    ``√(r² + (z − robot_root_z_offset_m)²)``, not ``√(r² + z²)``.
+
+    Set this to the value of ``init_state.pos[2]`` from the SO-101 robot
+    config (negative when the robot root is below the env origin).  Used by
+    the cross-field DR-vs-OOR-threshold invariant so misconfigurations are
+    caught at startup rather than producing t=0 episode terminations.
+    """
 
 
 @dataclass
@@ -999,3 +1057,79 @@ class So101EnvParams:
                 f"The success terminal is required so eval can classify the "
                 f"primary termination cause without name matching."
             )
+
+        # ------------------------------------------------------------------
+        # Cube DR vs. cube_out_of_range threshold
+        # ------------------------------------------------------------------
+        # The CubePositionDRStep samples in polar coordinates around the
+        # *env origin*: cube_pos_w = env_origin + (r·cosθ, r·sinθ, z).  The
+        # cube_out_of_range terminal fires when
+        # ||cube_pos_w − robot.root_pos_w|| > distance_threshold.  The robot
+        # root is offset from the env origin by robot_root_z_offset_m
+        # (typically negative — the SO-101 init_state.pos = (0, 0, -0.03)).
+        # The worst-case distance is therefore
+        #   √(max_r² + (max_z − robot_root_z_offset_m)²),
+        # not √(max_r² + max_z²).  Enforce a 1 mm explicit margin so
+        # floating-point noise around the boundary cannot trip the terminal
+        # at reset.
+        cube_pos_dr = self.domain_randomization.cube.position_randomization
+        if cube_pos_dr.enabled:
+            max_r = cube_pos_dr.radius_range[1]
+            # Worst vertical separation = max(|z − offset|) over z ∈ z_range.
+            z_lo, z_hi = cube_pos_dr.z_range
+            offset = cube_pos_dr.robot_root_z_offset_m
+            worst_dz = max(abs(z_lo - offset), abs(z_hi - offset))
+            worst = (max_r * max_r + worst_dz * worst_dz) ** 0.5
+            oor_threshold = self.metrics.cube_out_of_range.distance_threshold
+            margin = 1e-3
+            if worst >= oor_threshold - margin:
+                raise ValueError(
+                    f"{config_path}: cube DR worst-case distance "
+                    f"sqrt(max_r^2 + max(|z - robot_root_z_offset_m|)^2) "
+                    f"= sqrt({max_r:.4f}^2 + {worst_dz:.4f}^2) "
+                    f"= {worst:.4f} m reaches the "
+                    f"cube_out_of_range.distance_threshold "
+                    f"({oor_threshold:.4f} m).  This would terminate "
+                    f"episodes at t=0 with cube_out_of_range_terminal.  "
+                    f"Tighten domain_randomization.cube."
+                    f"position_randomization.radius_range / z_range, "
+                    f"adjust robot_root_z_offset_m to match the robot's "
+                    f"init_state.pos[2], or raise the threshold."
+                )
+
+        # ------------------------------------------------------------------
+        # Joint starting-position-noise schema
+        # ------------------------------------------------------------------
+        # ``ranges`` must be aligned 1:1 with ``joints.all``; each range must
+        # be ordered (min <= max).  ``fk_safety.tracked_links`` may not be
+        # empty when ``fk_safety.enabled`` is true (the rejection check would
+        # be a no-op).
+        spn = self.joints.starting_position_noise
+        if spn.enabled:
+            if len(spn.ranges) != len(self.joints.all):
+                raise ValueError(
+                    f"{config_path}: joints.starting_position_noise.ranges has "
+                    f"{len(spn.ranges)} entries but joints.all has "
+                    f"{len(self.joints.all)} entries.  ranges must be aligned "
+                    f"1:1 with joints.all."
+                )
+            for joint_name, (lo, hi) in zip(self.joints.all, spn.ranges):
+                if lo > hi:
+                    raise ValueError(
+                        f"{config_path}: joints.starting_position_noise.ranges "
+                        f"for joint {joint_name!r} is reversed: ({lo}, {hi}).  "
+                        f"Require min <= max."
+                    )
+            if spn.fk_safety.enabled:
+                if not spn.fk_safety.tracked_links:
+                    raise ValueError(
+                        f"{config_path}: joints.starting_position_noise."
+                        f"fk_safety.enabled is true but tracked_links is "
+                        f"empty.  The rejection check would be a no-op."
+                    )
+                if spn.fk_safety.max_resamples < 1:
+                    raise ValueError(
+                        f"{config_path}: joints.starting_position_noise."
+                        f"fk_safety.max_resamples must be >= 1; got "
+                        f"{spn.fk_safety.max_resamples}."
+                    )

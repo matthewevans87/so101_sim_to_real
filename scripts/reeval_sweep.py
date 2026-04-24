@@ -212,6 +212,11 @@ def main() -> int:
         orch.generate_summary(eval_subdir="evaluation", out_suffix="")
         # v2 summary from the freshly written evaluation_v2/ data.
         orch.generate_summary(eval_subdir=args.eval_subdir, out_suffix=args.out_suffix)
+        # Aggregated (across-seed) summaries for both passes.
+        orch.generate_aggregated_summary(eval_subdir="evaluation", out_suffix="")
+        orch.generate_aggregated_summary(
+            eval_subdir=args.eval_subdir, out_suffix=args.out_suffix
+        )
 
     # ── report ────────────────────────────────────────────────────────────────
     _header("Re-eval complete")

@@ -11,14 +11,20 @@ base:
   # Base agent config; per-experiment agent_overrides are merged on top
   agent_config: so101_rl/source/so101_rl/so101_rl/tasks/direct/so101_lift_cube/agents/skrl_ppo_cfg.yaml
 
-  # Explicit seed for reproducibility
-  seed: 42
+  # Five training seeds per condition for noise-floor estimation; sweep.py
+  # replicates each experiment once per seed.
+  seeds: [42, 43, 44, 45, 46]
 
   # Parallel environments during training
   envs: 256
 
   headless: true
   cameras: true
+
+  # Sweep-wide agent overrides — bump PPO training length so policies plateau.
+  agent_overrides:
+    trainer:
+      timesteps: 50000
 
 # ── eval settings ──────────────────────────────────────────────────────────────
 eval:

@@ -7,6 +7,7 @@
 from __future__ import annotations
 import math
 import os
+import re
 
 from so101.utils.feature_extraction.feature_extraction import (
     CnnSpatialSoftmaxFeatureExtractor,
@@ -113,6 +114,49 @@ class So101LiftCube(DirectRLEnv):
         self._wrist_roll_joint_idx, _ = self.robot.find_joints(
             [self.cfg.joints.wrist_roll_name]
         )
+
+        # ── Joint-noise FK-safety guard pre-resolution ─────────────────────
+        # Resolve tracked-link body indices once at construction so the
+        # per-reset rejection-sampling loop is index-only (no string matching
+        # in the hot path).  ``find_bodies`` uses *regex* matching against
+        # ``self.robot.body_names``, so we anchor each user-supplied name
+        # with ^...$ to forbid accidental substring matches (e.g. plain
+        # ``shoulder`` would otherwise match ``shoulder_pan_link``).  Only
+        # resolved when the guard is enabled in the config; otherwise left
+        # as None so an accidental access raises.
+        _spn_cfg = self.cfg.joints.starting_position_noise
+        if _spn_cfg.enabled and _spn_cfg.fk_safety.enabled:
+            _patterns = [f"^{re.escape(n)}$" for n in _spn_cfg.fk_safety.tracked_links]
+            _idxs, _names = self.robot.find_bodies(_patterns, preserve_order=True)
+            if len(_idxs) != len(_spn_cfg.fk_safety.tracked_links):
+                raise RuntimeError(
+                    f"FK-safety: tracked_links="
+                    f"{_spn_cfg.fk_safety.tracked_links!r} resolved to "
+                    f"{_names!r} (indices={_idxs!r}); expected exact "
+                    f"one-to-one match.  Available body names: "
+                    f"{list(self.robot.body_names)!r}."
+                )
+            self._fk_safety_link_idxs: list[int] | None = _idxs
+        else:
+            self._fk_safety_link_idxs = None
+
+        # Per-joint noise ranges as a (num_all_joints, 2) float tensor on the
+        # device, ordered to match self._all_joint_idx (i.e. cfg.joints.all).
+        if _spn_cfg.enabled:
+            self._joint_noise_ranges = torch.tensor(
+                [list(r) for r in _spn_cfg.ranges],
+                device=self.device,
+                dtype=torch.float32,
+            )  # (num_all_joints, 2)
+        else:
+            self._joint_noise_ranges = None  # type: ignore[assignment]
+
+        # Table top z in the world frame.  The canonical scene places the
+        # table at env-local pos (0.45, 0.0, -0.5) with size (2, 2, 1) and
+        # env_origins[:, 2] == 0, so the table top sits at world-z = 0.0
+        # uniformly across envs.  Hard-code here with a comment so future
+        # scene edits surface this assumption.
+        self._table_top_z: float = 0.0
 
         # tip offset as tensor
         self._tip_offset = torch.tensor(
@@ -652,15 +696,96 @@ class So101LiftCube(DirectRLEnv):
             if deg is not None:
                 joint_pos[:, self._all_joint_idx[i]] = math.radians(deg)
 
-        # Add some random noise to starting joint positions
-        if self.cfg.joints.starting_position_noise.enabled:
-            noise_range = self.cfg.joints.starting_position_noise.range
-            joint_pos[:, self._dof_idx] += sample_uniform(
-                noise_range[0],
-                noise_range[1],
-                joint_pos[:, self._dof_idx].shape,
-                self.device,
-            )
+        # ── Per-joint starting-position noise + FK rejection-sampling ──────
+        # The previous implementation added a single global ±0.4 rad of noise
+        # to every active joint, which could dip the arm into the table at
+        # t=0 and trigger ``safety_touch_table_terminal``.  The new path:
+        #   1. samples per-joint ranges (cfg.joints.starting_position_noise.
+        #      ranges, aligned with cfg.joints.all);
+        #   2. when fk_safety.enabled, writes the candidate joints to sim,
+        #      reads tracked-link world-positions via Isaac Lab's kinematic
+        #      FK refresh (Articulation.data.body_pos_w), and resamples any
+        #      env whose minimum tracked-link z is below the table top by
+        #      less than fk_safety.min_link_z_above_table.
+        # The loop is vectorised over envs and bounded by max_resamples.
+        spn_cfg = self.cfg.joints.starting_position_noise
+        if spn_cfg.enabled:
+            n_envs = joint_pos.shape[0]
+            ranges = self._joint_noise_ranges  # (num_all_joints, 2)
+            assert ranges is not None  # set in __init__ when spn_cfg.enabled
+            lows = ranges[:, 0]
+            highs = ranges[:, 1]
+            num_all = ranges.shape[0]
+
+            # Snapshot the noise-free "base" positions for the noised joints
+            # (i.e. the cfg.joints.all columns) so we can re-derive new
+            # candidates on every resample iteration without losing the
+            # nominal starting position.
+            base_all = joint_pos[:, self._all_joint_idx].clone()  # (n_envs, num_all)
+
+            if self._fk_safety_link_idxs is not None:
+                env_ids_t = torch.as_tensor(
+                    list(env_ids), device=self.device, dtype=torch.long
+                )
+                min_z_required = (
+                    self._table_top_z + spn_cfg.fk_safety.min_link_z_above_table
+                )
+                accepted = torch.zeros(n_envs, dtype=torch.bool, device=self.device)
+                # Working candidate buffer; rows for accepted envs are frozen
+                # from the iteration in which they were accepted.
+                candidate = base_all.clone()
+
+                for _attempt in range(spn_cfg.fk_safety.max_resamples + 1):
+                    need = ~accepted
+                    n_need = int(need.sum().item())
+                    if n_need == 0:
+                        break
+
+                    # Sample new noise for the not-yet-accepted envs only.
+                    rand01 = torch.empty(
+                        n_need, num_all, device=self.device, dtype=torch.float32
+                    ).uniform_(0.0, 1.0)
+                    sample = lows + rand01 * (highs - lows)
+                    candidate[need] = base_all[need] + sample
+
+                    # Stage the FULL joint vector for the resetting envs and
+                    # write to sim so the kinematic FK refresh sees the
+                    # candidate pose.
+                    staged = joint_pos.clone()
+                    staged[:, self._all_joint_idx] = candidate
+                    self.robot.write_joint_position_to_sim(staged, env_ids=env_ids_t)
+
+                    # Reading body_pos_w invalidates the timestamp set by
+                    # write_joint_position_to_sim and triggers
+                    # _physics_sim_view.update_articulations_kinematic(),
+                    # which is a pure FK call (no physics step).
+                    body_z = self.robot.data.body_pos_w[
+                        env_ids_t[:, None], self._fk_safety_link_idxs, 2
+                    ]  # (n_envs, n_tracked_links)
+                    min_link_z = body_z.min(dim=1).values  # (n_envs,)
+                    newly_ok = (min_link_z >= min_z_required) & need
+                    accepted = accepted | newly_ok
+
+                if not bool(accepted.all().item()):
+                    n_failed = int((~accepted).sum().item())
+                    raise RuntimeError(
+                        f"Joint-noise FK safety: {n_failed}/{n_envs} envs "
+                        f"could not find a valid joint pose within "
+                        f"{spn_cfg.fk_safety.max_resamples} resamples "
+                        f"(min link z must be >= "
+                        f"{min_z_required:.4f} m).  Tighten "
+                        f"joints.starting_position_noise.ranges or relax "
+                        f"fk_safety.min_link_z_above_table."
+                    )
+
+                joint_pos[:, self._all_joint_idx] = candidate
+            else:
+                # Single-shot per-joint noise without FK guard.
+                rand01 = torch.empty(
+                    n_envs, num_all, device=self.device, dtype=torch.float32
+                ).uniform_(0.0, 1.0)
+                sample = lows + rand01 * (highs - lows)
+                joint_pos[:, self._all_joint_idx] = base_all + sample
 
         default_root_state = self.robot.data.default_root_state[env_ids].clone()
         default_root_state[:, :3] += self.scene.env_origins[env_ids]

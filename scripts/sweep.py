@@ -341,6 +341,46 @@ def expand_experiment_definition(config: dict) -> dict:
             exp["cnn_checkpoint"] = cnn_checkpoints[0]
         experiments.append(exp)
 
+    # ── Optional: replicate every experiment across multiple training seeds ──
+    # When ``base.seeds`` is provided, each experiment generated above is
+    # cloned once per seed and the seed is set explicitly on the clone.
+    # This is the canonical mechanism for multi-seed ablation studies: it
+    # keeps the per-condition env/agent overrides identical and varies only
+    # the RNG seed used by training.
+    #
+    # ``base.seed`` (singular) and ``base.seeds`` (plural) are mutually
+    # exclusive — the user must pick one explicitly. No silent default.
+    base = config.get("base") or {}
+    has_seed = "seed" in base
+    has_seeds = "seeds" in base
+    if has_seed and has_seeds:
+        raise ValueError(
+            "Sweep config base must set exactly one of 'seed' (single int) or "
+            "'seeds' (list of ints), not both."
+        )
+    if has_seeds:
+        seeds = base["seeds"]
+        if (
+            not isinstance(seeds, list)
+            or len(seeds) == 0
+            or not all(isinstance(s, int) and not isinstance(s, bool) for s in seeds)
+        ):
+            raise ValueError(
+                f"base.seeds must be a non-empty list of integers; got {seeds!r}"
+            )
+        if len(set(seeds)) != len(seeds):
+            raise ValueError(
+                f"base.seeds must contain unique integers; got duplicates in {seeds!r}"
+            )
+        replicated: List[dict] = []
+        for exp in experiments:
+            for seed in seeds:
+                clone = copy.deepcopy(exp)
+                clone["name"] = f"{exp['name']}_seed{seed}"
+                clone["seed"] = seed
+                replicated.append(clone)
+        experiments = replicated
+
     result = copy.deepcopy(config)
     del result["experiment_definition"]
     result["experiments"] = experiments
@@ -444,11 +484,45 @@ class SweepOrchestrator:
         if not base.get("task"):
             errors.append("config.base.task is required")
 
-        if not base.get("seed") and base.get("seed") != 0:
-            errors.append("config.base.seed is required (integer); no default allowed")
-        elif base.get("seed") is not None and not isinstance(base["seed"], int):
+        # Either base.seed (single, used for every experiment) or base.seeds
+        # (list, used to replicate every experiment) must be set explicitly.
+        # Mutual-exclusivity is enforced earlier in expand_experiment_definition;
+        # here we only need to confirm that at least one was provided in some
+        # form (either base.seed or via per-experiment 'seed' fields produced
+        # by seed-replication).
+        has_base_seed = "seed" in base
+        has_base_seeds = "seeds" in base
+        if has_base_seed and has_base_seeds:
             errors.append(
-                f"config.base.seed must be an integer, got {type(base['seed']).__name__}"
+                "config.base must set exactly one of 'seed' or 'seeds', not both"
+            )
+        elif has_base_seed:
+            if not isinstance(base["seed"], int) or isinstance(base["seed"], bool):
+                errors.append(
+                    f"config.base.seed must be an integer, "
+                    f"got {type(base['seed']).__name__}"
+                )
+        elif has_base_seeds:
+            seeds = base["seeds"]
+            if (
+                not isinstance(seeds, list)
+                or len(seeds) == 0
+                or not all(
+                    isinstance(s, int) and not isinstance(s, bool) for s in seeds
+                )
+            ):
+                errors.append(
+                    f"config.base.seeds must be a non-empty list of integers, "
+                    f"got {seeds!r}"
+                )
+            elif len(set(seeds)) != len(seeds):
+                errors.append(
+                    f"config.base.seeds must contain unique integers, got {seeds!r}"
+                )
+        else:
+            errors.append(
+                "config.base must set 'seed' (int) or 'seeds' (list[int]); "
+                "no default allowed"
             )
 
         if base.get("iters") is not None and (
@@ -604,7 +678,7 @@ class SweepOrchestrator:
             effective_timesteps = (base_agent_cfg.get("trainer") or {}).get("timesteps")
         settings: dict = {
             "task": base["task"],
-            "seed": exp.get("seed", base["seed"]),
+            "seed": exp.get("seed", base.get("seed")),
             "iters": iters,
             "effective_timesteps": effective_timesteps,
             "envs": base.get("envs"),
@@ -614,13 +688,28 @@ class SweepOrchestrator:
             "cnn_checkpoint": exp.get("cnn_checkpoint", base.get("cnn_checkpoint")),
         }
 
-        # apply env overrides
+        # apply env overrides: base.env_overrides (sweep-wide) first,
+        # then per-experiment env_overrides on top so per-experiment values
+        # take precedence.
+        sweep_env_overrides = base.get("env_overrides") or {}
+        env_cfg = _apply_env_overrides(base_env_cfg, sweep_env_overrides)
         env_overrides = exp.get("env_overrides") or {}
-        env_cfg = _apply_env_overrides(base_env_cfg, env_overrides)
+        env_cfg = _apply_env_overrides(env_cfg, env_overrides)
 
-        # apply agent overrides
+        # apply agent overrides: base.agent_overrides (sweep-wide) first,
+        # then per-experiment agent_overrides on top.
+        sweep_agent_overrides = base.get("agent_overrides") or {}
+        agent_cfg = _deep_merge(base_agent_cfg, sweep_agent_overrides)
         agent_overrides = exp.get("agent_overrides") or {}
-        agent_cfg = _deep_merge(base_agent_cfg, agent_overrides)
+        agent_cfg = _deep_merge(agent_cfg, agent_overrides)
+
+        # Recompute effective_timesteps once agent overrides have been applied,
+        # since base.agent_overrides.trainer.timesteps is the authoritative
+        # value when iters is not set.
+        if iters is None:
+            settings["effective_timesteps"] = (agent_cfg.get("trainer") or {}).get(
+                "timesteps"
+            )
 
         return env_cfg, agent_cfg, settings
 
@@ -1076,6 +1165,305 @@ class SweepOrchestrator:
             f.write("\n".join(lines) + "\n")
         _success(f"Summary Markdown: {summary_md_path}")
 
+    # ── aggregated summary (group by condition, average over seeds) ──────────
+    def generate_aggregated_summary(
+        self,
+        eval_subdir: str = "evaluation",
+        out_suffix: str = "",
+    ) -> None:
+        """
+        Group completed experiments by ablation condition (env_overrides +
+        agent_overrides + cnn_checkpoint, ignoring seed) and write per-group
+        N, mean, std, stderr, min, max for the headline metrics.
+
+        Outputs:
+          - sweep_dir/summary_aggregated<out_suffix>.json  (machine-readable)
+          - sweep_dir/summary_aggregated<out_suffix>.md    (human-readable)
+
+        This is the primary report for multi-seed sweeps; the per-experiment
+        ``summary{out_suffix}.json/.md`` produced by :meth:`generate_summary`
+        remains as a per-replica drill-down.
+
+        When every experiment is its own group (no replication), the file is
+        still written so downstream tooling can rely on its presence.
+        """
+        # ── group experiments by ablation condition ───────────────────────────
+        # Condition key = canonical JSON of (env_overrides, agent_overrides,
+        # cnn_checkpoint). Seed is excluded so replicas of the same condition
+        # collapse together.
+        experiments = self.config.get("experiments") or []
+        exp_by_name: Dict[str, dict] = {e["name"]: e for e in experiments}
+
+        def _condition_key(exp: dict) -> str:
+            payload = {
+                "env_overrides": exp.get("env_overrides") or {},
+                "agent_overrides": exp.get("agent_overrides") or {},
+                "cnn_checkpoint": exp.get("cnn_checkpoint"),
+            }
+            return json.dumps(payload, sort_keys=True, default=str)
+
+        groups: Dict[str, Dict[str, Any]] = {}
+        for exp_name, info in self._state["experiments"].items():
+            exp = exp_by_name.get(exp_name)
+            if exp is None:
+                continue
+            key = _condition_key(exp)
+            grp = groups.setdefault(
+                key,
+                {
+                    "label": exp_name.split("_seed")[0],
+                    "first_index": info["index"],
+                    "env_overrides": exp.get("env_overrides") or {},
+                    "agent_overrides": exp.get("agent_overrides") or {},
+                    "cnn_checkpoint": exp.get("cnn_checkpoint"),
+                    "members": [],
+                },
+            )
+            grp["members"].append({"name": exp_name, "info": info})
+            grp["first_index"] = min(grp["first_index"], info["index"])
+
+        # ── load metrics for each member ──────────────────────────────────────
+        metric_keys = (
+            "success_rate",
+            "lift_rate",
+            "drop_rate",
+            "mean_reward",
+            "mean_episode_length",
+            "mean_cube_bump",
+            "mean_time_to_lift",
+            "milestone_first_approach",
+            "milestone_first_grasp",
+            "milestone_first_lift",
+            "milestone_first_success",
+        )
+
+        def _load_member_metrics(exp_dir: Path) -> Dict[str, Optional[float]]:
+            out: Dict[str, Optional[float]] = {k: None for k in metric_keys}
+            results_path = exp_dir / eval_subdir / "results.json"
+            if results_path.is_file():
+                try:
+                    with open(results_path) as f:
+                        results = json.load(f)
+                    ss = results.get("summary_statistics") or {}
+                    out["mean_reward"] = ss.get("mean_reward")
+                    out["mean_episode_length"] = ss.get("mean_episode_length")
+                    es = results.get("episode_stats") or {}
+                    out["lift_rate"] = es.get("lift_rate")
+                    out["drop_rate"] = es.get("drop_rate")
+                    out["success_rate"] = es.get("success_rate")
+                    out["mean_cube_bump"] = es.get("mean_cube_bump")
+                    out["mean_time_to_lift"] = es.get("mean_time_to_lift")
+                except (json.JSONDecodeError, OSError):
+                    pass
+            milestones_path = exp_dir / "milestones.json"
+            if milestones_path.is_file():
+                try:
+                    with open(milestones_path) as f:
+                        milestones = json.load(f)
+                    for key in (
+                        "first_approach",
+                        "first_grasp",
+                        "first_lift",
+                        "first_success",
+                    ):
+                        entry = milestones.get(key)
+                        if entry is not None:
+                            out[f"milestone_{key}"] = entry.get("env_transitions")
+                except (json.JSONDecodeError, OSError):
+                    pass
+            return out
+
+        def _stats(values: List[float]) -> Dict[str, Optional[float]]:
+            n = len(values)
+            if n == 0:
+                return {
+                    "n": 0,
+                    "mean": None,
+                    "std": None,
+                    "stderr": None,
+                    "min": None,
+                    "max": None,
+                }
+            mean = sum(values) / n
+            if n > 1:
+                var = sum((v - mean) ** 2 for v in values) / (n - 1)
+                std = var**0.5
+                stderr = std / (n**0.5)
+            else:
+                std = 0.0
+                stderr = 0.0
+            return {
+                "n": n,
+                "mean": mean,
+                "std": std,
+                "stderr": stderr,
+                "min": min(values),
+                "max": max(values),
+            }
+
+        # ── compute group rows ────────────────────────────────────────────────
+        group_rows: List[Dict[str, Any]] = []
+        for key, grp in groups.items():
+            members = grp["members"]
+            seeds: List[Optional[int]] = []
+            done_count = 0
+            failed_count = 0
+            per_member_metrics: List[Dict[str, Optional[float]]] = []
+            for m in members:
+                exp = exp_by_name[m["name"]]
+                seeds.append(exp.get("seed"))
+                status = m["info"].get("status")
+                if status == "done":
+                    done_count += 1
+                    per_member_metrics.append(
+                        _load_member_metrics(Path(m["info"]["exp_dir"]))
+                    )
+                elif status == "failed":
+                    failed_count += 1
+
+            metric_stats: Dict[str, Dict[str, Optional[float]]] = {}
+            for mk in metric_keys:
+                vals: List[float] = [
+                    float(m[mk])  # type: ignore[arg-type]
+                    for m in per_member_metrics
+                    if m.get(mk) is not None
+                ]
+                metric_stats[mk] = _stats(vals)
+
+            group_rows.append(
+                {
+                    "label": grp["label"],
+                    "first_index": grp["first_index"],
+                    "n_total": len(members),
+                    "n_done": done_count,
+                    "n_failed": failed_count,
+                    "seeds": seeds,
+                    "env_overrides": grp["env_overrides"],
+                    "agent_overrides": grp["agent_overrides"],
+                    "cnn_checkpoint": grp["cnn_checkpoint"],
+                    "members": [m["name"] for m in members],
+                    "metrics": metric_stats,
+                }
+            )
+
+        group_rows.sort(key=lambda r: r["first_index"])
+
+        # ── summary_aggregated.json ───────────────────────────────────────────
+        agg = {
+            "sweep_id": self._state["sweep_id"],
+            "sweep_dir": self._state["sweep_dir"],
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "n_groups": len(group_rows),
+            "groups": group_rows,
+        }
+        agg_json_path = self.sweep_dir / f"summary_aggregated{out_suffix}.json"
+        with open(agg_json_path, "w") as f:
+            json.dump(agg, f, indent=2, default=str)
+        _success(f"Aggregated summary JSON: {agg_json_path}")
+
+        # ── summary_aggregated.md ─────────────────────────────────────────────
+        sweep_name = self.config.get("name", self._state["sweep_id"])
+
+        def _f(v: Optional[float], decimals: int = 3) -> str:
+            return f"{v:.{decimals}f}" if v is not None else "—"
+
+        def _pct(v: Optional[float]) -> str:
+            return f"{v * 100:.1f}%" if v is not None else "—"
+
+        def _ms(stats: Dict[str, Optional[float]], pct: bool = False) -> str:
+            mean = stats["mean"]
+            std = stats["std"]
+            if mean is None:
+                return "—"
+            if pct:
+                m = f"{mean * 100:.1f}%"
+                s = f"{std * 100:.1f}" if std is not None else "—"
+                return f"{m} ± {s}"
+            return f"{_f(mean)} ± {_f(std)}"
+
+        lines: List[str] = [
+            f"# Aggregated sweep summary: {sweep_name}",
+            "",
+            f"Generated: {agg['generated_at']}  ",
+            f"Sweep dir: `{self._state['sweep_dir']}`  ",
+            f"Conditions: {len(group_rows)}",
+            "",
+            "Per-condition statistics aggregate over seed replicas. "
+            "`mean ± std` is reported across replicas; n is the number of "
+            "completed replicas contributing to each statistic.",
+            "",
+            "## Results",
+            "",
+            "| # | Condition | n | Success Rate | Lift Rate | Drop Rate | Mean Reward | Cube Bump | Time to Lift |",
+            "|---|-----------|---|--------------|-----------|-----------|-------------|-----------|--------------|",
+        ]
+        for i, r in enumerate(group_rows, 1):
+            ms = r["metrics"]
+            lines.append(
+                f"| {i} "
+                f"| {r['label']} "
+                f"| {ms['success_rate']['n']} "
+                f"| {_ms(ms['success_rate'], pct=True)} "
+                f"| {_ms(ms['lift_rate'], pct=True)} "
+                f"| {_ms(ms['drop_rate'], pct=True)} "
+                f"| {_ms(ms['mean_reward'])} "
+                f"| {_ms(ms['mean_cube_bump'])} "
+                f"| {_ms(ms['mean_time_to_lift'])} |"
+            )
+
+        lines += [
+            "",
+            "## Milestones (env_transitions, mean ± std across seeds)",
+            "",
+            "| # | Condition | n | First Approach | First Grasp | First Lift | First Success |",
+            "|---|-----------|---|----------------|-------------|------------|---------------|",
+        ]
+        for i, r in enumerate(group_rows, 1):
+            ms = r["metrics"]
+            lines.append(
+                f"| {i} "
+                f"| {r['label']} "
+                f"| {ms['milestone_first_success']['n']} "
+                f"| {_ms(ms['milestone_first_approach'])} "
+                f"| {_ms(ms['milestone_first_grasp'])} "
+                f"| {_ms(ms['milestone_first_lift'])} "
+                f"| {_ms(ms['milestone_first_success'])} |"
+            )
+
+        lines += [
+            "",
+            "## Group details",
+            "",
+        ]
+        for i, r in enumerate(group_rows, 1):
+            lines.append(f"### {i}. {r['label']}")
+            lines.append(
+                f"- Replicas: {r['n_done']}/{r['n_total']} done"
+                + (f", {r['n_failed']} failed" if r["n_failed"] else "")
+            )
+            lines.append(f"- Seeds: {r['seeds']}")
+            lines.append(f"- Members: {', '.join(r['members'])}")
+            if r["env_overrides"]:
+                lines.append(
+                    "- env_overrides:\n```yaml\n"
+                    + yaml.safe_dump(r["env_overrides"], sort_keys=False).rstrip()
+                    + "\n```"
+                )
+            if r["agent_overrides"]:
+                lines.append(
+                    "- agent_overrides:\n```yaml\n"
+                    + yaml.safe_dump(r["agent_overrides"], sort_keys=False).rstrip()
+                    + "\n```"
+                )
+            if r["cnn_checkpoint"]:
+                lines.append(f"- cnn_checkpoint: `{r['cnn_checkpoint']}`")
+            lines.append("")
+
+        agg_md_path = self.sweep_dir / f"summary_aggregated{out_suffix}.md"
+        with open(agg_md_path, "w") as f:
+            f.write("\n".join(lines) + "\n")
+        _success(f"Aggregated summary Markdown: {agg_md_path}")
+
     # ── materialize only (no training) ────────────────────────────────────────
     def materialize_all(self) -> None:
         """
@@ -1130,16 +1518,32 @@ class SweepOrchestrator:
         """
         Run the sweep.
 
+        Resume semantics
+        ----------------
+        On every invocation (including a fresh start), any experiment whose
+        recorded status is ``"done"`` is **skipped unconditionally** — no
+        re-materialisation, no re-training, no re-evaluation.  This makes
+        ``./scripts/run.py sweep --resume DIR`` the canonical way to restart
+        an interrupted sweep:
+
+        * Experiments completed in the previous session are kept as-is.
+        * The first experiment whose status is ``"running"`` (interrupted
+          mid-step), ``"failed"``, or ``"pending"`` is restarted from scratch
+          (training begins fresh; partial checkpoints are not reused, since
+          train.py does not currently support mid-training resume).
+        * The loop then continues through the remaining experiments.
+
         Args:
-            from_experiment: If set, skip all experiments whose name comes
-                before this one alphabetically in order (by index) AND that
-                are already marked "done".  Use to restart from a specific
-                experiment.
+            from_experiment: If set, force the loop to begin at this
+                experiment name even if earlier experiments are not yet
+                ``"done"``.  Use to redo a single condition or restart from
+                the middle of a sweep on demand.  When unset, the loop
+                naturally resumes from the first non-done experiment.
             dry_run: Print commands without executing anything.
             retry_eval: When resuming, skip the training subprocess for any
-                experiment whose stored train_return_code is already 0 and
-                the checkpoint is present on disk.  Useful when all experiments
-                trained successfully but eval failed.
+                experiment whose stored ``train_return_code`` is already 0
+                and whose checkpoint is present on disk.  Useful when all
+                experiments trained successfully but eval failed.
         """
         self.validate()
 
@@ -1202,11 +1606,37 @@ class SweepOrchestrator:
             exp_name = exp["name"]
             exp_state = self._state["experiments"].get(exp_name, {})
 
-            # Skip experiments that are already done and come before from_idx
-            if idx < from_idx and exp_state.get("status") == "done":
+            # Resume rule: ALWAYS skip experiments already marked "done".
+            # This makes `--resume DIR` (with no other flags) the canonical
+            # way to pick up an interrupted sweep without re-running any
+            # completed work.  To force a re-run of a done experiment,
+            # delete its entry from sweep_state.json (or its experiment dir).
+            if exp_state.get("status") == "done":
                 _info(f"[{idx+1:02d}/{total}] '{exp_name}': skipping (already done)")
                 completed_count += 1
                 continue
+
+            # --from-experiment: skip not-yet-done experiments before the
+            # target index.  Useful to defer earlier failed/pending
+            # experiments and jump straight to one in the middle.
+            if idx < from_idx:
+                _info(
+                    f"[{idx+1:02d}/{total}] '{exp_name}': skipping "
+                    f"(before --from-experiment '{from_experiment}')"
+                )
+                continue
+
+            # Log resumption of an interrupted/failed experiment so it's visible.
+            if exp_state.get("status") == "running":
+                _info(
+                    f"[{idx+1:02d}/{total}] '{exp_name}': previous run was "
+                    f"interrupted (status='running') — restarting from scratch."
+                )
+            elif exp_state.get("status") == "failed":
+                _info(
+                    f"[{idx+1:02d}/{total}] '{exp_name}': previous run failed "
+                    f"— retrying."
+                )
 
             _header(f"[{idx+1:02d}/{total}] Experiment: {exp_name}")
 
@@ -1323,6 +1753,7 @@ class SweepOrchestrator:
         # ── generate summary ──────────────────────────────────────────────────
         _header("Sweep complete — generating summary")
         self.generate_summary()
+        self.generate_aggregated_summary()
 
         done_count = sum(
             1

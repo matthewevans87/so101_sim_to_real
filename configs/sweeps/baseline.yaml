@@ -11,8 +11,9 @@ base:
   # Base agent config; per-experiment agent_overrides are merged on top
   agent_config: so101_rl/source/so101_rl/so101_rl/tasks/direct/so101_lift_cube/agents/skrl_ppo_cfg.yaml
 
-  # Explicit seed for reproducibility
-  seed: 42
+  # Five training seeds per condition for noise-floor estimation; sweep.py
+  # replicates each experiment once per seed.
+  seeds: [42, 43, 44, 45, 46]
 
   # Parallel environments during training
   envs: 256
@@ -22,6 +23,13 @@ base:
 
   # GEN 2 CNN
   cnn_checkpoint: /mnt/nas_1/matthew-evans/so101_sim_to_real/pipelines/pipeline_20260419_131039/04_train_cnn/checkpoints/best_model.pt
+
+  # Sweep-wide agent overrides — applied to base agent config before any
+  # per-experiment agent_overrides. Bumps PPO training length to ~50k steps
+  # so policies plateau before evaluation.
+  agent_overrides:
+    trainer:
+      timesteps: 50000
 
 # ── eval settings ──────────────────────────────────────────────────────────────
 eval:
