@@ -26,9 +26,9 @@ LOG_DIR="$OUTPUT_DIR/logs"
 SWEEPS=(
     baseline.yaml
     comparison_vision_backbone.yaml
-    # ablation_grasp_phase.yaml
-    # ablations_approach_phase.yaml
-    # ablation_shaping.yaml
+    ablation_grasp_phase.yaml
+    ablations_approach_phase.yaml
+    ablation_shaping.yaml
 )
 
 # ── flag parsing ──────────────────────────────────────────────────────────────

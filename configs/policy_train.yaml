@@ -256,7 +256,7 @@ rewards:
   # E.g. scale=-0.01, N≈600 steps → total ≈ -3 per episode (mild shaping).
   # Tune scale so the total is small relative to sparse terminal rewards (±500).
   - type: time_penalty
-    enabled: false
+    enabled: true
     scale: -1.0
 
   # terminal when cube is pushed out of reach of the robot base
