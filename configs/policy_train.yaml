@@ -12,9 +12,31 @@ joints:
   active: ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"]
   wrist_roll_name: "wrist_roll"
   starting_position: [null, null, -25.0, 65.0, -90.0, null]
+  # Per-joint noise (rad), aligned 1:1 with joints.all.  Wide noise on yaw
+  # (shoulder_pan), wrist_roll and gripper is harmless; lift-axis joints
+  # (shoulder_lift / elbow_flex / wrist_flex) need tight noise to avoid
+  # dipping arm links into the table at t=0.  fk_safety provides a hard
+  # backstop via Isaac Lab kinematic FK rejection-sampling at reset.
   starting_position_noise:
     enabled: true
-    range: [-0.4, 0.4]
+    ranges:
+      - [-0.40, 0.40]   # shoulder_pan
+      - [-0.05, 0.05]   # shoulder_lift
+      - [-0.05, 0.05]   # elbow_flex
+      - [-0.05, 0.05]   # wrist_flex
+      - [-0.40, 0.40]   # wrist_roll
+      - [-0.40, 0.40]   # gripper
+    fk_safety:
+      enabled: true
+      min_link_z_above_table: 0.005   # m, 5 mm clearance to absorb FP noise
+      tracked_links:
+        - shoulder
+        - upper_arm
+        - lower_arm
+        - wrist
+        - gripper
+        - moving_jaw_so101_v1
+      max_resamples: 32
 
 control:
   action_scale: 1.0
@@ -350,9 +372,22 @@ domain_randomization:
     size_range: [0.975, 1.025]
     position_randomization:
       enabled: true
-      radius_range: [0.35, 0.40]
+      # NOTE: cube_out_of_range fires when
+      #   ||cube_pos_w - robot.root_pos_w|| > metrics.cube_out_of_range.
+      #   distance_threshold (= 0.40 m).
+      # The cube is sampled at env_origin + (r·cosθ, r·sinθ, z); the robot
+      # root is at env_origin + (0, 0, robot_root_z_offset_m), so the worst
+      # vertical separation is max(|z - offset|) = 0.04 - (-0.03) = 0.07 m.
+      # Worst distance = √(0.39² + 0.07²) = 0.3962 m, leaving ~3.8 mm of
+      # margin.  Enforced by
+      # So101EnvParams._validate_cross_field_invariants.
+      radius_range: [0.35, 0.39]
       angle_range: [-15.0, 15.0]
       z_range: [0.03, 0.04]
+      # Must match SO101_CFG.init_state.pos[2] in
+      # so101_rl.configurations.so101.  Negative because the robot root is
+      # spawned 3 cm below the env origin.
+      robot_root_z_offset_m: -0.03
   ground:
     enabled: false
   goal_zone:
