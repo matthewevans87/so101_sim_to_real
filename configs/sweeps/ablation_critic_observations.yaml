@@ -1,20 +1,5 @@
-# sweep_example.yaml — Example sweep configuration using experiment_definition.
-#
-# experiment_definition takes the Cartesian product across all config_sets to
-# produce a full grid of experiments.  Each config_set is one dimension of the
-# grid; within each config_set you list the values that dimension should take.
-#
-# This example sweeps 2 approach_phase scales × 2 grasp_phase scales = 4 runs.
-#
-# Run:            ./scripts/run.py sweep --sweep configs/sweep_example.yaml
-# Dry run:        ./scripts/run.py sweep --sweep configs/sweep_example.yaml --dry-run
-# Configs only:   ./scripts/run.py sweep --sweep configs/sweep_example.yaml --create-configs-only
-# Resume:         ./scripts/run.py sweep --resume sweeps/sweep_<name>_<timestamp>/
-#
-# Results are compared in sweeps/sweep_<name>_<timestamp>/summary.md
-
 # ── sweep identity ─────────────────────────────────────────────────────────────
-name: "ablation"
+name: "ablation_critic_observations"
 
 # ── base settings (shared by all experiments) ──────────────────────────────────
 base:
@@ -29,153 +14,27 @@ base:
   # Explicit seed for reproducibility
   seed: 42
 
-  # Number of PPO rollout iterations per experiment (optional).
-  # When set: trainer.timesteps = iters × agent.rollouts (32), e.g. iters=10000 → 320 000 steps.
-  # When omitted: trainer.timesteps from the agent config controls training length
-  #   (default: 25 000 total env steps, i.e. ~781 iterations at rollouts=32).
-  # iters: 10000
-
   # Parallel environments during training
   envs: 256
 
   headless: true
   cameras: true
+  # GEN 2 CNN
+  cnn_checkpoint: /mnt/nas_1/matthew-evans/so101_sim_to_real/pipelines/pipeline_20260419_131039/04_train_cnn/checkpoints/best_model.pt
 
 # ── eval settings ──────────────────────────────────────────────────────────────
 eval:
-  episodes: 100
-  # Parallel envs during eval. Intentionally lower than training (256) to avoid
-  # OOM: eval loads the full scene with cameras and rendering enabled.
+  episodes: 1024
   num_envs: 64
-  # Videos are opt-in. Set wrist_cam/overhead_cam to true to record.
-  # The overhead camera instantiates an extra viewport per env (~doubles VRAM vs training).
   num_videos: 5
   record_videos:
     wrist_cam: false
     overhead_cam: false
-    # Full Isaac Sim viewport (all envs tiled). Activates render_mode='rgb_array'.
     viewport_cam: false
   headless: true
   verbosity: basic
 
-# ── experiment definition ──────────────────────────────────────────────────────
-# Each config_set defines one dimension of the Cartesian product.
-# Experiments are named exp_001, exp_002, ... (leftmost config_set varies slowest).
-#
-# A config with no overrides (config: {}) acts as the "no change" option for
-# that dimension, giving you a row/column of baseline comparisons.
-#
-# env_overrides.rewards entries are matched by 'type' + optional 'id' and
-# patched field-by-field; all other reward fields and unmatched entries are
-# preserved unchanged.  All other keys use recursive dict merge.
-
 experiment_definition:
-
-# Vision Backbones
-  - config_set:
-      - config:
-          # GEN 1 CNN
-          cnn_checkpoint: /mnt/nas_1/matthew-evans/so101_sim_to_real/pipelines/pipeline_20260418_162511/04_train_cnn/checkpoints/best_model.pt
-      # - config:
-          # GEN 2 CNN
-          cnn_checkpoint: /mnt/nas_1/matthew-evans/so101_sim_to_real/pipelines/pipeline_20260419_131039/04_train_cnn/checkpoints/best_model.pt
-      - config:
-          # Frozen ResNet18 — no CNN checkpoint; cnn_checkpoint must be null
-          # when vision_encoder.type != 'frozen_cnn' (train.py will error otherwise).
-          cnn_checkpoint: null
-          env_overrides:
-            vision_encoder:
-              type: frozen_resnet18
-
-# Approach Phase Ablation
-  - config_set: 
-      - config: 
-          env_overrides:
-            rewards:
-              - type: approach_distance
-                enabled: false
-      - config: 
-          env_overrides:
-            rewards:
-              - type: approach_alignment
-                enabled: false
-      - config: 
-          env_overrides:
-            rewards:
-              - type: approach_phase
-                id: progressive
-                enabled: false
-      - config: 
-          env_overrides:
-            rewards:
-              - type: approach_phase
-                id: absolute
-                enabled: false
-      - config: 
-          env_overrides:
-            rewards:
-              - type: approach_phase_terminal
-                enabled: false
-
-#Grasp Phase Ablation
-  - config_set: 
-      - config: 
-          env_overrides:
-            rewards:
-              - type: grasp_phase
-                id: progressive
-                enabled: false 
-      - config: 
-          env_overrides:
-            rewards:
-              - type: grasp_phase
-                id: absolute
-                enabled: false 
-      - config: 
-          env_overrides:
-            rewards:
-              - type: grasp_phase_terminal
-                enabled: false
-
-#Lift Phase Ablation
-  - config_set: 
-      - config: 
-          env_overrides:
-            rewards:
-              - type: lift_phase
-                id: progressive
-                enabled: false 
-      - config: 
-          env_overrides:
-            rewards:
-              - type: lift_phase
-                id: absolute
-                enabled: false 
-      - config: 
-          env_overrides:
-            rewards:
-              - type: static
-                id: success_terminal
-                enabled: false
-
-#Shaping Ablation
-  - config_set: 
-      - config: 
-          env_overrides:
-            rewards:
-              - type: wrist_roll_pose
-                enabled: false  
-      - config: 
-          env_overrides:
-            rewards:
-              - type: avoid_bumping_cube
-                enabled: true
-      - config: 
-          env_overrides:
-            rewards:
-              - type: time_penalty
-                enabled: false
-
 
 #Critic Observation Ablation
   - config_set: 

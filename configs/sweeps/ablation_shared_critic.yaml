@@ -1,0 +1,98 @@
+# ── sweep identity ─────────────────────────────────────────────────────────────
+name: "ablation_shared_critic"
+
+# ── base settings (shared by all experiments) ──────────────────────────────────
+base:
+  task: So101-LiftCube-v0
+
+  env_config: configs/policy_train.yaml
+  agent_config: so101_rl/source/so101_rl/so101_rl/tasks/direct/so101_lift_cube/agents/skrl_ppo_cfg.yaml
+
+  seed: 42
+  envs: 256
+  headless: true
+  cameras: true
+  # GEN 2 CNN
+  cnn_checkpoint: /mnt/nas_1/matthew-evans/so101_sim_to_real/pipelines/pipeline_20260419_131039/04_train_cnn/checkpoints/best_model.pt
+
+# ── eval settings ──────────────────────────────────────────────────────────────
+eval:
+  episodes: 1024
+  num_envs: 64
+  num_videos: 5
+  record_videos:
+    wrist_cam: false
+    overhead_cam: false
+    viewport_cam: false
+  headless: true
+  verbosity: basic
+
+# ── experiment grid ─────────────────────────────────────────────────────────────
+# PURPOSE
+# -------
+# Empirically demonstrate that the installed skrl 1.4.3 IsaacLabWrapper
+# discards observations["critic"] and feeds only observations["policy"] to
+# both the policy and value networks (even when models.separate=true).
+# See:
+#   ~/.conda/envs/env_isaaclab/lib/python3.11/site-packages/skrl/envs/wrappers/torch/isaaclab_envs.py
+#   IsaacLabWrapper.step  →  self._observations = ... observations["policy"]
+#                            (no read of observations["critic"])
+#
+# DESIGN — isolate ONE factor (critic-obs presence)
+# -------------------------------------------------
+# Architecture is held constant (models.separate=true in both cells) so
+# the only difference is whether observations["critic"] carries privileged
+# state.  If skrl really routed the critic dict, exp_002 would give the
+# value head a strictly richer signal and should train faster / reach
+# higher success.  If the two cells are within seed-level noise, the
+# wrapper is confirmed to be discarding the critic dict.
+#
+# NOTE: a prior version of this sweep also flipped models.separate between
+# cells.  That confounded the test — shared vs separate trunks is a real
+# architectural change with its own effect on training dynamics.  Holding
+# separate=true fixed removes that confound.
+#
+# EXPERIMENTS (both fully explicit — no implicit baseline behaviour)
+# -----------------------------------------------------------------
+#   exp_001 "separate_no_critic_obs":
+#       models.separate: true
+#       observations.critic_include_vision_features: false
+#       observations.critic_obs_metrics: []
+#
+#   exp_002 "separate_with_critic_obs":
+#       models.separate: true
+#       observations.critic_include_vision_features: true
+#       observations.critic_obs_metrics: <full privileged-state list>
+experiment_definition:
+
+  - config_set:
+
+      # ── exp_001 — separate trunks, NO critic-only obs ─────────────────
+      - config:
+          agent_overrides:
+            models:
+              separate: true
+          env_overrides:
+            observations:
+              critic_include_vision_features: false
+              critic_obs_metrics: []
+
+      # ── exp_002 — separate trunks + privileged critic obs ─────────────
+      - config:
+          agent_overrides:
+            models:
+              separate: true
+          env_overrides:
+            observations:
+              critic_include_vision_features: true
+              critic_obs_metrics:
+                - cube_pos_gz
+                - cube_rot6d_gz
+                - cube_height_w
+                - gripper_cube_contact_force_magnitude
+                - fixed_jaw_cube_contact_force_magnitude
+                - is_table_touched
+                - normalized_grip_zone_cube_distance
+                - cube_linear_velocity
+                - cube_angular_velocity
+                - gripper_open_width

@@ -376,19 +376,28 @@ sensors:
     debug_vis: false
 
 observations:
-  critic_include_vision_features: true
+  # NOTE: As of skrl 1.4.3, the installed IsaacLabWrapper.step() reads only
+  # observations["policy"] and discards observations["critic"] (verified in
+  # ~/.conda/envs/env_isaaclab/lib/python3.11/site-packages/skrl/envs/wrappers/torch/isaaclab_envs.py).
+  # The PPO value network is therefore trained on the actor's obs vector
+  # regardless of `models.separate`. Until skrl is upgraded to a wrapper that
+  # routes the critic dict, the critic-specific entries below are commented
+  # out — populating them would just add dead compute. The empirical
+  # demonstration is in: configs/sweeps/ablation_shared_critic.yaml.
+  #
+  # critic_include_vision_features: true
+  # critic_obs_metrics:
+  #   - cube_pos_gz
+  #   - cube_rot6d_gz
+  #   - cube_height_w
+  #   - gripper_cube_contact_force_magnitude
+  #   - fixed_jaw_cube_contact_force_magnitude
+  #   - is_table_touched
+  #   - normalized_grip_zone_cube_distance
+  #   - cube_linear_velocity
+  #   - cube_angular_velocity
+  #   - gripper_open_width
   actor_obs_metrics: []
-  critic_obs_metrics:
-    - cube_pos_gz
-    - cube_rot6d_gz
-    - cube_height_w
-    - gripper_cube_contact_force_magnitude
-    - fixed_jaw_cube_contact_force_magnitude
-    - is_table_touched
-    - normalized_grip_zone_cube_distance
-    - cube_linear_velocity
-    - cube_angular_velocity
-    - gripper_open_width
   telemetry_metrics:
     - gripper_cube_alignment
 

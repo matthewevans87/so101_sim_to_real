@@ -1,0 +1,50 @@
+# ── sweep identity ─────────────────────────────────────────────────────────────
+name: "ablation_vision_backbone"
+
+# ── base settings (shared by all experiments) ──────────────────────────────────
+base:
+  task: So101-LiftCube-v0
+
+  # Base env config; per-experiment env_overrides are merged on top of this
+  env_config: configs/policy_train.yaml
+
+  # Base agent config; per-experiment agent_overrides are merged on top
+  agent_config: so101_rl/source/so101_rl/so101_rl/tasks/direct/so101_lift_cube/agents/skrl_ppo_cfg.yaml
+
+  # Explicit seed for reproducibility
+  seed: 42
+
+  # Parallel environments during training
+  envs: 256
+
+  headless: true
+  cameras: true
+
+# ── eval settings ──────────────────────────────────────────────────────────────
+eval:
+  episodes: 1024
+  num_envs: 64
+  num_videos: 5
+  record_videos:
+    wrist_cam: true
+    overhead_cam: true
+    viewport_cam: true
+  headless: true
+  verbosity: basic
+
+experiment_definition:
+# Vision Backbones
+  - config_set:
+      - config:
+          # GEN 1 CNN
+          cnn_checkpoint: /mnt/nas_1/matthew-evans/so101_sim_to_real/pipelines/pipeline_20260418_162511/04_train_cnn/checkpoints/best_model.pt
+      - config:
+          # GEN 2 CNN
+          cnn_checkpoint: /mnt/nas_1/matthew-evans/so101_sim_to_real/pipelines/pipeline_20260419_131039/04_train_cnn/checkpoints/best_model.pt
+      - config:
+          # Frozen ResNet18 — no CNN checkpoint; cnn_checkpoint must be null
+          # when vision_encoder.type != 'frozen_cnn' (train.py will error otherwise).
+          cnn_checkpoint: null
+          env_overrides:
+            vision_encoder:
+              type: frozen_resnet18

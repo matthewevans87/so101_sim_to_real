@@ -17,7 +17,6 @@ Commands:
     pin            Create named symlinks for frequently-used paths
     doctor         Diagnose X11 / display configuration
     viz-cnn        Visualize CNN training data and model predictions
-    viz-pipeline   Visualize image processing pipeline
     pipeline       Run the full train → collect → curate → train-cnn pipeline
     sweep          Run a grid of Train+Eval experiments and compare results
 
@@ -877,24 +876,6 @@ def cmd_viz_cnn(args) -> None:
     run_subprocess(cmd)
 
 
-def cmd_viz_pipeline(args) -> None:
-    py_cmd = resolve_python_cmd(
-        conda_env=getattr(args, "conda_env", None),
-        python_exe=getattr(args, "python", None),
-    )
-    cmd = py_cmd + ["-m", "so101.viz_pipeline"]
-
-    if args.image:
-        img = Path(args.image)
-        if not img.is_absolute():
-            img = PROJECT_ROOT / img
-        cmd += ["--image", str(img.resolve())]
-    if args.device:
-        cmd += ["--device", args.device]
-
-    run_subprocess(cmd)
-
-
 def cmd_sweep(args) -> None:
     resolve_x11(getattr(args, "display", None))
     sys.path.insert(0, str(Path(__file__).parent))
@@ -1196,7 +1177,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Record Isaac Sim full viewport (all envs tiled) as a single .mp4.",
     )
     p.add_argument("--envs", type=int, metavar="N")
-    p.add_argument("--cameras", action="store_true", help="Enable cameras (required for vision-based policies)")
+    p.add_argument(
+        "--cameras",
+        action="store_true",
+        help="Enable cameras (required for vision-based policies)",
+    )
     p.add_argument("--verbosity", choices=["full", "basic"], default="basic")
     p.add_argument("--headless", action="store_true")
     p.add_argument("--display", type=int, metavar="N")
@@ -1275,14 +1260,6 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--conda-env", metavar="NAME", dest="conda_env")
     p.add_argument("--python", metavar="PATH")
     p.set_defaults(func=cmd_viz_cnn)
-
-    # ── viz-pipeline ──────────────────────────────────────────────────────────
-    p = sub.add_parser("viz-pipeline", help="Visualize image processing pipeline")
-    p.add_argument("--image", metavar="PATH", help="Image or NPZ shard to preview")
-    p.add_argument("--device", metavar="DEVICE")
-    p.add_argument("--conda-env", metavar="NAME", dest="conda_env")
-    p.add_argument("--python", metavar="PATH")
-    p.set_defaults(func=cmd_viz_pipeline)
 
     # ── pipeline ──────────────────────────────────────────────────────────────
     p = sub.add_parser(

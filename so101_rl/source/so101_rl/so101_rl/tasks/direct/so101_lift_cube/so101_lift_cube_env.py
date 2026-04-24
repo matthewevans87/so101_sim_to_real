@@ -561,6 +561,28 @@ class So101LiftCube(DirectRLEnv):
         )
         critic_obs = torch.cat(critic_obs_parts, dim=-1)  # (N, state_space)
 
+        # NOTE (skrl 1.4.3 — asymmetric actor-critic NOT supported by wrapper)
+        # ----------------------------------------------------------------------
+        # We return the standard {"policy", "critic"} dict that the IsaacLab
+        # asymmetric AC contract specifies, BUT the installed skrl 1.4.3
+        # IsaacLabWrapper.step() only reads observations["policy"] and feeds
+        # those tensors to BOTH the policy and value networks (regardless of
+        # models.separate).  See:
+        #   ~/.conda/envs/env_isaaclab/lib/python3.11/site-packages/skrl/envs/
+        #     wrappers/torch/isaaclab_envs.py
+        #   IsaacLabWrapper.step:
+        #       self._observations = flatten_tensorized_space(
+        #           tensorize_space(self.observation_space,
+        #                           observations["policy"]))   # critic ignored
+        #
+        # Empirical confirmation: see sweep ablation_shared_critic
+        # (sweep_ablation_shared_critic_20260423_121336/summary.md) — holding
+        # models.separate=true fixed and only toggling the critic obs payload
+        # produced statistically indistinguishable training/eval results.
+        #
+        # The "critic" entry is kept here so this code is correct the moment
+        # skrl gains real asymmetric-AC support; until then a startup guard
+        # in train.py raises if a non-empty critic-only payload is configured.
         observations = {"policy": actor_obs, "critic": critic_obs}
 
         return observations

@@ -178,9 +178,7 @@ def main() -> int:
         _info(f"  exp_dir: {exp_dir}")
 
         if v2_results.is_file() and not args.force:
-            _info(
-                f"  skip: {v2_results} already exists (use --force to re-run)."
-            )
+            _info(f"  skip: {v2_results} already exists (use --force to re-run).")
             continue
 
         eval_cmd = orch._build_eval_cmd(exp_dir) + [
@@ -213,20 +211,14 @@ def main() -> int:
         # evaluation/ data unchanged).
         orch.generate_summary(eval_subdir="evaluation", out_suffix="")
         # v2 summary from the freshly written evaluation_v2/ data.
-        orch.generate_summary(
-            eval_subdir=args.eval_subdir, out_suffix=args.out_suffix
-        )
+        orch.generate_summary(eval_subdir=args.eval_subdir, out_suffix=args.out_suffix)
 
     # ── report ────────────────────────────────────────────────────────────────
     _header("Re-eval complete")
     _info(f"  generated_at: {datetime.now(timezone.utc).isoformat()}")
     _info(f"  sweep_dir:    {sweep_dir}")
-    _info(
-        f"  v2 summary:   {sweep_dir / ('summary' + args.out_suffix + '.json')}"
-    )
-    _info(
-        f"  v2 summary:   {sweep_dir / ('summary' + args.out_suffix + '.md')}"
-    )
+    _info(f"  v2 summary:   {sweep_dir / ('summary' + args.out_suffix + '.json')}")
+    _info(f"  v2 summary:   {sweep_dir / ('summary' + args.out_suffix + '.md')}")
     if failures:
         _error(f"  failures:     {len(failures)} experiments — {failures}")
         return 1

@@ -150,9 +150,7 @@ if args_cli.video:
 if args_cli.env_config is not None:
     _env_cfg_path = Path(args_cli.env_config).resolve()
     if not _env_cfg_path.is_file():
-        raise FileNotFoundError(
-            f"--env_config path does not exist: {_env_cfg_path}"
-        )
+        raise FileNotFoundError(f"--env_config path does not exist: {_env_cfg_path}")
     os.environ["SO101_ENV_CONFIG"] = str(_env_cfg_path)
 elif "SO101_ENV_CONFIG" not in os.environ:
     raise EnvironmentError(
@@ -503,6 +501,38 @@ def main(
     env = SkrlVecEnvWrapper(
         env, ml_framework=args_cli.ml_framework
     )  # same as: `wrap_env(env, wrapper="auto")`
+
+    # ── Asymmetric actor-critic guard (skrl 1.4.3) ─────────────────────────
+    # The installed skrl 1.4.3 IsaacLabWrapper.step() discards
+    # observations["critic"] and feeds observations["policy"] to BOTH the
+    # policy and value networks (regardless of models.separate). See:
+    #   ~/.conda/envs/env_isaaclab/lib/python3.11/site-packages/skrl/envs/
+    #     wrappers/torch/isaaclab_envs.py  (IsaacLabWrapper.step)
+    # Empirical confirmation: sweep_ablation_shared_critic_20260423_121336.
+    #
+    # If the env config asks for a privileged critic-only payload, we'd be
+    # silently computing it and throwing it away — a reproducibility hazard
+    # (and a misleading record in agent_config.yaml).  Fail fast instead.
+    # Remove this guard once skrl gains real asymmetric-AC support.
+    _obs_cfg = getattr(env_cfg, "observations", None)
+    if _obs_cfg is not None:
+        _critic_metrics = getattr(_obs_cfg, "critic_obs_metrics", []) or []
+        _critic_vision = bool(
+            getattr(_obs_cfg, "critic_include_vision_features", False)
+        )
+        if _critic_metrics or _critic_vision:
+            raise RuntimeError(
+                "Asymmetric actor-critic is configured "
+                f"(critic_include_vision_features={_critic_vision}, "
+                f"critic_obs_metrics={_critic_metrics}) but the installed "
+                "skrl 1.4.3 IsaacLabWrapper discards observations['critic'] "
+                "and routes only observations['policy'] to BOTH the policy "
+                "and value networks. The privileged critic payload would be "
+                "silently dropped. Set "
+                "observations.critic_include_vision_features=false and "
+                "observations.critic_obs_metrics=[] in the env config, or "
+                "upgrade skrl to a version that supports asymmetric AC."
+            )
 
     runner = Runner(env, agent_cfg)
 

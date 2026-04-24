@@ -107,9 +107,7 @@ class TerminationPipeline:
     def required_metric_keys(self) -> frozenset[str]:
         """Union of all ``requires_metrics`` declared by the conditions in
         this pipeline, plus metric keys referenced by gate conditions."""
-        cond_keys = frozenset().union(
-            *(c.requires_metrics for c in self.conditions)
-        )
+        cond_keys = frozenset().union(*(c.requires_metrics for c in self.conditions))
         gate_keys = frozenset(g.metric for c in self.conditions for g in c._gates)
         return cond_keys | gate_keys
 

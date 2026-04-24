@@ -1061,9 +1061,7 @@ class SweepOrchestrator:
                     if r.get("success_termination_id")
                     else ""
                 )
-                lines.append(
-                    f"- Primary termination causes{_success_marker}: {_parts}"
-                )
+                lines.append(f"- Primary termination causes{_success_marker}: {_parts}")
             if r["milestone_first_approach"] is not None:
                 lines.append(
                     f"- Milestones (env_transitions): approach={r['milestone_first_approach']:,} "

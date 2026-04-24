@@ -675,7 +675,16 @@ class SensorsCfg:
 
 @dataclass
 class ObservationsCfg:
-    critic_obs_metrics: list[str]
+    critic_obs_metrics: list[str] = field(default_factory=list)
+    """Extra metric keys appended to the critic observation vector.
+
+    NOTE: As of skrl 1.4.3 the installed ``IsaacLabWrapper.step`` discards
+    ``observations["critic"]`` and feeds only ``observations["policy"]`` to
+    both the policy and value networks.  Until skrl is upgraded to a
+    wrapper that routes the critic dict (see ``develop`` branch), entries
+    here are *computed but never seen by the critic network*.  Default is
+    an empty list so configs can omit the key entirely.
+    """
     actor_obs_metrics: list[str] = field(default_factory=list)
     """Extra metric keys appended to the actor observation vector after the
     frozen vision features and joint positions.  Defaults to an empty list
@@ -877,9 +886,7 @@ class So101EnvParams:
             # all other reward types have always required terminate=False
             # implicitly (they are not :class:`TerminalRewardStep` subclasses).
             legacy_default_terminate = type_name in legacy_terminal_metrics
-            terminate = entry.pop(
-                "terminate", legacy_default_terminate
-            )
+            terminate = entry.pop("terminate", legacy_default_terminate)
             if not terminate:
                 continue
             if not entry.get("enabled", True):

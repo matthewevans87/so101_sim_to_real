@@ -127,11 +127,17 @@ class RunManifest:
             seed=seed,
             trainer_timesteps=trainer_timesteps,
             training_command=list(training_command),
-            env_config_relpath=str(env_config_path.resolve().relative_to(experiment_dir.resolve())),
+            env_config_relpath=str(
+                env_config_path.resolve().relative_to(experiment_dir.resolve())
+            ),
             env_config_sha256=sha256_of_file(env_config_path),
-            agent_config_relpath=str(agent_config_path.resolve().relative_to(experiment_dir.resolve())),
+            agent_config_relpath=str(
+                agent_config_path.resolve().relative_to(experiment_dir.resolve())
+            ),
             agent_config_sha256=sha256_of_file(agent_config_path),
-            final_checkpoint_relpath=str(final_checkpoint_path.resolve().relative_to(experiment_dir.resolve())),
+            final_checkpoint_relpath=str(
+                final_checkpoint_path.resolve().relative_to(experiment_dir.resolve())
+            ),
             final_checkpoint_sha256=sha256_of_file(final_checkpoint_path),
             final_checkpoint_step=final_checkpoint_step,
             cnn_checkpoint_relpath=(
@@ -140,10 +146,14 @@ class RunManifest:
                 else None
             ),
             cnn_checkpoint_sha256=(
-                sha256_of_file(cnn_checkpoint_path) if cnn_checkpoint_path is not None else None
+                sha256_of_file(cnn_checkpoint_path)
+                if cnn_checkpoint_path is not None
+                else None
             ),
             cnn_checkpoint_source=(
-                str(cnn_checkpoint_source.resolve()) if cnn_checkpoint_source is not None else None
+                str(cnn_checkpoint_source.resolve())
+                if cnn_checkpoint_source is not None
+                else None
             ),
             extras=dict(extras or {}),
         )
@@ -198,7 +208,11 @@ class RunManifest:
         checks: list[tuple[str, str | None, str | None]] = [
             ("env_config", self.env_config_relpath, self.env_config_sha256),
             ("agent_config", self.agent_config_relpath, self.agent_config_sha256),
-            ("final_checkpoint", self.final_checkpoint_relpath, self.final_checkpoint_sha256),
+            (
+                "final_checkpoint",
+                self.final_checkpoint_relpath,
+                self.final_checkpoint_sha256,
+            ),
             ("cnn_checkpoint", self.cnn_checkpoint_relpath, self.cnn_checkpoint_sha256),
         ]
         for label, relpath, expected_sha in checks:

@@ -1,0 +1,11 @@
+# Backbone architecture for frozen_cnn vision encoder.
+# Matches both Gen1 (pipeline_20260418_162511) and Gen2 (pipeline_20260419_131039) checkpoints.
+# Source of truth: pipeline_*/04_train_cnn/config.yaml + artifacts/*/env_config.yaml
+
+channels:        [64, 128, 256, 512]
+kernel_sizes:    [5, 4, 3, 3]
+strides:         [2, 2, 2, 1]
+mlp_hidden_dims: [512]
+output_dim:      256
+image_height:    108
+image_width:     192

@@ -371,6 +371,38 @@ def main(
     experiment_path = _experiment_path
     print(f"[INFO] Loading experiment from: {experiment_path}")
 
+    # ── Per-experiment agent_config.yaml override ──────────────────────────
+    # The hydra entry point loads the *base* skrl_ppo_cfg.yaml, but the
+    # checkpoint was trained against the per-experiment frozen
+    # agent_config.yaml in the experiment dir (with sweep agent_overrides
+    # applied — e.g. models.separate=false produces a shared-trunk model
+    # whose state_dict layout differs from the separate-trunk default).
+    # We must replay those overrides here before the model is built so that
+    # the loaded state_dict matches the trained checkpoint.
+    _frozen_agent_cfg = experiment_path / "agent_config.yaml"
+    if _frozen_agent_cfg.is_file():
+        import copy as _copy
+        import yaml as _yaml
+
+        def _deep_merge(base: dict, overrides: dict) -> dict:
+            result = _copy.deepcopy(base)
+            for k, v in overrides.items():
+                if k in result and isinstance(result[k], dict) and isinstance(v, dict):
+                    result[k] = _deep_merge(result[k], v)
+                else:
+                    result[k] = _copy.deepcopy(v)
+            return result
+
+        with open(_frozen_agent_cfg) as _f:
+            _frozen = _yaml.safe_load(_f) or {}
+        experiment_cfg = _deep_merge(experiment_cfg, _frozen)
+        print(f"[INFO] Merged frozen agent_config.yaml: {_frozen_agent_cfg}")
+    else:
+        print(
+            f"[INFO] No frozen agent_config.yaml at {_frozen_agent_cfg}; "
+            f"using base agent cfg from hydra entry point."
+        )
+
     # Seed all RNGs to match training conditions for deterministic DR sampling.
     random.seed(_eval_seed)
     np.random.seed(_eval_seed)
