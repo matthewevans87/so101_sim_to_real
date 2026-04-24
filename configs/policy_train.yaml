@@ -113,6 +113,12 @@ metrics:
     pressure: 0.3   # exp(-pressure * dist / cube_width); higher = sharper peak at goal
     distance_threshold: 0.05  # metres — cube centroid within this distance is considered reached
 
+episode_stats:
+  lift_height_threshold: 0.02  # cube height above resting position (m) at which cube is considered 'lifted'
+                               # for lift_rate, drop_rate, and time_to_lift statistics.
+                               # Must be above physics jitter (~0.001–0.002 m); 0.02 m (2 cm) is a safe margin.
+                               # Intentionally smaller than metrics.lift_phase.height_threshold (0.20).
+
 rewards:
   # mode: absolute (default)     — reward the current metric value each step.
   # mode: unsigned_progressive    — reward only the improvement delta vs the previous step
@@ -136,11 +142,13 @@ rewards:
     scale: 1.0
 
   - type: approach_phase
+    id: progressive
     enabled: true
     scale: 5.0
     mode: unsigned_progressive
 
   - type: approach_phase
+    id: absolute
     enabled: true
     scale: 1.0
     mode: absolute
@@ -148,11 +156,11 @@ rewards:
   - type: approach_phase_terminal
     enabled: true
     scale: 500.0
-    terminate: false
     fire_once: true
 
   # GRASP
   - type: grasp_phase
+    id: progressive
     enabled: true
     scale: 10.0
     mode: unsigned_progressive
@@ -163,6 +171,7 @@ rewards:
         lte: 0.04
 
   - type: grasp_phase
+    id: absolute
     enabled: true
     scale: 5.0
     mode: absolute
@@ -175,11 +184,11 @@ rewards:
   - type: grasp_phase_terminal
     enabled: true
     scale: 500.0
-    terminate: false
     fire_once: true
         
   # LIFT
   - type: lift_phase
+    id: progressive
     enabled: true
     scale: 1000.0
     mode: signed_progressive
@@ -190,6 +199,7 @@ rewards:
         gte: 0.7
 
   - type: lift_phase
+    id: absolute
     enabled: true
     scale: 5.0
     mode: absolute
@@ -200,10 +210,10 @@ rewards:
         gte: 0.7
 
   - type: static
+    id: success_terminal
     enabled: true
     scale: 1000.0
     fire_once: true
-    terminate: true
     gates:
       - metric: cube_lift_fraction
         gte: 1.0
@@ -241,6 +251,14 @@ rewards:
     enabled: true
     scale: -1.0
 
+  # Time-based penalty: at step i the per-step penalty is scale * i/N.
+  # Total episode penalty ≈ scale * N/2 (triangular sum), not scale * N.
+  # E.g. scale=-0.01, N≈600 steps → total ≈ -3 per episode (mild shaping).
+  # Tune scale so the total is small relative to sparse terminal rewards (±500).
+  - type: time_penalty
+    enabled: false
+    scale: -1.0
+
   # terminal when cube is pushed out of reach of the robot base
   - type: cube_out_of_range_terminal
     enabled: true
@@ -249,6 +267,40 @@ rewards:
   - type: safety_touch_table_terminal
     enabled: true
     scale: 0.0
+
+
+# ===========================================================================
+# Termination conditions
+# ---------------------------------------------------------------------------
+# Each entry produces a TerminationCondition that ends the episode when its
+# gates evaluate True for an env on a step.  Termination is fully decoupled
+# from rewards: reward shaping that should accompany an end-of-episode event
+# is configured separately above (typically with `fire_once: true` and the
+# same gates).  Exactly one enabled entry must declare `is_success: true` so
+# the eval pipeline can classify the primary termination cause without
+# string-matching reward names.
+# ===========================================================================
+terminations:
+  - id: success_lift_fraction_terminal
+    enabled: true
+    is_success: true
+    gates:
+      - metric: cube_lift_fraction
+        gte: 1.0
+
+  - id: cube_out_of_range_terminal
+    enabled: true
+    is_success: false
+    gates:
+      - metric: is_cube_out_of_range
+        gte: 0.5
+
+  - id: safety_touch_table_terminal
+    enabled: true
+    is_success: false
+    gates:
+      - metric: is_table_touched
+        gte: 0.5
 
 
 domain_randomization:
@@ -324,19 +376,28 @@ sensors:
     debug_vis: false
 
 observations:
-  critic_include_vision_features: true
+  # NOTE: As of skrl 1.4.3, the installed IsaacLabWrapper.step() reads only
+  # observations["policy"] and discards observations["critic"] (verified in
+  # ~/.conda/envs/env_isaaclab/lib/python3.11/site-packages/skrl/envs/wrappers/torch/isaaclab_envs.py).
+  # The PPO value network is therefore trained on the actor's obs vector
+  # regardless of `models.separate`. Until skrl is upgraded to a wrapper that
+  # routes the critic dict, the critic-specific entries below are commented
+  # out — populating them would just add dead compute. The empirical
+  # demonstration is in: configs/sweeps/ablation_shared_critic.yaml.
+  #
+  # critic_include_vision_features: true
+  # critic_obs_metrics:
+  #   - cube_pos_gz
+  #   - cube_rot6d_gz
+  #   - cube_height_w
+  #   - gripper_cube_contact_force_magnitude
+  #   - fixed_jaw_cube_contact_force_magnitude
+  #   - is_table_touched
+  #   - normalized_grip_zone_cube_distance
+  #   - cube_linear_velocity
+  #   - cube_angular_velocity
+  #   - gripper_open_width
   actor_obs_metrics: []
-  critic_obs_metrics:
-    - cube_pos_gz
-    - cube_rot6d_gz
-    - cube_height_w
-    - gripper_cube_contact_force_magnitude
-    - fixed_jaw_cube_contact_force_magnitude
-    - is_table_touched
-    - normalized_grip_zone_cube_distance
-    - cube_linear_velocity
-    - cube_angular_velocity
-    - gripper_open_width
   telemetry_metrics:
     - gripper_cube_alignment
 
@@ -344,7 +405,7 @@ vision_encoder:
   # 'frozen_resnet18' — frozen pretrained ResNet18 + SpatialSoftmax (1024-D)
   # 'frozen_cnn'      — frozen pretrained CNN + SpatialSoftmax (2×channels[-1]-D = 1024-D)
   #                     Model weights loaded via --cnn_checkpoint.
-  type: frozen_resnet18
+  type: frozen_cnn
   # Image dimensions passed to the CNN. The env's ResizePipelineStep resizes to these.
   # 16:9 aspect ratio matching the physical Arducam 1080P (1920x1080) camera.
   # 108x192 is a 10x downscale; a no-op during sim training when the camera renders at this size.

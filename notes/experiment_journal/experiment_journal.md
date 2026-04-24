@@ -586,9 +586,11 @@ Todo
 - Run training on new cube
   - [x] Achieves lifting despite not retraining CNN. CNN will likely improve performance. See run `2026-04-18_12-29-55/`
     - Retrain Steps:
-      - [ ] Train RN18 policy
-      - [ ] Pipeline: Collect w/ RN18 -> CNN1
-      - [ ] Pipeline: Train Policy w/ CNN1 -> CNN2
+      - [x] Train RN18 policy
+      - [x] Pipeline: Collect w/ RN18 -> CNN1
+        - `/mnt/nas_1/matthew-evans/so101_sim_to_real/pipelines/pipeline_20260418_162511/04_train_cnn/checkpoints/best_model.pt`
+      - [x] Train CNN1 policy
+      - [...] Pipeline: Train Policy w/ CNN1 -> CNN2
 - Lift Task
   - Re-train with latest changes (but with config set to lift goal only)
   - Commit changes
@@ -605,3 +607,114 @@ Todo
 
 *Contemplations:*
 The goal zone, as currently designed, as a known location. This means we're just trying to train the policy to do FK, which isn't novel or needed. There's no great learned capability here. The impressive bit is finding and picking the object. If you want to create a visual target for placement, that's fine, but that's a different task.
+
+
+## April 20, 2026
+
+We need to document performance of the following
+- policy model training
+  - entropy curve
+  - ppo updates to first successful approach
+  - ppo updates to first successful grasp
+  - ppo updates to first successful lift
+- policy model
+  - lift rate: the perfect of episodes that lifted the cube > 1cm
+  - drop rate: the percent episodes with where the cube was lifted > 1cm but then dropped it back to the table (i.e., no longer grasped and is in contact with table)
+  - success rate: the percent of episodes that lift the cube to the height threshold before episode timeout
+  - cube bump: the sum of the norm of cube linear velocity when the cube not grasped
+  - time to lift: the mean time to lift the cube to the threshold, ignoring episodes that timed out
+
+
+
+
+## April 22, 2026 — Phase A/B re-evaluation of `sweep_reward_scale_grid_20260422_110823`
+
+After the Phase A (termination-pipeline as a first-class citizen) and Phase B
+(eval-stats audit; `1 episode = 1 data point`) refactors landed, the four
+experiments in
+`/mnt/nas_1/matthew-evans/so101_sim_to_real/sweeps/sweep_reward_scale_grid_20260422_110823/`
+were re-evaluated using the new pipeline. Original eval data is preserved under
+each experiment's `evaluation/` directory; the re-eval data is in
+`evaluation_v2/` and a side-by-side summary is written to `summary_v2.{json,md}`.
+
+Re-eval was driven by `scripts/reeval_sweep.py` (new), which calls
+`evaluate.py --eval-subdir evaluation_v2 ...` per experiment using the original
+sweep's `eval` block (100 episodes requested → 128 actual at 64 envs).
+
+### Headline numbers (old → new)
+
+| exp     | success_rate     | lift_rate        | mean_reward         | mean_episode_length |
+|---------|------------------|------------------|---------------------|---------------------|
+| exp_001 | 60.9% → **71.1%** | 64.8% → **75.8%** | 2772 → 2785          | 121.6 → 122.6        |
+| exp_002 | 57.8% → 55.5%    | 70.3% → 68.8%    | 2587 → 2375          | 109.6 → 102.9        |
+| exp_003 | 58.6% → 62.5%    | 65.6% → 68.8%    | 2728 → 2649          | 157.2 → 149.8        |
+| exp_004 | 43.8% → **52.3%** | 54.7% → **62.5%** | 2616 → 2585          | 156.9 → 169.3        |
+
+`success_rate` shifts of >10pp on exp_001 and >8pp on exp_004 are flagged. None
+of these are within run-to-run noise for a single 128-episode pass; they
+represent a genuine schema change driven by Phase B (see below).
+
+### Termination-cause diagnosis
+
+The OLD `termination_primary_counts` for every experiment was dominated by
+`approach_phase_terminal` (73-79% of episodes), even though that reward in the
+frozen `env_config.yaml` files is explicitly `terminate: false`:
+
+```
+- type: approach_phase_terminal
+  terminate: false
+```
+
+That reward was being counted as a termination cause by the pre-Phase-B
+classifier because the old eval inferred the primary cause by string-matching
+`*_terminal*` reward names against the per-episode reward log, not against
+actual termination triggers. After Phase B, primary classification is anchored
+on the canonical `termination_pipeline.success_condition_log_name`
+(`success_termination_id`) and reads only from
+`EpisodeStatsPipeline.completed_episodes`.
+
+The new primary distributions are coherent and sum to 100%:
+
+| exp     | success_termination_id | static (success) | cube_out_of_range | safety_touch_table | time_out |
+|---------|------------------------|------------------|-------------------|--------------------|----------|
+| exp_001 | `static`               | 91 (71.1%)       | 32 (25.0%)        | 1 (0.8%)           | 4 (3.1%) |
+| exp_002 | `static`               | 71 (55.5%)       | 48 (37.5%)        | 7 (5.5%)           | 2 (1.6%) |
+| exp_003 | `static`               | 80 (62.5%)       | 40 (31.2%)        | 5 (3.9%)           | 3 (2.3%) |
+| exp_004 | `static`               | 67 (52.3%)       | 47 (36.7%)        | 9 (7.0%)           | 5 (3.9%) |
+
+The new `static` (= success) primary count exactly matches the new
+`success_rate` to within rounding, which is the invariant Phase B was designed
+to enforce: success_rate is now derived from the same per-episode source of
+truth as the primary termination histogram. Pre-Phase-B these two numbers came
+from independent code paths and disagreed.
+
+### Why headline numbers shifted
+
+- The frozen `env_config.yaml` files explicitly disable
+  `approach_phase_terminal` and `grasp_phase_terminal` (`terminate: false`), so
+  the Phase A migration shim correctly excludes them. Migrated terminations:
+  `static` (is_success=True), `cube_out_of_range_terminal`, `safety_touch_table_terminal`.
+- The trained checkpoints + env config are unchanged. The agent rolls out the
+  same policy in the same environment.
+- Eval seed is identical (training seed=42), but stochastic DR sampling and
+  GPU reduction order produce slightly different rollouts.
+- The `success_rate` shifts are partly that re-roll noise, but the larger
+  exp_001/exp_004 jumps (>8pp) most likely reflect that the OLD eval had a
+  silent truncation bug
+  (`all_episode_stats[: len(all_episode_data)]`) that dropped the trailing
+  few episodes per env from `episode_stats`; the new code asserts every env
+  contributes exactly `episodes_per_env` to the aggregate.
+
+### Files
+
+- `summary.json` / `summary.md` — regenerated against original `evaluation/` data
+  using the Phase B summary schema. Numerical metrics for the original eval are
+  unchanged; the new fields (`success_termination_id`,
+  `termination_primary_counts`, `termination_flag_counts`) appear as `null` for
+  the original eval (it predates them).
+- `summary_v2.json` / `summary_v2.md` — regenerated against `evaluation_v2/`
+  data. All Phase B fields populated; `success_termination_id == "static"` for
+  every experiment.
+- `scripts/reeval_sweep.py` — driver, reusable for any finished sweep.
+- `evaluate.py --eval-subdir <name>` — new flag (default `evaluation`)
+  to write into a sibling directory without overwriting prior results.

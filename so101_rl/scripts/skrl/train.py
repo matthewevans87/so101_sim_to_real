@@ -15,6 +15,7 @@ a more user-friendly way.
 import argparse
 import copy
 import json
+import os
 import shutil
 import sys
 from datetime import datetime, timezone
@@ -118,6 +119,18 @@ parser.add_argument(
         "Override values take precedence over the registered defaults."
     ),
 )
+parser.add_argument(
+    "--env_config",
+    type=str,
+    default=None,
+    help=(
+        "Path to the env config YAML that drives the So101LiftCubeCfg module.  "
+        "When provided, this script sets SO101_ENV_CONFIG explicitly before any "
+        "task module is imported.  If omitted, the SO101_ENV_CONFIG environment "
+        "variable must already be set; otherwise startup fails immediately with a "
+        "descriptive error."
+    ),
+)
 
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
@@ -126,6 +139,25 @@ args_cli, hydra_args = parser.parse_known_args()
 # always enable cameras to record video
 if args_cli.video:
     args_cli.enable_cameras = True
+
+# ── Resolve env-config contract BEFORE any so101_rl import ────────────────────
+# The env config is read at module-import time inside
+# so101_rl.tasks.direct.so101_lift_cube.so101_lift_cube_env_cfg via
+# os.environ["SO101_ENV_CONFIG"].  This block makes the contract explicit:
+# either the user passes --env_config (preferred, sweep orchestrator does this),
+# or the env var is already set externally.  Anything else fails loud here
+# rather than as an opaque KeyError deep inside Hydra.
+if args_cli.env_config is not None:
+    _env_cfg_path = Path(args_cli.env_config).resolve()
+    if not _env_cfg_path.is_file():
+        raise FileNotFoundError(f"--env_config path does not exist: {_env_cfg_path}")
+    os.environ["SO101_ENV_CONFIG"] = str(_env_cfg_path)
+elif "SO101_ENV_CONFIG" not in os.environ:
+    raise EnvironmentError(
+        "SO101_ENV_CONFIG is not set and --env_config was not provided. "
+        "Pass --env_config <path/to/env.yaml> or export SO101_ENV_CONFIG before "
+        "launching train.py."
+    )
 
 # clear out sys.argv for Hydra
 sys.argv = [sys.argv[0]] + hydra_args
@@ -138,7 +170,6 @@ simulation_app = app_launcher.app
 
 import gymnasium as gym
 import numpy as np
-import os
 import random
 import torch
 
@@ -433,6 +464,23 @@ def main(
         args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None
     )
 
+    # Inject milestone log into the episode stats pipeline so that exact
+    # env_transitions counts are written to milestones.json at each milestone.
+    from so101_rl.milestone_log import MilestoneLog
+
+    _milestone_log = MilestoneLog(
+        output_path=os.path.join(args_cli.artifacts_dir, "milestones.json"),
+        num_envs=env_cfg.scene.num_envs,
+    )
+    _underlying_env = env.unwrapped
+    if hasattr(_underlying_env, "episode_stats_pipeline"):
+        _underlying_env.episode_stats_pipeline.set_milestone_log(_milestone_log)
+    else:
+        omni.log.warn(
+            "[MilestoneLog] episode_stats_pipeline not found on unwrapped env; "
+            "milestones.json will not be written."
+        )
+
     # convert to single-agent instance if required by the RL algorithm
     if isinstance(env.unwrapped, DirectMARLEnv) and algorithm in ["ppo"]:
         env = multi_agent_to_single_agent(env)
@@ -454,6 +502,38 @@ def main(
         env, ml_framework=args_cli.ml_framework
     )  # same as: `wrap_env(env, wrapper="auto")`
 
+    # ── Asymmetric actor-critic guard (skrl 1.4.3) ─────────────────────────
+    # The installed skrl 1.4.3 IsaacLabWrapper.step() discards
+    # observations["critic"] and feeds observations["policy"] to BOTH the
+    # policy and value networks (regardless of models.separate). See:
+    #   ~/.conda/envs/env_isaaclab/lib/python3.11/site-packages/skrl/envs/
+    #     wrappers/torch/isaaclab_envs.py  (IsaacLabWrapper.step)
+    # Empirical confirmation: sweep_ablation_shared_critic_20260423_121336.
+    #
+    # If the env config asks for a privileged critic-only payload, we'd be
+    # silently computing it and throwing it away — a reproducibility hazard
+    # (and a misleading record in agent_config.yaml).  Fail fast instead.
+    # Remove this guard once skrl gains real asymmetric-AC support.
+    _obs_cfg = getattr(env_cfg, "observations", None)
+    if _obs_cfg is not None:
+        _critic_metrics = getattr(_obs_cfg, "critic_obs_metrics", []) or []
+        _critic_vision = bool(
+            getattr(_obs_cfg, "critic_include_vision_features", False)
+        )
+        if _critic_metrics or _critic_vision:
+            raise RuntimeError(
+                "Asymmetric actor-critic is configured "
+                f"(critic_include_vision_features={_critic_vision}, "
+                f"critic_obs_metrics={_critic_metrics}) but the installed "
+                "skrl 1.4.3 IsaacLabWrapper discards observations['critic'] "
+                "and routes only observations['policy'] to BOTH the policy "
+                "and value networks. The privileged critic payload would be "
+                "silently dropped. Set "
+                "observations.critic_include_vision_features=false and "
+                "observations.critic_obs_metrics=[] in the env config, or "
+                "upgrade skrl to a version that supports asymmetric AC."
+            )
+
     runner = Runner(env, agent_cfg)
 
     # load checkpoint (if specified)
@@ -463,6 +543,92 @@ def main(
 
     # run training
     runner.run()
+
+    # ── Write run manifest ──────────────────────────────────────────────────
+    # The manifest is the contract eval reads to know exactly which configs and
+    # checkpoints were produced by this run.  Anything that affects the run's
+    # reproducibility belongs here.  Failures during manifest write are
+    # FATAL — without it, eval cannot trust the experiment dir.
+    from so101_rl.run_manifest import RunManifest
+
+    artifacts_path = Path(args_cli.artifacts_dir).resolve()
+
+    # Ensure env_config.yaml lives at the canonical experiment-dir location.
+    # Sweep / run.py already copy it there; we double-check and copy if not.
+    canonical_env_cfg = artifacts_path / "env_config.yaml"
+    src_env_cfg = Path(os.environ["SO101_ENV_CONFIG"]).resolve()
+    if not canonical_env_cfg.is_file():
+        shutil.copy2(src_env_cfg, canonical_env_cfg)
+    elif canonical_env_cfg.resolve() != src_env_cfg:
+        # Both exist but at different paths — the upstream caller staged it for us.
+        # Verify byte-equality so the hash recorded in the manifest matches what
+        # the env config module actually loaded.
+        if canonical_env_cfg.read_bytes() != src_env_cfg.read_bytes():
+            raise RuntimeError(
+                f"env_config drift detected: SO101_ENV_CONFIG points to {src_env_cfg} "
+                f"but the experiment dir already contains a different env_config.yaml at "
+                f"{canonical_env_cfg}.  Refusing to write an inconsistent manifest."
+            )
+
+    # Locate the highest-step checkpoint produced by skrl.
+    # Convention is agent_<step>.pt; we treat the maximum step as the final.
+    ckpt_dir = artifacts_path / "skrl" / "agent" / "checkpoints"
+    if not ckpt_dir.is_dir():
+        raise RuntimeError(
+            f"Expected skrl checkpoint directory at {ckpt_dir} but it does not exist. "
+            f"Training appears not to have produced any checkpoints."
+        )
+    step_ckpts: list[tuple[int, Path]] = []
+    for p in ckpt_dir.glob("agent_*.pt"):
+        stem = p.stem  # e.g. "agent_15000"
+        try:
+            step_ckpts.append((int(stem.split("_", 1)[1]), p))
+        except (ValueError, IndexError):
+            continue
+    if not step_ckpts:
+        raise RuntimeError(
+            f"No agent_<step>.pt checkpoints found in {ckpt_dir}. "
+            f"Cannot record a final checkpoint in the manifest."
+        )
+    final_step, final_ckpt = max(step_ckpts, key=lambda t: t[0])
+
+    # Find the agent_config.yaml produced by sweep (preferred) or fall back to
+    # the dumped agent.yaml in the skrl params/ dir.
+    agent_cfg_canonical = artifacts_path / "agent_config.yaml"
+    if not agent_cfg_canonical.is_file():
+        # Use train.py's own dumped copy as the canonical file and mirror it.
+        dumped_agent = artifacts_path / "skrl" / "params" / "agent.yaml"
+        if not dumped_agent.is_file():
+            raise RuntimeError(
+                f"No agent_config.yaml at {agent_cfg_canonical} and no fallback at "
+                f"{dumped_agent}.  Cannot write manifest."
+            )
+        shutil.copy2(dumped_agent, agent_cfg_canonical)
+
+    cnn_ckpt_path: Path | None = None
+    cnn_ckpt_source: Path | None = None
+    if args_cli.cnn_checkpoint:
+        cnn_ckpt_path = artifacts_path / "cnn_checkpoint.pt"
+        cnn_ckpt_source = Path(args_cli.cnn_checkpoint).resolve()
+
+    repo_root = Path(__file__).resolve().parents[3]
+    manifest = RunManifest.build(
+        experiment_dir=artifacts_path,
+        repo_root=repo_root,
+        task=args_cli.task,
+        seed=int(agent_cfg["seed"]),
+        trainer_timesteps=int(agent_cfg["trainer"]["timesteps"]),
+        training_command=list(sys.argv),
+        env_config_path=canonical_env_cfg,
+        agent_config_path=agent_cfg_canonical,
+        final_checkpoint_path=final_ckpt,
+        final_checkpoint_step=final_step,
+        cnn_checkpoint_path=cnn_ckpt_path,
+        cnn_checkpoint_source=cnn_ckpt_source,
+    )
+    manifest_path = manifest.write(artifacts_path)
+    print(f"[INFO] RunManifest written: {manifest_path}")
+    print(f"[INFO] Final checkpoint: {final_ckpt} (step {final_step})")
 
     # close the simulator
     env.close()

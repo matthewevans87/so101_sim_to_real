@@ -304,18 +304,61 @@ class RewardCfg:
     ``'signed_progressive'``: reward = \u0394base * scale; regressions yield negative
     reward, discouraging lift\u2192lower\u2192lift cycles."""
     gates: list[GateCfg] = field(default_factory=list)
-    """Optional gate conditions. Reward (and termination for terminal steps) is
-    suppressed for any environment where a gate condition is not met."""
-    terminate: bool = True
-    """For terminal reward steps only: whether firing this step actually ends the
-    episode.  Set ``terminate: false`` to give a large one-off bonus without
-    resetting the environment, allowing subsequent phases (e.g. grasp_phase) to
-    continue in the same episode."""
+    """Optional gate conditions. Reward is suppressed for any environment where
+    a gate condition is not met."""
     fire_once: bool = False
     """When ``True``, the reward fires at most once per episode, on the first
     step the (post-gate) reward is non-zero.  Subsequent steps yield no
     additional reward.  Valid for any reward step type.  Use with ``gates`` to
     express milestone bonuses (e.g. gate on ``cube_height_w >= 0.10``)."""
+    id: str | None = None
+    """Optional human-readable identifier for this reward instance.
+
+    When set, the TensorBoard logging key becomes ``Episode_Reward/<type>[<id>]``
+    instead of ``Episode_Reward/<type>``.  This is required when the same
+    ``type`` appears more than once in the rewards list (e.g. two
+    ``approach_phase`` entries with different modes) so that each instance
+    can be monitored and targeted by sweep overrides independently.
+
+    Sweep override entries are matched by ``(type, id)`` when ``id`` is
+    present, or by ``type`` alone when ``id`` is absent."""
+
+
+# ---------------------------------------------------------------------------
+# Terminations
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class TerminationCfg:
+    """Configuration for a single :class:`TerminationCondition`.
+
+    A termination condition fires when its gate predicate evaluates True for
+    an environment.  Firing causes the episode to end (terminated, not
+    time-out).  The :class:`TerminationPipeline` ORs together the enabled
+    conditions to produce the final terminal mask.
+
+    There is intentionally no ``terminate`` field: presence in the
+    ``terminations`` list IS the termination intent.  Reward shaping that
+    should accompany termination is configured separately in ``rewards``
+    (typically with ``fire_once: true`` and matching gates).
+    """
+
+    enabled: bool
+    is_success: bool
+    """When True, this condition is treated as the task-success terminal by
+    the eval pipeline (used to classify the primary cause of an episode end).
+    Exactly one enabled termination condition must declare ``is_success: true``;
+    cross-field validation enforces this."""
+    gates: list[GateCfg] = field(default_factory=list)
+    """Gate conditions; the condition fires only when ALL gates pass.  An empty
+    gates list means the condition fires every step for every environment
+    (i.e. an immediate termination), which is almost never what is wanted —
+    cross-field validation rejects empty gates on enabled conditions."""
+    id: str | None = None
+    """Required when more than one TerminationCfg of the same registered type
+    is present.  Also serves as the TensorBoard logging key suffix
+    (``Termination/<id>``)."""
 
 
 @dataclass(kw_only=True)
@@ -632,7 +675,16 @@ class SensorsCfg:
 
 @dataclass
 class ObservationsCfg:
-    critic_obs_metrics: list[str]
+    critic_obs_metrics: list[str] = field(default_factory=list)
+    """Extra metric keys appended to the critic observation vector.
+
+    NOTE: As of skrl 1.4.3 the installed ``IsaacLabWrapper.step`` discards
+    ``observations["critic"]`` and feeds only ``observations["policy"]`` to
+    both the policy and value networks.  Until skrl is upgraded to a
+    wrapper that routes the critic dict (see ``develop`` branch), entries
+    here are *computed but never seen by the critic network*.  Default is
+    an empty list so configs can omit the key entirely.
+    """
     actor_obs_metrics: list[str] = field(default_factory=list)
     """Extra metric keys appended to the actor observation vector after the
     frozen vision features and joint positions.  Defaults to an empty list
@@ -683,6 +735,16 @@ class VisionEncoderCfg:
 
 
 @dataclass
+class EpisodeStatsCfg:
+    lift_height_threshold: float
+    """Cube height above resting position (m) at which the cube is considered
+    'lifted' for the purposes of ``lift_rate``, ``drop_rate``, and
+    ``time_to_lift`` statistics.  Should be a small positive value (e.g. 0.01)
+    to detect any departure from the table, rather than the full
+    ``lift_phase.height_threshold`` used for the success condition."""
+
+
+@dataclass
 class So101EnvParams:
     decimation: int
     episode_length_s: float
@@ -696,7 +758,9 @@ class So101EnvParams:
     debug: DebugCfg
     behavior: BehaviorCfg
     metrics: MetricsCfg
+    episode_stats: EpisodeStatsCfg
     rewards: list[dict]
+    terminations: list[dict]
     domain_randomization: DomainRandomizationCfg
     sensors: SensorsCfg
     observations: ObservationsCfg
@@ -740,4 +804,198 @@ class So101EnvParams:
         if not isinstance(data, dict):
             raise TypeError("Top-level YAML must be a mapping.")
         print(f"[So101EnvParams] Loading from: {config_path}")
-        return _from_dict(cls, data)  # type: ignore[return-value]
+        cls._migrate_legacy_termination_schema(data, config_path)
+        params = _from_dict(cls, data)  # type: ignore[assignment]
+        params._validate_cross_field_invariants(config_path)
+        return params
+
+    @staticmethod
+    def _migrate_legacy_termination_schema(data: dict, config_path: Path) -> None:
+        """Auto-migrate pre-Phase-A configs (``terminate`` field on rewards)
+        to the new ``terminations`` list schema, in-place on *data*.
+
+        Detection: a config is considered legacy when no top-level
+        ``terminations`` key is present.  Migration generates termination
+        entries from any reward whose ``terminate`` field is True (the old
+        default for terminal reward steps), then strips the ``terminate``
+        field from every reward entry so :class:`RewardCfg` (which no longer
+        carries ``terminate``) accepts it.
+
+        This shim exists so frozen ``env_config.yaml`` files in past sweep
+        dirs can be re-evaluated under the new pipeline without retraining.
+        """
+        if "terminations" in data:
+            return
+
+        rewards = data.get("rewards")
+        if rewards is None:
+            raise KeyError(
+                f"{config_path}: missing required top-level keys 'rewards' "
+                f"and 'terminations'."
+            )
+        if isinstance(rewards, dict):
+            # Pre-list named-map format: normalise to list first.
+            rewards = [{"type": k, **v} for k, v in rewards.items()]
+            data["rewards"] = rewards
+
+        # Map of legacy TerminalRewardStep types to
+        # (gate_metric, threshold_op, threshold_value, is_success).
+        # ``static`` is special: it carries its own gates, so we use the
+        # entry's gates verbatim (spec value None).
+        legacy_terminal_metrics: dict[str, tuple[str, str, float, bool] | None] = {
+            "success_lift_fraction_terminal": (
+                "is_success_lift_fraction_terminal",
+                "gte",
+                0.5,
+                True,
+            ),
+            "safety_touch_table_terminal": (
+                "is_table_touched",
+                "gte",
+                0.5,
+                False,
+            ),
+            "cube_out_of_range_terminal": (
+                "is_cube_out_of_range",
+                "gte",
+                0.5,
+                False,
+            ),
+            "approach_phase_terminal": (
+                "approach_phase_terminal",
+                "gte",
+                0.5,
+                False,
+            ),
+            "grasp_phase_terminal": (
+                "grasp_phase_terminal",
+                "gte",
+                0.5,
+                False,
+            ),
+            "static": None,
+        }
+
+        terminations: list[dict] = []
+        success_seen = False
+        for entry in rewards:
+            type_name = entry.get("type")
+            # OLD schema default for ``terminate`` was True (the field lived on
+            # RewardCfg with default True).  Legacy *terminal* reward types
+            # therefore inherit terminate=True when the field is absent;
+            # all other reward types have always required terminate=False
+            # implicitly (they are not :class:`TerminalRewardStep` subclasses).
+            legacy_default_terminate = type_name in legacy_terminal_metrics
+            terminate = entry.pop("terminate", legacy_default_terminate)
+            if not terminate:
+                continue
+            if not entry.get("enabled", True):
+                continue
+            if type_name not in legacy_terminal_metrics:
+                raise ValueError(
+                    f"{config_path}: legacy reward entry of type "
+                    f"'{type_name}' has terminate=True, but no migration "
+                    f"rule is defined.  Add an explicit 'terminations:' "
+                    f"block to this config."
+                )
+            spec = legacy_terminal_metrics[type_name]
+            term_id = entry.get("id") or type_name
+            if spec is None:
+                # ``static``: use the entry's gates verbatim.
+                gates = list(entry.get("gates", []))
+                if not gates:
+                    raise ValueError(
+                        f"{config_path}: legacy 'static' reward entry "
+                        f"id={term_id!r} has terminate=True but no gates; "
+                        f"cannot migrate."
+                    )
+                # In every legacy config in this repo, a ``static`` reward
+                # with terminate=True is the lift-success terminal (gates
+                # check ``cube_lift_fraction``).  Auto-classify the first
+                # such entry as is_success.
+                is_success_flag = not success_seen
+            else:
+                metric, op, value, is_success_flag = spec
+                gates = [{"metric": metric, op: value}]
+            if is_success_flag:
+                success_seen = True
+            terminations.append(
+                {
+                    "enabled": True,
+                    "is_success": is_success_flag,
+                    "id": term_id,
+                    "gates": gates,
+                }
+            )
+
+        if not terminations:
+            raise ValueError(
+                f"{config_path}: legacy schema migration produced no "
+                f"termination conditions (no rewards had terminate=True). "
+                f"Add an explicit 'terminations:' block to this config."
+            )
+        data["terminations"] = terminations
+
+    def _validate_cross_field_invariants(self, config_path: Path) -> None:
+        """Cross-field invariants that single-dataclass validation cannot express.
+
+        The two lift-related thresholds live in different sections (so they
+        can be swept independently), but they have a fixed semantic ordering:
+        a cube must be 'lifted' (episode_stats.lift_height_threshold) before
+        it can be a 'success' (metrics.lift_phase.height_threshold).  A typo
+        in either is otherwise silent — caught here loudly.
+        """
+        lift_min = self.episode_stats.lift_height_threshold
+        lift_success = self.metrics.lift_phase.height_threshold
+        if not (0.0 < lift_min <= lift_success):
+            raise ValueError(
+                f"Invalid lift threshold ordering in {config_path}:\n"
+                f"  episode_stats.lift_height_threshold     = {lift_min} m  "
+                f"(any-lift detection)\n"
+                f"  metrics.lift_phase.height_threshold     = {lift_success} m  "
+                f"(success threshold)\n"
+                f"Required: 0 < episode_stats.lift_height_threshold "
+                f"<= metrics.lift_phase.height_threshold."
+            )
+
+        # ------------------------------------------------------------------
+        # Termination pipeline invariants
+        # ------------------------------------------------------------------
+        # Each enabled termination must declare at least one gate (an
+        # always-firing condition would terminate every step of every episode
+        # immediately) and exactly one enabled termination must be flagged
+        # ``is_success: true`` so the eval pipeline can classify success
+        # episodes without name matching.
+        enabled_terms: list[dict] = []
+        for entry in self.terminations:
+            if not isinstance(entry, dict):
+                raise TypeError(
+                    f"{config_path}: each entry in 'terminations' must be a mapping; "
+                    f"got {type(entry).__name__}."
+                )
+            if not entry.get("enabled", True):
+                continue
+            enabled_terms.append(entry)
+            term_id = entry.get("id")
+            gates = entry.get("gates") or []
+            if not gates:
+                raise ValueError(
+                    f"{config_path}: enabled termination id={term_id!r} has no "
+                    f"gates; an empty-gate termination would fire every step. "
+                    f"Add explicit gate conditions."
+                )
+        if not enabled_terms:
+            raise ValueError(
+                f"{config_path}: 'terminations' list contains no enabled entries. "
+                f"At least one termination condition (the success terminal) must be "
+                f"enabled, otherwise episodes can only end via time-out."
+            )
+        success_terms = [e for e in enabled_terms if e.get("is_success", False)]
+        if len(success_terms) != 1:
+            ids = [e.get("id") for e in success_terms]
+            raise ValueError(
+                f"{config_path}: exactly one enabled termination must declare "
+                f"is_success=true; found {len(success_terms)} (ids={ids}). "
+                f"The success terminal is required so eval can classify the "
+                f"primary termination cause without name matching."
+            )

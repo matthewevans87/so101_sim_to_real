@@ -29,6 +29,7 @@ Directory layout:
 from __future__ import annotations
 
 import copy
+import itertools
 import json
 import os
 import shutil
@@ -132,34 +133,72 @@ def _merge_rewards_list(base_rewards: list, reward_overrides: list) -> list:
     """
     Merge reward override entries into *base_rewards*.
 
-    Entries are matched by their ``type`` field.  For each override entry:
-    - If a base entry with the same ``type`` exists, only the explicitly listed
-      fields are patched; all other fields on that entry are preserved.
-    - If no base entry matches, the override entry is appended.
+    Matching rules (checked in order for each base entry):
+    1. **Exact match** — override entry has both ``type`` and ``id`` fields that
+       match a base entry's ``type`` and ``id``.  Patches only that specific
+       instance, leaving any sibling entries of the same ``type`` untouched.
+    2. **Type-only match** — override entry has a ``type`` field but no ``id``.
+       Patches the **first** base entry whose ``type`` matches (legacy behaviour,
+       backward-compatible with sweep configs written before ``id`` was added).
+    3. **No match** — the override entry is appended as a new reward step.
 
-    Reward entries that have no corresponding override are left unchanged.
-    The original list is not mutated.
+    Only the fields explicitly listed in the override entry are patched; all
+    other fields on the matched base entry are preserved unchanged.
+
+    The original lists are not mutated.
     """
     if not reward_overrides:
         return copy.deepcopy(base_rewards)
     result = copy.deepcopy(base_rewards)
-    # Index overrides by type for O(1) lookup
-    override_by_type: Dict[str, dict] = {
-        r["type"]: r for r in reward_overrides if "type" in r
-    }
-    matched: set = set()
+
+    # Build two override indexes:
+    #   by_type_and_id — keyed by (type, id); used for exact-match targeting
+    #   by_type_only   — keyed by type; used for broad/legacy matching
+    by_type_and_id: Dict[Tuple[str, str], dict] = {}
+    by_type_only: Dict[str, dict] = {}
+    for r in reward_overrides:
+        t = r.get("type")
+        if t is None:
+            continue
+        rid = r.get("id")
+        if rid is not None:
+            by_type_and_id[(t, rid)] = r
+        else:
+            by_type_only[t] = r
+
+    matched_type_id: set = set()
+    matched_type: set = set()
+
     for entry in result:
         t = entry.get("type")
-        if t and t in override_by_type:
-            override = override_by_type[t]
+        if not t:
+            continue
+        rid = entry.get("id")
+
+        # Exact-match check first
+        if rid is not None and (t, rid) in by_type_and_id:
+            override = by_type_and_id[(t, rid)]
+            for field, value in override.items():
+                if field not in ("type", "id"):
+                    entry[field] = copy.deepcopy(value)
+            matched_type_id.add((t, rid))
+
+        # Type-only fallback (first matching base entry wins)
+        elif t in by_type_only and t not in matched_type:
+            override = by_type_only[t]
             for field, value in override.items():
                 if field != "type":
                     entry[field] = copy.deepcopy(value)
-            matched.add(t)
-    # Any override types that didn't match an existing entry are appended
-    for t, entry in override_by_type.items():
-        if t not in matched:
+            matched_type.add(t)
+
+    # Append unmatched override entries as new reward steps
+    for (t, rid), entry in by_type_and_id.items():
+        if (t, rid) not in matched_type_id:
             result.append(copy.deepcopy(entry))
+    for t, entry in by_type_only.items():
+        if t not in matched_type:
+            result.append(copy.deepcopy(entry))
+
     return result
 
 
@@ -181,6 +220,130 @@ def _apply_env_overrides(base_env_cfg: dict, env_overrides: dict) -> dict:
             result[k] = _deep_merge(result[k], v)
         else:
             result[k] = copy.deepcopy(v)
+    return result
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Experiment definition expansion
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def expand_experiment_definition(config: dict) -> dict:
+    """
+    Expand an ``experiment_definition`` Cartesian product into a flat
+    ``experiments`` list and return the modified config dict.
+
+    Schema::
+
+        experiment_definition:
+          - config_set:
+              - config:
+                  env_overrides: ...
+              - config:
+                  env_overrides: ...
+          - config_set:
+              - config:
+                  agent_overrides: ...
+              - config:
+                  agent_overrides: ...
+
+    Each ``config_set`` defines one dimension of the grid.  The Cartesian
+    product of all config_sets produces the full experiment list.  Experiments
+    are named ``exp_001``, ``exp_002``, … in product order (leftmost
+    config_set varies slowest).
+
+    If *config* has an ``experiments`` key but no ``experiment_definition``
+    key, it is returned unchanged (backward-compatible pass-through for legacy
+    sweep configs and pre-expanded resume configs).
+
+    Raises ``ValueError`` if both keys are present simultaneously.
+    """
+    has_defn = "experiment_definition" in config
+    has_exps = "experiments" in config
+
+    if has_defn and has_exps:
+        raise ValueError(
+            "Sweep config must not contain both 'experiment_definition' and "
+            "'experiments'. Use 'experiment_definition' only."
+        )
+
+    if not has_defn:
+        # Legacy 'experiments' list or pre-expanded resume config — pass through.
+        return config
+
+    defn = config["experiment_definition"]
+    if not isinstance(defn, list) or len(defn) == 0:
+        raise ValueError(
+            "experiment_definition must be a non-empty list of config_set entries."
+        )
+
+    config_sets: List[List[dict]] = []
+    for i, entry in enumerate(defn):
+        if not isinstance(entry, dict) or "config_set" not in entry:
+            raise ValueError(
+                f"experiment_definition[{i}] must be a mapping with a "
+                f"'config_set' key; got {type(entry).__name__}."
+            )
+        cs = entry["config_set"]
+        if not isinstance(cs, list) or len(cs) == 0:
+            raise ValueError(
+                f"experiment_definition[{i}].config_set must be a "
+                f"non-empty list of config entries."
+            )
+        configs_in_set: List[dict] = []
+        for j, item in enumerate(cs):
+            if not isinstance(item, dict) or "config" not in item:
+                raise ValueError(
+                    f"experiment_definition[{i}].config_set[{j}] must be a "
+                    f"mapping with a 'config' key."
+                )
+            cfg = item["config"]
+            if not isinstance(cfg, dict):
+                raise ValueError(
+                    f"experiment_definition[{i}].config_set[{j}].config "
+                    f"must be a mapping (got {type(cfg).__name__})."
+                )
+            configs_in_set.append(cfg)
+        config_sets.append(configs_in_set)
+
+    experiments: List[dict] = []
+    for idx, combination in enumerate(itertools.product(*config_sets)):
+        # Merge override dicts from all configs in this combination.
+        # Start from empty dicts — the actual base env/agent configs are
+        # applied later by _materialize().
+        merged_env: dict = {}
+        merged_agent: dict = {}
+        cnn_checkpoints: List[str] = []
+        for cfg in combination:
+            env_ov = cfg.get("env_overrides") or {}
+            agent_ov = cfg.get("agent_overrides") or {}
+            if env_ov:
+                merged_env = _apply_env_overrides(merged_env, env_ov)
+            if agent_ov:
+                merged_agent = _deep_merge(merged_agent, agent_ov)
+            if cfg.get("cnn_checkpoint") is not None:
+                cnn_checkpoints.append(cfg["cnn_checkpoint"])
+
+        if len(cnn_checkpoints) > 1:
+            raise ValueError(
+                f"experiment_definition: combination {idx + 1} has "
+                f"{len(cnn_checkpoints)} configs that each set cnn_checkpoint "
+                f"— only one config per combination may set cnn_checkpoint. "
+                f"Found: {cnn_checkpoints}"
+            )
+
+        exp: dict = {"name": f"exp_{idx + 1:03d}"}
+        if merged_env:
+            exp["env_overrides"] = merged_env
+        if merged_agent:
+            exp["agent_overrides"] = merged_agent
+        if cnn_checkpoints:
+            exp["cnn_checkpoint"] = cnn_checkpoints[0]
+        experiments.append(exp)
+
+    result = copy.deepcopy(config)
+    del result["experiment_definition"]
+    result["experiments"] = experiments
     return result
 
 
@@ -239,6 +402,7 @@ class SweepOrchestrator:
 
         with open(config_path) as f:
             config = yaml.safe_load(f)
+        config = expand_experiment_definition(config)
 
         orch = cls(
             config=config,
@@ -287,13 +451,12 @@ class SweepOrchestrator:
                 f"config.base.seed must be an integer, got {type(base['seed']).__name__}"
             )
 
-        if base.get("iters") is None:
-            errors.append(
-                "config.base.iters is required (integer); set the number of PPO "
-                "iterations explicitly to avoid relying on agent config defaults"
-            )
-        elif not isinstance(base.get("iters"), int) or base["iters"] <= 0:
-            errors.append("config.base.iters must be a positive integer")
+        if base.get("iters") is not None and (
+            not isinstance(base["iters"], int) or base["iters"] <= 0
+        ):
+            errors.append("config.base.iters must be a positive integer when set")
+        # iters is optional: when absent, no --max_iterations is passed and
+        # trainer.timesteps from the agent config controls training length.
 
         # env_config
         env_config = base.get("env_config")
@@ -328,6 +491,14 @@ class SweepOrchestrator:
         ):
             errors.append(f"ISAAC_LAB_PATH does not exist: {self.isaac_lab_path}")
 
+        # ── experiment_definition must be expanded before reaching validate() ─
+        if "experiment_definition" in cfg:
+            errors.append(
+                "'experiment_definition' key found during validation. "
+                "Call expand_experiment_definition(config) before constructing "
+                "SweepOrchestrator — this is a bug in the caller."
+            )
+
         # ── experiments list ──────────────────────────────────────────────────
         experiments = cfg.get("experiments")
         if not experiments:
@@ -357,6 +528,18 @@ class SweepOrchestrator:
                         errors.append(
                             f"config.experiments[{i}].env_overrides.rewards[{j}] "
                             f"is missing required 'type' field"
+                        )
+
+                # validate per-experiment cnn_checkpoint path exists
+                exp_ckpt = exp.get("cnn_checkpoint")
+                if exp_ckpt is not None:
+                    ckpt_path = Path(exp_ckpt)
+                    if not ckpt_path.is_absolute():
+                        ckpt_path = self.project_root / ckpt_path
+                    if not ckpt_path.is_file():
+                        errors.append(
+                            f"config.experiments[{i}].cnn_checkpoint not found: "
+                            f"{ckpt_path.resolve()}"
                         )
 
         self._report_errors(errors)
@@ -409,15 +592,26 @@ class SweepOrchestrator:
         """
         base = self.config["base"]
 
-        # effective settings (per-experiment seed overrides base seed)
+        # effective settings (per-experiment values take priority over base)
+        iters = base.get("iters")
+        # Compute effective_timesteps for provenance: when iters is set it
+        # overrides trainer.timesteps (= iters × rollouts); otherwise
+        # trainer.timesteps from the agent config is the authoritative value.
+        rollouts = (base_agent_cfg.get("agent") or {}).get("rollouts")
+        if iters is not None and rollouts is not None:
+            effective_timesteps = iters * rollouts
+        else:
+            effective_timesteps = (base_agent_cfg.get("trainer") or {}).get("timesteps")
         settings: dict = {
             "task": base["task"],
             "seed": exp.get("seed", base["seed"]),
-            "iters": base.get("iters"),
+            "iters": iters,
+            "effective_timesteps": effective_timesteps,
             "envs": base.get("envs"),
             "headless": base.get("headless", True),
             "cameras": base.get("cameras", True),
-            "cnn_checkpoint": base.get("cnn_checkpoint"),
+            # Per-experiment cnn_checkpoint takes priority; falls back to base.
+            "cnn_checkpoint": exp.get("cnn_checkpoint", base.get("cnn_checkpoint")),
         }
 
         # apply env overrides
@@ -431,14 +625,31 @@ class SweepOrchestrator:
         return env_cfg, agent_cfg, settings
 
     def _save_materialized_configs(
-        self, exp_dir: Path, env_cfg: dict, agent_cfg: dict
+        self, exp_dir: Path, env_cfg: dict, agent_cfg: dict, settings: dict
     ) -> None:
-        """Write materialized env_config.yaml and agent_config.yaml to exp_dir."""
+        """
+        Write materialised configs to exp_dir:
+          - env_config.yaml      — merged env config (base + overrides)
+          - agent_config.yaml    — merged agent config (base + overrides)
+          - experiment_settings.yaml — effective CLI-level settings (seed, iters,
+                                       envs, cnn_checkpoint, …) for this experiment.
+                                       Written before training starts so the dir is
+                                       self-documenting even after --create-configs-only.
+        """
         exp_dir.mkdir(parents=True, exist_ok=True)
         with open(exp_dir / "env_config.yaml", "w") as f:
             yaml.safe_dump(env_cfg, f, default_flow_style=False, sort_keys=False)
         with open(exp_dir / "agent_config.yaml", "w") as f:
             yaml.safe_dump(agent_cfg, f, default_flow_style=False, sort_keys=False)
+
+        # Atomically write experiment_settings.yaml so the experiment dir is
+        # self-documenting before any training runs.  cnn_checkpoint_provenance.json
+        # (written by train.py) supersedes this for post-training provenance.
+        settings_path = exp_dir / "experiment_settings.yaml"
+        tmp = settings_path.with_suffix(".yaml.tmp")
+        with open(tmp, "w") as f:
+            yaml.safe_dump(settings, f, default_flow_style=False, sort_keys=False)
+        tmp.rename(settings_path)
 
     # ── command builders ──────────────────────────────────────────────────────
     def _build_train_cmd(self, exp_dir: Path, settings: dict) -> List[str]:
@@ -452,6 +663,8 @@ class SweepOrchestrator:
             str(exp_dir),
             "--agent_config",
             str(exp_dir / "agent_config.yaml"),
+            "--env_config",
+            str(exp_dir / "env_config.yaml"),
             f"hydra.run.dir={exp_dir}/hydra",
             "--seed",
             str(settings["seed"]),
@@ -482,6 +695,15 @@ class SweepOrchestrator:
         ]
         if eval_cfg.get("episodes") is not None:
             cmd += ["--num-episodes", str(eval_cfg["episodes"])]
+        if eval_cfg.get("num_videos") is not None:
+            cmd += ["--num-videos", str(eval_cfg["num_videos"])]
+        record_videos = eval_cfg.get("record_videos") or {}
+        if record_videos.get("wrist_cam"):
+            cmd += ["--record-wrist-cam"]
+        if record_videos.get("overhead_cam"):
+            cmd += ["--record-overhead-cam"]
+        if record_videos.get("viewport_cam"):
+            cmd += ["--record-viewport-cam"]
         if eval_cfg.get("headless", True):
             cmd += ["--headless"]
         if eval_cfg.get("num_envs") is not None:
@@ -572,8 +794,18 @@ class SweepOrchestrator:
 
     # ── artifact verification ─────────────────────────────────────────────────
     def _verify_train_output(self, exp_dir: Path) -> bool:
-        """Return True if the skrl/ output directory was created by train.py."""
-        return (exp_dir / "skrl").is_dir()
+        """Return True if train.py produced a usable checkpoint.
+
+        Checks both that the skrl/ directory was created and that at least one
+        checkpoint file exists within it.  SKRL writes checkpoints only when
+        training completes a full rollout cycle, so a missing checkpoint
+        indicates a crash or early interrupt rather than a clean run.
+        """
+        skrl_dir = exp_dir / "skrl"
+        if not skrl_dir.is_dir():
+            return False
+        checkpoints = list(skrl_dir.glob("agent/checkpoints/*.pt"))
+        return len(checkpoints) > 0
 
     def _verify_eval_output(self, exp_dir: Path) -> bool:
         """Return True if evaluation/results.json was created by evaluate.py."""
@@ -616,25 +848,39 @@ class SweepOrchestrator:
 
             print(f"{_BLUE}[{idx+1:02d}] {exp_name}{_NC}")
             if exp.get("seed"):
-                print(f"  seed    : {settings['seed']} (experiment override)")
+                print(f"  seed           : {settings['seed']} (experiment override)")
             else:
-                print(f"  seed    : {settings['seed']}")
-            print(f"  exp_dir : {exp_dir}")
-            print(f"  train   : {' '.join(str(c) for c in train_cmd)}")
-            print(f"  eval    : {' '.join(str(c) for c in eval_cmd)}")
+                print(f"  seed           : {settings['seed']}")
+            ckpt = settings.get("cnn_checkpoint")
+            if ckpt:
+                src = "experiment override" if exp.get("cnn_checkpoint") else "base"
+                print(f"  cnn_checkpoint : {ckpt} ({src})")
+            else:
+                print(f"  cnn_checkpoint : None")
+            print(f"  exp_dir        : {exp_dir}")
+            print(f"  train          : {' '.join(str(c) for c in train_cmd)}")
+            print(f"  eval           : {' '.join(str(c) for c in eval_cmd)}")
             print()
 
     # ── summary generation ────────────────────────────────────────────────────
-    def generate_summary(self) -> None:
+    def generate_summary(
+        self,
+        eval_subdir: str = "evaluation",
+        out_suffix: str = "",
+    ) -> None:
         """
-        Read evaluation/results.json for each done experiment and write:
-          - sweep_dir/summary.json  (machine-readable)
-          - sweep_dir/summary.md    (human-readable Markdown table)
+        Read <eval_subdir>/results.json for each done experiment and write:
+          - sweep_dir/summary<out_suffix>.json  (machine-readable)
+          - sweep_dir/summary<out_suffix>.md    (human-readable Markdown table)
+
+        ``eval_subdir`` defaults to "evaluation" (the canonical eval output
+        directory).  Pass e.g. "evaluation_v2" together with out_suffix="_v2"
+        to render a side-by-side summary against a re-eval pass.
         """
         rows: List[Dict[str, Any]] = []
         for exp_name, info in self._state["experiments"].items():
             exp_dir = Path(info["exp_dir"])
-            results_path = exp_dir / "evaluation" / "results.json"
+            results_path = exp_dir / eval_subdir / "results.json"
             status = info["status"]
 
             row: Dict[str, Any] = {
@@ -642,24 +888,74 @@ class SweepOrchestrator:
                 "index": info["index"] + 1,
                 "status": status,
                 "exp_dir": str(exp_dir),
+                # reward stats (from results.json summary_statistics)
                 "mean_reward": None,
                 "std_reward": None,
                 "min_reward": None,
                 "max_reward": None,
                 "mean_episode_length": None,
+                # eval episode stats (from results.json episode_stats)
+                "lift_rate": None,
+                "drop_rate": None,
+                "success_rate": None,
+                "mean_cube_bump": None,
+                "mean_time_to_lift": None,
+                # termination causes (from results.json — Phase B)
+                "success_termination_id": None,
+                "termination_primary_counts": None,
+                "termination_flag_counts": None,
+                # training milestones (from milestones.json; env_transitions at first event)
+                "milestone_first_approach": None,
+                "milestone_first_grasp": None,
+                "milestone_first_lift": None,
+                "milestone_first_success": None,
             }
 
             if status == "done" and results_path.is_file():
                 try:
                     with open(results_path) as f:
                         results = json.load(f)
-                    row["mean_reward"] = results.get("mean_reward")
-                    row["std_reward"] = results.get("std_reward")
-                    row["min_reward"] = results.get("min_reward")
-                    row["max_reward"] = results.get("max_reward")
-                    row["mean_episode_length"] = results.get("mean_episode_length")
+                    ss = results.get("summary_statistics") or {}
+                    row["mean_reward"] = ss.get("mean_reward")
+                    row["std_reward"] = ss.get("std_reward")
+                    row["min_reward"] = ss.get("min_reward")
+                    row["max_reward"] = ss.get("max_reward")
+                    row["mean_episode_length"] = ss.get("mean_episode_length")
+                    es = results.get("episode_stats") or {}
+                    row["lift_rate"] = es.get("lift_rate")
+                    row["drop_rate"] = es.get("drop_rate")
+                    row["success_rate"] = es.get("success_rate")
+                    row["mean_cube_bump"] = es.get("mean_cube_bump")
+                    row["mean_time_to_lift"] = es.get("mean_time_to_lift")
+                    row["success_termination_id"] = results.get(
+                        "success_termination_id"
+                    )
+                    row["termination_primary_counts"] = results.get(
+                        "termination_primary_counts"
+                    )
+                    row["termination_flag_counts"] = results.get(
+                        "termination_flag_counts"
+                    )
                 except (json.JSONDecodeError, OSError) as exc:
                     _error(f"Could not read results for '{exp_name}': {exc}")
+
+            # Training milestones — written by MilestoneLog during training.
+            milestones_path = exp_dir / "milestones.json"
+            if milestones_path.is_file():
+                try:
+                    with open(milestones_path) as f:
+                        milestones = json.load(f)
+                    for key in (
+                        "first_approach",
+                        "first_grasp",
+                        "first_lift",
+                        "first_success",
+                    ):
+                        entry = milestones.get(key)
+                        if entry is not None:
+                            row[f"milestone_{key}"] = entry.get("env_transitions")
+                except (json.JSONDecodeError, OSError) as exc:
+                    _error(f"Could not read milestones for '{exp_name}': {exc}")
 
             rows.append(row)
 
@@ -672,7 +968,7 @@ class SweepOrchestrator:
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "experiments": rows,
         }
-        summary_json_path = self.sweep_dir / "summary.json"
+        summary_json_path = self.sweep_dir / f"summary{out_suffix}.json"
         with open(summary_json_path, "w") as f:
             json.dump(summary, f, indent=2)
         _success(f"Summary JSON: {summary_json_path}")
@@ -688,6 +984,9 @@ class SweepOrchestrator:
         def _fmt(v: Optional[float], decimals: int = 3) -> str:
             return f"{v:.{decimals}f}" if v is not None else "—"
 
+        def _pct(v: Optional[float]) -> str:
+            return f"{v * 100:.1f}%" if v is not None else "—"
+
         lines: List[str] = [
             f"# Sweep: {sweep_name}",
             "",
@@ -697,8 +996,8 @@ class SweepOrchestrator:
             "",
             "## Results",
             "",
-            "| # | Experiment | Status | Mean Reward | Std Reward | Min Reward | Max Reward | Mean Ep Length |",
-            "|---|-----------|--------|-------------|------------|------------|------------|----------------|",
+            "| # | Experiment | Status | Mean Reward | Std Reward | Lift Rate | Drop Rate | Success Rate | Cube Bump | Time to Lift | Approach | Grasp | Lift | Success |",
+            "|---|-----------|--------|-------------|------------|-----------|-----------|--------------|-----------|--------------|----------|-------|------|---------|",
         ]
         for r in rows:
             status_fmt = r["status"]
@@ -708,9 +1007,15 @@ class SweepOrchestrator:
                 f"| {status_fmt} "
                 f"| {_fmt(r['mean_reward'])} "
                 f"| {_fmt(r['std_reward'])} "
-                f"| {_fmt(r['min_reward'])} "
-                f"| {_fmt(r['max_reward'])} "
-                f"| {_fmt(r['mean_episode_length'], 1)} |"
+                f"| {_pct(r['lift_rate'])} "
+                f"| {_pct(r['drop_rate'])} "
+                f"| {_pct(r['success_rate'])} "
+                f"| {_fmt(r['mean_cube_bump'], 4)} "
+                f"| {_fmt(r['mean_time_to_lift'], 1)} "
+                f"| {_fmt(r['milestone_first_approach'], 0)} "
+                f"| {_fmt(r['milestone_first_grasp'], 0)} "
+                f"| {_fmt(r['milestone_first_lift'], 0)} "
+                f"| {_fmt(r['milestone_first_success'], 0)} |"
             )
 
         lines += [
@@ -736,18 +1041,91 @@ class SweepOrchestrator:
                 lines.append(
                     f"- Mean episode length: {_fmt(r['mean_episode_length'], 1)}"
                 )
+            if r["lift_rate"] is not None:
+                lines.append(
+                    f"- Eval stats: lift {_pct(r['lift_rate'])} | drop {_pct(r['drop_rate'])} "
+                    f"| success {_pct(r['success_rate'])} | bump {_fmt(r['mean_cube_bump'], 4)} "
+                    f"| time_to_lift {_fmt(r['mean_time_to_lift'], 1)}"
+                )
+            if r["termination_primary_counts"]:
+                _total = sum(r["termination_primary_counts"].values()) or 1
+                _parts = ", ".join(
+                    f"{cause} {count} ({count / _total * 100:.1f}%)"
+                    for cause, count in sorted(
+                        r["termination_primary_counts"].items(),
+                        key=lambda kv: -kv[1],
+                    )
+                )
+                _success_marker = (
+                    f" (success={r['success_termination_id']})"
+                    if r.get("success_termination_id")
+                    else ""
+                )
+                lines.append(f"- Primary termination causes{_success_marker}: {_parts}")
+            if r["milestone_first_approach"] is not None:
+                lines.append(
+                    f"- Milestones (env_transitions): approach={r['milestone_first_approach']:,} "
+                    f"grasp={r['milestone_first_grasp']:,} "
+                    f"lift={r['milestone_first_lift']:,} "
+                    f"success={r['milestone_first_success']:,}"
+                )
             lines.append("")
 
-        summary_md_path = self.sweep_dir / "summary.md"
+        summary_md_path = self.sweep_dir / f"summary{out_suffix}.md"
         with open(summary_md_path, "w") as f:
             f.write("\n".join(lines) + "\n")
         _success(f"Summary Markdown: {summary_md_path}")
+
+    # ── materialize only (no training) ────────────────────────────────────────
+    def materialize_all(self) -> None:
+        """
+        Create the sweep directory and write materialised ``env_config.yaml`` and
+        ``agent_config.yaml`` for every experiment, then exit without launching
+        any training or evaluation.
+
+        Used by ``--create-configs-only`` to inspect the full set of configs that
+        a sweep would use before committing to a long run.
+        """
+        self.validate()
+        experiments = self.config["experiments"]
+        base_env_cfg, base_agent_cfg = self._load_base_configs()
+
+        self.sweep_dir.mkdir(parents=True, exist_ok=True)
+        (self.sweep_dir / "experiments").mkdir(exist_ok=True)
+
+        config_dest = self.sweep_dir / CONFIG_FILE
+        if not config_dest.exists():
+            with open(config_dest, "w") as f:
+                yaml.safe_dump(
+                    self.config, f, default_flow_style=False, sort_keys=False
+                )
+            _success(f"Sweep config saved: {config_dest}")
+
+        _header(
+            f"Creating configs — {len(experiments)} experiment(s) → {self.sweep_dir}"
+        )
+        for idx, exp in enumerate(experiments):
+            exp_dir = self._exp_dir(idx, exp["name"])
+            env_cfg, agent_cfg, settings = self._materialize(
+                exp, base_env_cfg, base_agent_cfg
+            )
+            self._save_materialized_configs(exp_dir, env_cfg, agent_cfg, settings)
+            ckpt = settings.get("cnn_checkpoint") or "none"
+            _success(f"  [{idx + 1:02d}] {exp['name']}: {exp_dir}")
+            _info(f"       cnn_checkpoint: {ckpt}")
+
+        print()
+        _success(
+            f"All {len(experiments)} config(s) materialised — no training launched."
+        )
+        _success(f"Sweep dir: {self.sweep_dir}")
 
     # ── main run loop ──────────────────────────────────────────────────────────
     def run(
         self,
         from_experiment: Optional[str] = None,
         dry_run: bool = False,
+        retry_eval: bool = False,
     ) -> None:
         """
         Run the sweep.
@@ -758,6 +1136,10 @@ class SweepOrchestrator:
                 are already marked "done".  Use to restart from a specific
                 experiment.
             dry_run: Print commands without executing anything.
+            retry_eval: When resuming, skip the training subprocess for any
+                experiment whose stored train_return_code is already 0 and
+                the checkpoint is present on disk.  Useful when all experiments
+                trained successfully but eval failed.
         """
         self.validate()
 
@@ -772,10 +1154,15 @@ class SweepOrchestrator:
         self.sweep_dir.mkdir(parents=True, exist_ok=True)
         (self.sweep_dir / "experiments").mkdir(exist_ok=True)
 
-        # Copy sweep config for reproducibility (only on first run)
+        # Save expanded sweep config for reproducibility (only on first run).
+        # Write self.config (already expanded) rather than copying the original
+        # so that resume always loads the ready-to-use 'experiments' list.
         config_dest = self.sweep_dir / CONFIG_FILE
         if not config_dest.exists():
-            shutil.copy2(self.config_path, config_dest)
+            with open(config_dest, "w") as f:
+                yaml.safe_dump(
+                    self.config, f, default_flow_style=False, sort_keys=False
+                )
             _success(f"Sweep config saved: {config_dest}")
 
         # Initialise state (preserve existing state on resume)
@@ -830,7 +1217,7 @@ class SweepOrchestrator:
             env_cfg, agent_cfg, settings = self._materialize(
                 exp, base_env_cfg, base_agent_cfg
             )
-            self._save_materialized_configs(exp_dir, env_cfg, agent_cfg)
+            self._save_materialized_configs(exp_dir, env_cfg, agent_cfg, settings)
             _success(f"Configs materialised → {exp_dir}")
 
             # Update state: running
@@ -851,17 +1238,39 @@ class SweepOrchestrator:
             # ── train ─────────────────────────────────────────────────────────
             _header(f"  [{idx+1:02d}] Training: {exp_name}")
             train_cmd = self._build_train_cmd(exp_dir, settings)
-            _info(f"Command: {' '.join(str(c) for c in train_cmd)}")
             train_log = exp_dir / "train.log"
-            train_rc = _run_step_subprocess(train_cmd, env=gui_env, log_path=train_log)
 
-            # Isaac Sim can exit 0 despite a crash; verify the skrl/ dir was created
-            if train_rc == 0 and not self._verify_train_output(exp_dir):
-                _error(
-                    f"train.py reported exit 0 but skrl/ output is missing in {exp_dir}. "
-                    f"Isaac Sim likely crashed silently. Check: {train_log}"
+            # --retry-eval: skip training when a previous run already succeeded
+            # and the checkpoint is still present on disk.
+            _skipped_training = False
+            stored_train_rc = exp_state.get("train_return_code")
+            if retry_eval and stored_train_rc == 0:
+                if self._verify_train_output(exp_dir):
+                    _info(
+                        f"  [{idx+1:02d}] Skipping training for '{exp_name}' "
+                        f"(train_return_code=0 and checkpoint present)."
+                    )
+                    _skipped_training = True
+                    train_rc = 0
+                else:
+                    _error(
+                        f"  [{idx+1:02d}] --retry-eval: stored train_return_code=0 for '{exp_name}' "
+                        f"but checkpoint is missing — re-running training."
+                    )
+
+            if not _skipped_training:
+                _info(f"Command: {' '.join(str(c) for c in train_cmd)}")
+                train_rc = _run_step_subprocess(
+                    train_cmd, env=gui_env, log_path=train_log
                 )
-                train_rc = 1
+
+                # Isaac Sim can exit 0 despite a crash; verify the skrl/ dir was created
+                if train_rc == 0 and not self._verify_train_output(exp_dir):
+                    _error(
+                        f"train.py reported exit 0 but skrl/ output is missing in {exp_dir}. "
+                        f"Isaac Sim likely crashed silently. Check: {train_log}"
+                    )
+                    train_rc = 1
 
             self._state["experiments"][exp_name]["train_return_code"] = train_rc
 

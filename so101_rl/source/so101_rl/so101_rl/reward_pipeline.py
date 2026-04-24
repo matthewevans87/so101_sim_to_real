@@ -41,6 +41,20 @@ class RewardStep(ABC, Generic[CfgT]):
     """Keys from ``env.env_metrics`` (produced by :class:`EnvMetricStep`) that
     this step reads during :meth:`compute`."""
 
+    @property
+    def log_name(self) -> str:
+        """TensorBoard logging key for this step instance.
+
+        Returns ``"{name}[{id}]"`` when :attr:`RewardCfg.id` is set, or
+        ``"{name}"`` otherwise.  Using the log name instead of :attr:`name`
+        allows multiple instances of the same reward type to appear as
+        separate curves in TensorBoard and to be targeted independently by
+        sweep overrides.
+        """
+        if self._cfg.id is not None:
+            return f"{self.name}[{self._cfg.id}]"
+        return self.name
+
     def __init__(self, cfg: CfgT) -> None:
         self._cfg: CfgT = cfg
         self._gates: list[GateCfg] = cfg.gates
@@ -127,21 +141,6 @@ class RewardStep(ABC, Generic[CfgT]):
         ...
 
 
-class TerminalRewardStep(RewardStep[CfgT]):
-    """A :class:`RewardStep` that also signals episode termination.
-
-    Subclasses must implement both :meth:`compute` (inherited) and
-    :meth:`done`.  :class:`RewardPipeline` uses :meth:`done` to build
-    the terminal mask returned by :meth:`RewardPipeline.get_dones`.
-    """
-
-    @abstractmethod
-    def done(self, ctx: StepContext) -> torch.Tensor:
-        """Return a bool tensor of shape ``(num_envs,)`` — True for environments
-        that should terminate this step."""
-        ...
-
-
 class RewardPipeline:
     """Sums contributions from a sequence of :class:`RewardStep` objects.
 
@@ -160,11 +159,6 @@ class RewardPipeline:
         step_keys = frozenset().union(*(s.requires_metrics for s in self.steps))
         gate_keys = frozenset(g.metric for s in self.steps for g in s._gates)
         return step_keys | gate_keys
-
-    @property
-    def terminal_steps(self) -> list[TerminalRewardStep]:
-        """All :class:`TerminalRewardStep` instances in this pipeline."""
-        return [s for s in self.steps if isinstance(s, TerminalRewardStep)]
 
     @staticmethod
     def _evaluate_gate_mask(gates: list[GateCfg], ctx: StepContext) -> torch.Tensor:
@@ -198,47 +192,12 @@ class RewardPipeline:
                 mask = mask & (val == gate.eq)
         return mask
 
-    def get_done_reasons(self, ctx: StepContext) -> dict[str, torch.Tensor]:
-        """Return per-terminal-step done flags (float32, shape ``(num_envs,)``).
-
-        Includes **all** terminal steps (even those with ``terminate=False``) so
-        that milestone events (e.g. ``approach_phase_terminal``) are visible
-        alongside hard-stop conditions.  Gate conditions are applied, matching
-        the behaviour of :meth:`get_dones`.
-        """
-        reasons: dict[str, torch.Tensor] = {}
-        for step in self.terminal_steps:
-            done_flags = step.done(ctx)
-            if step._gates:
-                done_flags = done_flags & self._evaluate_gate_mask(step._gates, ctx)
-            reasons[step.name] = done_flags.float()
-        return reasons
-
-    def get_dones(self, ctx: StepContext) -> torch.Tensor:
-        """Return a bool tensor of shape ``(num_envs,)`` — True for any environment
-        where at least one :class:`TerminalRewardStep` signals termination.
-
-        Assumes metrics have already been computed for the current step.
-        Gate conditions on terminal steps also suppress episode termination.
-        Steps with ``cfg.terminate=False`` fire their reward but never end the episode.
-        """
-        env = ctx.env
-        terminal = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
-        for step in self.terminal_steps:
-            if not step._cfg.terminate:
-                continue
-            done_flags = step.done(ctx)
-            if step._gates:
-                done_flags = done_flags & self._evaluate_gate_mask(step._gates, ctx)
-            terminal = terminal | done_flags
-        return terminal
-
     def reset_idx(self, env_ids) -> None:
-        """Reset per-episode ``fire_once`` state for *env_ids*.
+        """Reset per-episode ``fire_once`` and progressive baseline state.
 
         Must be called from the environment's ``_reset_idx`` after every
-        episode reset so that fire-once terminal steps can fire again in the
-        next episode.
+        episode reset so that fire-once steps can fire again and progressive
+        rewards see a zero delta on the first step of the new episode.
         """
         for step in self.steps:
             step.reset_base_value(env_ids)
@@ -262,9 +221,9 @@ class RewardPipeline:
             if step._cfg.fire_once:
                 rew = rew * step._apply_fire_once(rew != 0, env).float()
             totals_by_name.setdefault(
-                step.name, torch.zeros(env.num_envs, device=env.device)
+                step.log_name, torch.zeros(env.num_envs, device=env.device)
             )
-            totals_by_name[step.name] = totals_by_name[step.name] + rew
+            totals_by_name[step.log_name] = totals_by_name[step.log_name] + rew
             total += rew
         for name, t in totals_by_name.items():
             env.extras["log"][f"Episode_Reward/{name}"] = t.mean()
@@ -277,12 +236,14 @@ class RewardPipeline:
 # ---------------------------------------------------------------------------
 
 
-class StaticRewardStep(TerminalRewardStep[RewardCfg]):
+class StaticRewardStep(RewardStep[RewardCfg]):
     """Emits ``scale`` every step, unconditionally.
 
     Use ``gates`` to restrict to specific conditions, or ``fire_once: true``
     to award the bonus only on the first qualifying step per episode.
-    Set ``terminate: true`` to end the episode when the (gated) condition fires.
+    Termination is configured separately via the ``terminations`` block in
+    the env config (typically a :class:`MetricThresholdTerminationCondition`
+    with the same gates).
     """
 
     name = "static"
@@ -291,10 +252,6 @@ class StaticRewardStep(TerminalRewardStep[RewardCfg]):
     def compute(self, ctx: StepContext) -> torch.Tensor:
         env = ctx.env
         return torch.ones(env.num_envs, device=env.device, dtype=torch.float32)
-
-    def done(self, ctx: StepContext) -> torch.Tensor:
-        env = ctx.env
-        return torch.ones(env.num_envs, device=env.device, dtype=torch.bool)
 
 
 class DistanceRewardStep(RewardStep[DistanceRewardCfg]):
@@ -423,26 +380,20 @@ class JointSpeedRewardStep(RewardStep[RewardCfg]):
 # ---------------------------------------------------------------------------
 
 
-class SuccessLiftFractionTerminalRewardStep(TerminalRewardStep[RewardCfg]):
+class SuccessLiftFractionTerminalRewardStep(RewardStep[RewardCfg]):
     name = "success_lift_fraction_terminal"
     requires_metrics = frozenset({"is_success_lift_fraction_terminal"})
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
         return ctx.metrics["is_success_lift_fraction_terminal"].float()
 
-    def done(self, ctx: StepContext) -> torch.Tensor:
-        return ctx.metrics["is_success_lift_fraction_terminal"]
 
-
-class SafetyTouchTableTerminalRewardStep(TerminalRewardStep[RewardCfg]):
+class SafetyTouchTableTerminalRewardStep(RewardStep[RewardCfg]):
     name = "safety_touch_table_terminal"
     requires_metrics = frozenset({"is_table_touched"})
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
         return ctx.metrics["is_table_touched"].float()
-
-    def done(self, ctx: StepContext) -> torch.Tensor:
-        return ctx.metrics["is_table_touched"]
 
 
 class SafetyTouchTableRewardStep(RewardStep[RewardCfg]):
@@ -453,29 +404,23 @@ class SafetyTouchTableRewardStep(RewardStep[RewardCfg]):
         return ctx.metrics["is_table_touched"].float()
 
 
-class CubeOutOfRangeTerminalRewardStep(TerminalRewardStep[RewardCfg]):
+class CubeOutOfRangeTerminalRewardStep(RewardStep[RewardCfg]):
     name = "cube_out_of_range_terminal"
     requires_metrics = frozenset({"is_cube_out_of_range"})
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
         return ctx.metrics["is_cube_out_of_range"].float()
 
-    def done(self, ctx: StepContext) -> torch.Tensor:
-        return ctx.metrics["is_cube_out_of_range"]
 
-
-class ApproachPhaseTerminalRewardStep(TerminalRewardStep[RewardCfg]):
+class ApproachPhaseTerminalRewardStep(RewardStep[RewardCfg]):
     name = "approach_phase_terminal"
     requires_metrics = frozenset({"approach_phase_terminal"})
 
     def compute(self, ctx: StepContext) -> torch.Tensor:
         return ctx.metrics["approach_phase_terminal"].float()
 
-    def done(self, ctx: StepContext) -> torch.Tensor:
-        return ctx.metrics["approach_phase_terminal"]
 
-
-class GraspPhaseTerminalRewardStep(TerminalRewardStep[RewardCfg]):
+class GraspPhaseTerminalRewardStep(RewardStep[RewardCfg]):
     name = "grasp_phase_terminal"
     requires_metrics = frozenset({"grasp_phase_terminal", "approach_phase_terminal"})
 
@@ -483,13 +428,6 @@ class GraspPhaseTerminalRewardStep(TerminalRewardStep[RewardCfg]):
         return torch.logical_and(
             ctx.metrics["approach_phase_terminal"], ctx.metrics["grasp_phase_terminal"]
         ).float()
-
-    def done(self, ctx: StepContext) -> torch.Tensor:
-        flag = torch.logical_and(
-            ctx.metrics["approach_phase_terminal"],
-            ctx.metrics["grasp_phase_terminal"],
-        )
-        return flag
 
 
 # ---------------------------------------------------------------------------
@@ -604,6 +542,34 @@ class GoalZoneDistanceRewardStep(RewardStep[RewardCfg]):
         return ctx.metrics["goal_zone_distance"]
 
 
+class TimePenaltyRewardStep(RewardStep[RewardCfg]):
+    """Applies a linearly growing penalty over the episode duration.
+
+    At step ``i`` (0-indexed), ``compute()`` returns ``i / max_steps`` — a
+    value that ramps from 0 at episode start to ``(max_steps - 1) / max_steps``
+    at the final step.  Pair with a negative ``scale`` to penalise slow
+    behaviour and encourage efficient task completion.
+
+    **Total accumulated penalty per episode** (all steps summed):
+
+        sum_{i=0}^{N-1} scale * i/N  =  scale * (N-1) / 2  ≈  scale * N/2
+
+    where ``N = max_episode_length``.  For a 10 s episode at dt=0.008333 s
+    with decimation=2 (N ≈ 600 steps), ``scale=-1.0`` gives a total episode
+    penalty of roughly -300.  Scale accordingly — ``scale=-0.01`` gives ≈ -3
+    total, which is a mild shaping signal relative to the sparse rewards.
+    """
+
+    name = "time_penalty"
+    requires_metrics: frozenset[str] = frozenset()
+
+    def compute(self, ctx: StepContext) -> torch.Tensor:
+        env = ctx.env
+        elapsed = env.episode_length_buf.float()  # (num_envs,)
+        max_steps = float(env.max_episode_length)
+        return elapsed / max_steps
+
+
 # ---------------------------------------------------------------------------
 # Factory helper
 # ---------------------------------------------------------------------------
@@ -635,6 +601,7 @@ REWARD_STEP_REGISTRY: dict[str, tuple[type[RewardStep[Any]], type[RewardCfg]]] =
     "grasp_phase": (GraspPhaseRewardStep, RewardCfg),
     "wrist_roll_pose": (WristRollPoseRewardStep, WristRollPoseRewardCfg),
     "goal_zone_distance": (GoalZoneDistanceRewardStep, RewardCfg),
+    "time_penalty": (TimePenaltyRewardStep, RewardCfg),
 }
 
 

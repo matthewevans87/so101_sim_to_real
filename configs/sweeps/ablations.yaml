@@ -1,0 +1,290 @@
+# ── sweep identity ─────────────────────────────────────────────────────────────
+name: "ablations"
+
+# ── base settings (shared by all experiments) ──────────────────────────────────
+base:
+  task: So101-LiftCube-v0
+
+  # Base env config; per-experiment env_overrides are merged on top of this
+  env_config: configs/policy_train.yaml
+
+  # Base agent config; per-experiment agent_overrides are merged on top
+  agent_config: so101_rl/source/so101_rl/so101_rl/tasks/direct/so101_lift_cube/agents/skrl_ppo_cfg.yaml
+
+  # Explicit seed for reproducibility
+  seed: 42
+
+  # Parallel environments during training
+  envs: 256
+
+  headless: true
+  cameras: true
+  # # GEN 2 CNN
+  # cnn_checkpoint: /mnt/nas_1/matthew-evans/so101_sim_to_real/pipelines/pipeline_20260419_131039/04_train_cnn/checkpoints/best_model.pt
+
+
+# ── eval settings ──────────────────────────────────────────────────────────────
+eval:
+  episodes: 1024
+  num_envs: 64
+  num_videos: 5
+  record_videos:
+    wrist_cam: false
+    overhead_cam: false
+    viewport_cam: false
+  headless: true
+  verbosity: basic
+
+experiment_definition:
+# Vision Backbones
+  - config_set:
+      - config:
+          # GEN 1 CNN
+          cnn_checkpoint: /mnt/nas_1/matthew-evans/so101_sim_to_real/pipelines/pipeline_20260418_162511/04_train_cnn/checkpoints/best_model.pt
+      # - config:
+          # GEN 2 CNN
+          cnn_checkpoint: /mnt/nas_1/matthew-evans/so101_sim_to_real/pipelines/pipeline_20260419_131039/04_train_cnn/checkpoints/best_model.pt
+      - config:
+          # Frozen ResNet18 — no CNN checkpoint; cnn_checkpoint must be null
+          # when vision_encoder.type != 'frozen_cnn' (train.py will error otherwise).
+          cnn_checkpoint: null
+          env_overrides:
+            vision_encoder:
+              type: frozen_resnet18
+
+# Approach Phase Ablation
+  - config_set: 
+      - config: 
+          env_overrides:
+            rewards:
+              - type: approach_distance
+                enabled: false
+      - config: 
+          env_overrides:
+            rewards:
+              - type: approach_alignment
+                enabled: false
+      - config: 
+          env_overrides:
+            rewards:
+              - type: approach_phase
+                id: progressive
+                enabled: false
+      - config: 
+          env_overrides:
+            rewards:
+              - type: approach_phase
+                id: absolute
+                enabled: false
+      - config: 
+          env_overrides:
+            rewards:
+              - type: approach_phase_terminal
+                enabled: false
+
+#Grasp Phase Ablation
+  - config_set: 
+      - config: 
+          env_overrides:
+            rewards:
+              - type: grasp_phase
+                id: progressive
+                enabled: false 
+      - config: 
+          env_overrides:
+            rewards:
+              - type: grasp_phase
+                id: absolute
+                enabled: false 
+      - config: 
+          env_overrides:
+            rewards:
+              - type: grasp_phase_terminal
+                enabled: false
+
+#Lift Phase Ablation
+  - config_set: 
+      - config: 
+          env_overrides:
+            rewards:
+              - type: lift_phase
+                id: progressive
+                enabled: false 
+      - config: 
+          env_overrides:
+            rewards:
+              - type: lift_phase
+                id: absolute
+                enabled: false 
+      - config: 
+          env_overrides:
+            rewards:
+              - type: static
+                id: success_terminal
+                enabled: false
+
+#Shaping Ablation
+  - config_set: 
+      - config: 
+          env_overrides:
+            rewards:
+              - type: wrist_roll_pose
+                enabled: false  
+      - config: 
+          env_overrides:
+            rewards:
+              - type: avoid_bumping_cube
+                enabled: true
+      - config: 
+          env_overrides:
+            rewards:
+              - type: time_penalty
+                enabled: false
+
+
+#Critic Observation Ablation
+  - config_set: 
+      - config: 
+          env_overrides:
+            observations:
+              critic_include_vision_features: false 
+      - config: 
+          env_overrides:
+            observations:
+                critic_obs_metrics:
+                  # - cube_pos_gz
+                  - cube_rot6d_gz
+                  - cube_height_w
+                  - gripper_cube_contact_force_magnitude
+                  - fixed_jaw_cube_contact_force_magnitude
+                  - is_table_touched
+                  - normalized_grip_zone_cube_distance
+                  - cube_linear_velocity
+                  - cube_angular_velocity
+                  - gripper_open_width 
+      - config: 
+          env_overrides:
+            observations:
+                critic_obs_metrics:
+                  - cube_pos_gz
+                  # - cube_rot6d_gz
+                  - cube_height_w
+                  - gripper_cube_contact_force_magnitude
+                  - fixed_jaw_cube_contact_force_magnitude
+                  - is_table_touched
+                  - normalized_grip_zone_cube_distance
+                  - cube_linear_velocity
+                  - cube_angular_velocity
+                  - gripper_open_width 
+      - config: 
+          env_overrides:
+            observations:
+                critic_obs_metrics:
+                  - cube_pos_gz
+                  - cube_rot6d_gz
+                  # - cube_height_w
+                  - gripper_cube_contact_force_magnitude
+                  - fixed_jaw_cube_contact_force_magnitude
+                  - is_table_touched
+                  - normalized_grip_zone_cube_distance
+                  - cube_linear_velocity
+                  - cube_angular_velocity
+                  - gripper_open_width 
+      - config: 
+          env_overrides:
+            observations:
+                critic_obs_metrics:
+                  - cube_pos_gz
+                  - cube_rot6d_gz
+                  - cube_height_w
+                  # - gripper_cube_contact_force_magnitude
+                  - fixed_jaw_cube_contact_force_magnitude
+                  - is_table_touched
+                  - normalized_grip_zone_cube_distance
+                  - cube_linear_velocity
+                  - cube_angular_velocity
+                  - gripper_open_width 
+      - config: 
+          env_overrides:
+            observations:
+                critic_obs_metrics:
+                  - cube_pos_gz
+                  - cube_rot6d_gz
+                  - cube_height_w
+                  - gripper_cube_contact_force_magnitude
+                  # - fixed_jaw_cube_contact_force_magnitude
+                  - is_table_touched
+                  - normalized_grip_zone_cube_distance
+                  - cube_linear_velocity
+                  - cube_angular_velocity
+                  - gripper_open_width 
+      - config: 
+          env_overrides:
+            observations:
+                critic_obs_metrics:
+                  - cube_pos_gz
+                  - cube_rot6d_gz
+                  - cube_height_w
+                  - gripper_cube_contact_force_magnitude
+                  - fixed_jaw_cube_contact_force_magnitude
+                  # - is_table_touched
+                  - normalized_grip_zone_cube_distance
+                  - cube_linear_velocity
+                  - cube_angular_velocity
+                  - gripper_open_width 
+      - config: 
+          env_overrides:
+            observations:
+                critic_obs_metrics:
+                  - cube_pos_gz
+                  - cube_rot6d_gz
+                  - cube_height_w
+                  - gripper_cube_contact_force_magnitude
+                  - fixed_jaw_cube_contact_force_magnitude
+                  - is_table_touched
+                  # - normalized_grip_zone_cube_distance
+                  - cube_linear_velocity
+                  - cube_angular_velocity
+                  - gripper_open_width 
+      - config: 
+          env_overrides:
+            observations:
+                critic_obs_metrics:
+                  - cube_pos_gz
+                  - cube_rot6d_gz
+                  - cube_height_w
+                  - gripper_cube_contact_force_magnitude
+                  - fixed_jaw_cube_contact_force_magnitude
+                  - is_table_touched
+                  - normalized_grip_zone_cube_distance
+                  # - cube_linear_velocity
+                  - cube_angular_velocity
+                  - gripper_open_width 
+      - config: 
+          env_overrides:
+            observations:
+                critic_obs_metrics:
+                  - cube_pos_gz
+                  - cube_rot6d_gz
+                  - cube_height_w
+                  - gripper_cube_contact_force_magnitude
+                  - fixed_jaw_cube_contact_force_magnitude
+                  - is_table_touched
+                  - normalized_grip_zone_cube_distance
+                  - cube_linear_velocity
+                  # - cube_angular_velocity
+                  - gripper_open_width 
+      - config: 
+          env_overrides:
+            observations:
+                critic_obs_metrics:
+                  - cube_pos_gz
+                  - cube_rot6d_gz
+                  - cube_height_w
+                  - gripper_cube_contact_force_magnitude
+                  - fixed_jaw_cube_contact_force_magnitude
+                  - is_table_touched
+                  - normalized_grip_zone_cube_distance
+                  - cube_linear_velocity
+                  - cube_angular_velocity
+                  # - gripper_open_width

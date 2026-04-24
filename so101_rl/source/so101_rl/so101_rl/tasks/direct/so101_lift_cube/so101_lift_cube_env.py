@@ -54,12 +54,16 @@ from so101_rl.env_pipeline import (
     StepContext,
     MetricPipeline,
     RewardPipeline,
+    TerminationPipeline,
     build_dr_pipeline,
     build_env_metric_pipeline,
     build_metric_pipeline,
     build_reward_pipeline,
+    build_termination_pipeline,
     validate_gate_metrics,
+    validate_termination_gate_metrics,
     KEY_OBS_DIMS,
+    EpisodeStatsPipeline,
 )
 import torch
 from collections.abc import Sequence
@@ -178,8 +182,16 @@ class So101LiftCube(DirectRLEnv):
 
         self._step_ctx = StepContext(env=self)
         self.reward_pipeline: RewardPipeline = build_reward_pipeline(self.cfg)
+        self.termination_pipeline: TerminationPipeline = build_termination_pipeline(
+            self.cfg
+        )
         self.env_metric_pipeline: EnvMetricPipeline = build_env_metric_pipeline(
             self.cfg
+        )
+        self.episode_stats_pipeline = EpisodeStatsPipeline(
+            num_envs=self.num_envs,
+            device=self.device,
+            lift_height_threshold=self.cfg.episode_stats.lift_height_threshold,
         )
         self.metric_pipeline: MetricPipeline = build_metric_pipeline(
             self.reward_pipeline,
@@ -191,12 +203,21 @@ class So101LiftCube(DirectRLEnv):
                     *(self.cfg.observations.critic_obs_metrics or []),
                     # always computed for telemetry collection (does not affect obs space)
                     *self.cfg.observations.telemetry_metrics,
+                    # consumed by episode_stats_pipeline
+                    *EpisodeStatsPipeline.required_metric_keys,
+                    # consumed by termination_pipeline gates
+                    *self.termination_pipeline.required_metric_keys,
                 }
             ),
             env_metric_pipeline=self.env_metric_pipeline,
         )
         validate_gate_metrics(
             self.reward_pipeline, self.metric_pipeline, self.env_metric_pipeline
+        )
+        validate_termination_gate_metrics(
+            self.termination_pipeline,
+            self.metric_pipeline,
+            self.env_metric_pipeline,
         )
         self.dr_pipeline: DRPipeline = build_dr_pipeline(self.cfg)
         _dr_feed = self.cfg.domain_randomization.camera.feed
@@ -540,6 +561,28 @@ class So101LiftCube(DirectRLEnv):
         )
         critic_obs = torch.cat(critic_obs_parts, dim=-1)  # (N, state_space)
 
+        # NOTE (skrl 1.4.3 — asymmetric actor-critic NOT supported by wrapper)
+        # ----------------------------------------------------------------------
+        # We return the standard {"policy", "critic"} dict that the IsaacLab
+        # asymmetric AC contract specifies, BUT the installed skrl 1.4.3
+        # IsaacLabWrapper.step() only reads observations["policy"] and feeds
+        # those tensors to BOTH the policy and value networks (regardless of
+        # models.separate).  See:
+        #   ~/.conda/envs/env_isaaclab/lib/python3.11/site-packages/skrl/envs/
+        #     wrappers/torch/isaaclab_envs.py
+        #   IsaacLabWrapper.step:
+        #       self._observations = flatten_tensorized_space(
+        #           tensorize_space(self.observation_space,
+        #                           observations["policy"]))   # critic ignored
+        #
+        # Empirical confirmation: see sweep ablation_shared_critic
+        # (sweep_ablation_shared_critic_20260423_121336/summary.md) — holding
+        # models.separate=true fixed and only toggling the critic obs payload
+        # produced statistically indistinguishable training/eval results.
+        #
+        # The "critic" entry is kept here so this code is correct the moment
+        # skrl gains real asymmetric-AC support; until then a startup guard
+        # in train.py raises if a non-empty critic-only payload is configured.
         observations = {"policy": actor_obs, "critic": critic_obs}
 
         return observations
@@ -571,16 +614,25 @@ class So101LiftCube(DirectRLEnv):
         # Episode timeout
         time_out = self.episode_length_buf >= self.max_episode_length - 1
 
-        terminal = self.reward_pipeline.get_dones(self._step_ctx)
+        terminal = self.termination_pipeline.get_dones(self._step_ctx)
 
         # Log per-reason termination signals for TensorBoard diagnostics.
         self.extras["log"]["Termination/time_out"] = time_out.float().mean()
         self.extras["per_env_log"]["Termination/time_out"] = time_out.float()
-        for name, flags in self.reward_pipeline.get_done_reasons(
+        for name, flags in self.termination_pipeline.get_done_reasons(
             self._step_ctx
         ).items():
             self.extras["log"][f"Termination/{name}"] = flags.mean()
             self.extras["per_env_log"][f"Termination/{name}"] = flags
+
+        self.episode_stats_pipeline.step(
+            self._step_ctx,
+            terminal,
+            time_out,
+            common_step_counter=self.common_step_counter,
+        )
+        for key, val in self.episode_stats_pipeline.get_log_dict().items():
+            self.extras["log"][key] = torch.tensor(val, device=self.device)
 
         return terminal, time_out
 
@@ -589,6 +641,7 @@ class So101LiftCube(DirectRLEnv):
         if env_ids is None:
             env_ids = self.robot._ALL_INDICES.tolist()
         super()._reset_idx(env_ids)
+        self.episode_stats_pipeline.reset_envs(env_ids)
 
         # Reset robot to default joint state and root from asset
         joint_pos = self.robot.data.default_joint_pos[env_ids].clone()
@@ -640,6 +693,7 @@ class So101LiftCube(DirectRLEnv):
 
         # Clear fire_once state for reset envs so terminal steps can fire again.
         self.reward_pipeline.reset_idx(env_ids)
+        self.termination_pipeline.reset_idx(env_ids)
 
     def _compute_step_metrics(self) -> None:
         """Compute custom metrics at each step for logging purposes."""
