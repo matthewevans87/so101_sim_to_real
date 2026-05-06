@@ -1,0 +1,215 @@
+# ── sweep identity ─────────────────────────────────────────────────────────────
+name: "ablation_reward_contribution"
+
+# ── Design ─────────────────────────────────────────────────────────────────────
+#
+# Goal: identify which reward terms are individually load-bearing for the
+# lift-cube task at 15 k training timesteps (fast probe; 1 RNG seed).
+#
+# Each experiment starts from a *minimal always-on set* and adds exactly one
+# optional reward term.  Compare against sweep_baseline_20260424_165901 (all
+# rewards on, 50 k steps, 5 seeds) to place results in context.
+#
+# Always-on set:
+#   lift_phase[progressive]   — task signal (gates removed; see note below)
+#   lift_phase[absolute]      — task signal (gates removed)
+#   static[success_terminal]  — sparse success bonus
+#   cube_out_of_range_terminal / safety_touch_table_terminal  (scale 0; terminates episode)
+#   action                    — mild action-magnitude regulariser
+#
+# NOTE — lift_phase gate removal:
+#   In policy_train.yaml, lift_phase rewards are gated on approach_phase ≥ 0.8
+#   and grasp_phase ≥ 0.7.  These gates are cleared by their respective reward
+#   terms.  In experiments that lack those terms, the lift signal would never
+#   fire, making it impossible to distinguish "this reward is not load-bearing"
+#   from "the lift signal was silenced".  Removing the gates ensures the lift
+#   reward is always visible so each single-term experiment is interpretable in
+#   isolation.
+#
+# Experiment legend (in config_set order):
+#   exp_001  minimal only (no optional rewards)
+#   exp_002  + approach_distance
+#   exp_003  + approach_alignment
+#   exp_004  + approach_phase[progressive]
+#   exp_005  + approach_phase[absolute]
+#   exp_006  + approach_phase_terminal
+#   exp_007  + grasp_phase[progressive]
+#   exp_008  + grasp_phase[absolute]
+#   exp_009  + grasp_phase_terminal
+#   exp_010  + wrist_roll_pose
+#   exp_011  + avoid_bumping_cube
+#   exp_012  + safety_touch_table
+#   exp_013  + time_penalty
+# ───────────────────────────────────────────────────────────────────────────────
+
+base:
+  task: So101-LiftCube-v0
+  env_config: configs/policy_train.yaml
+  agent_config: so101_rl/source/so101_rl/so101_rl/tasks/direct/so101_lift_cube/agents/skrl_ppo_cfg.yaml
+
+  seeds: [42]
+
+  envs: 256
+  headless: true
+  cameras: true
+
+  # GEN 2 CNN — same as sweep_baseline_20260424_165901.
+  cnn_checkpoint: /mnt/nas_1/matthew-evans/so101_sim_to_real/pipelines/pipeline_20260419_131039/04_train_cnn/checkpoints/best_model.pt
+
+  agent_overrides:
+    trainer:
+      timesteps: 15000
+
+  # Sweep-wide env overrides: disable all optional rewards so that each
+  # experiment starts from the minimal set and adds exactly one term.
+  # lift_phase gates are removed so the lift signal is unconditional.
+  env_overrides:
+    rewards:
+      # ── Approach rewards ──────────────────────────────────────────────────
+      - type: approach_distance
+        enabled: false
+      - type: approach_alignment
+        enabled: false
+      - type: approach_phase
+        id: progressive
+        enabled: false
+      - type: approach_phase
+        id: absolute
+        enabled: false
+      - type: approach_phase_terminal
+        enabled: false
+      # ── Grasp rewards ─────────────────────────────────────────────────────
+      - type: grasp_phase
+        id: progressive
+        enabled: false
+      - type: grasp_phase
+        id: absolute
+        enabled: false
+      - type: grasp_phase_terminal
+        enabled: false
+      # ── Lift rewards: remove gates so signal is always visible ────────────
+      - type: lift_phase
+        id: progressive
+        gates: []
+      - type: lift_phase
+        id: absolute
+        gates: []
+      # ── Shaping rewards ───────────────────────────────────────────────────
+      - type: wrist_roll_pose
+        enabled: false
+      - type: avoid_bumping_cube
+        enabled: false
+      - type: safety_touch_table
+        enabled: false
+      - type: time_penalty
+        enabled: false
+
+
+# ── eval settings ──────────────────────────────────────────────────────────────
+eval:
+  episodes: 1024
+  num_envs: 64
+  num_videos: 5
+  record_videos:
+    wrist_cam: false
+    overhead_cam: false
+    viewport_cam: false
+  headless: true
+  verbosity: basic
+
+
+# ── experiment definition ──────────────────────────────────────────────────────
+experiment_definition:
+
+  - config_set:
+
+      # exp_001 — minimal only (always-on set; no optional rewards)
+      - config: {}
+
+      # exp_002 — + approach_distance
+      - config:
+          env_overrides:
+            rewards:
+              - type: approach_distance
+                enabled: true
+
+      # exp_003 — + approach_alignment
+      - config:
+          env_overrides:
+            rewards:
+              - type: approach_alignment
+                enabled: true
+
+      # exp_004 — + approach_phase[progressive]
+      - config:
+          env_overrides:
+            rewards:
+              - type: approach_phase
+                id: progressive
+                enabled: true
+
+      # exp_005 — + approach_phase[absolute]
+      - config:
+          env_overrides:
+            rewards:
+              - type: approach_phase
+                id: absolute
+                enabled: true
+
+      # exp_006 — + approach_phase_terminal
+      - config:
+          env_overrides:
+            rewards:
+              - type: approach_phase_terminal
+                enabled: true
+
+      # exp_007 — + grasp_phase[progressive]
+      - config:
+          env_overrides:
+            rewards:
+              - type: grasp_phase
+                id: progressive
+                enabled: true
+
+      # exp_008 — + grasp_phase[absolute]
+      - config:
+          env_overrides:
+            rewards:
+              - type: grasp_phase
+                id: absolute
+                enabled: true
+
+      # exp_009 — + grasp_phase_terminal
+      - config:
+          env_overrides:
+            rewards:
+              - type: grasp_phase_terminal
+                enabled: true
+
+      # exp_010 — + wrist_roll_pose
+      - config:
+          env_overrides:
+            rewards:
+              - type: wrist_roll_pose
+                enabled: true
+
+      # exp_011 — + avoid_bumping_cube
+      - config:
+          env_overrides:
+            rewards:
+              - type: avoid_bumping_cube
+                enabled: true
+
+      # exp_012 — + safety_touch_table
+      - config:
+          env_overrides:
+            rewards:
+              - type: safety_touch_table
+                enabled: true
+
+      # exp_013 — + time_penalty
+      - config:
+          env_overrides:
+            rewards:
+              - type: time_penalty
+                enabled: true

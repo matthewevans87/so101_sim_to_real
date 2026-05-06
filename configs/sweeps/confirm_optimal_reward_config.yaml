@@ -1,0 +1,110 @@
+# ── sweep identity ─────────────────────────────────────────────────────────────
+name: "confirm_optimal_reward_config"
+
+# ── Design ─────────────────────────────────────────────────────────────────────
+#
+# Confirmation run for the optimal reward config identified by the
+# ablation_reward_contribution + ablation_reward_contribution_followup sweeps:
+#
+#   approach_phase_terminal + grasp_phase[absolute]
+#
+# Hypothesis (from followup exp-003 at 15k steps, 85.9% success):
+#   This minimal reward set matches or exceeds the full-reward baseline at
+#   50k steps. Dense grasp shaping provides continuous gradient while
+#   approach_phase_terminal provides the single-fire curriculum signal.
+#
+# Comparison target:
+#   sweep_baseline_20260424_165901 — full policy_train.yaml reward set,
+#   seeds 42–46, 50k steps → 87.7% success.
+#
+# This sweep is placed in the 2026-04-24 campaign dir so aggregate_campaign.py
+# picks it up alongside the baseline for direct comparison.
+#
+# Always-on set (matching the ablation_reward_contribution base):
+#   lift_phase[progressive/absolute] (gates removed)
+#   static[success_terminal]
+#   action regulariser
+#   cube_out_of_range_terminal / safety_touch_table_terminal
+# ───────────────────────────────────────────────────────────────────────────────
+
+base:
+  task: So101-LiftCube-v0
+  env_config: configs/policy_train.yaml
+  agent_config: so101_rl/source/so101_rl/so101_rl/tasks/direct/so101_lift_cube/agents/skrl_ppo_cfg.yaml
+
+  seeds: [42, 43, 44, 45, 46]
+
+  envs: 256
+  headless: true
+  cameras: true
+
+  cnn_checkpoint: /mnt/nas_1/matthew-evans/so101_sim_to_real/pipelines/pipeline_20260419_131039/04_train_cnn/checkpoints/best_model.pt
+
+  agent_overrides:
+    trainer:
+      timesteps: 50000
+
+  # Sweep-wide: disable all optional rewards; remove lift_phase gates.
+  env_overrides:
+    rewards:
+      - type: approach_distance
+        enabled: false
+      - type: approach_alignment
+        enabled: false
+      - type: approach_phase
+        id: progressive
+        enabled: false
+      - type: approach_phase
+        id: absolute
+        enabled: false
+      - type: approach_phase_terminal
+        enabled: false
+      - type: grasp_phase
+        id: progressive
+        enabled: false
+      - type: grasp_phase
+        id: absolute
+        enabled: false
+      - type: grasp_phase_terminal
+        enabled: false
+      - type: lift_phase
+        id: progressive
+        gates: []
+      - type: lift_phase
+        id: absolute
+        gates: []
+      - type: wrist_roll_pose
+        enabled: false
+      - type: avoid_bumping_cube
+        enabled: false
+      - type: safety_touch_table
+        enabled: false
+      - type: time_penalty
+        enabled: false
+
+
+eval:
+  episodes: 1024
+  num_envs: 64
+  num_videos: 5
+  record_videos:
+    wrist_cam: true
+    overhead_cam: true
+    viewport_cam: true
+  headless: true
+  verbosity: basic
+
+
+experiment_definition:
+
+  - config_set:
+
+      # exp_001 — approach_phase_terminal + grasp_phase[absolute]  (optimal)
+      - config:
+          env_overrides:
+            rewards:
+              - type: approach_phase_terminal
+                enabled: true
+              - type: grasp_phase
+                id: absolute
+                enabled: true
