@@ -37,14 +37,19 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 
+# Local helper for constructing the export_bundle.py command line.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _export_cmd import build_export_command  # noqa: E402
+
 # ── step constants ─────────────────────────────────────────────────────────────
-STEP_ORDER: List[str] = ["train", "collect", "curate", "train-cnn"]
+STEP_ORDER: List[str] = ["train", "collect", "curate", "train-cnn", "export"]
 
 STEP_DIR: Dict[str, str] = {
     "train": "01_train",
     "collect": "02_collect",
     "curate": "03_curate",
     "train-cnn": "04_train_cnn",
+    "export": "05_export",
 }
 
 LOG_NAME: Dict[str, str] = {
@@ -52,6 +57,7 @@ LOG_NAME: Dict[str, str] = {
     "collect": "02_collect.log",
     "curate": "03_curate.log",
     "train-cnn": "04_train_cnn.log",
+    "export": "05_export.log",
 }
 
 STATE_FILE = "pipeline_state.json"
@@ -371,6 +377,18 @@ class PipelineOrchestrator:
                 elif not self.ad_hoc_input.is_dir():
                     errors.append(f"--input directory not found: {self.ad_hoc_input}")
 
+        # ── export-step checks ────────────────────────────────────────────────
+        if "export" in steps_in_range:
+            if from_step == "export" and self._state is None:
+                if not self.ad_hoc_experiment:
+                    errors.append(
+                        "--experiment is required when --from export without --pipeline-dir"
+                    )
+                elif not self.ad_hoc_experiment.is_dir():
+                    errors.append(
+                        f"--experiment directory not found: {self.ad_hoc_experiment}"
+                    )
+
         self._report_errors(errors)
 
     def _validate_cnn_config(self, errors: List[str]) -> None:
@@ -613,6 +631,29 @@ class PipelineOrchestrator:
             cmd += ["--seed", str(cfg["seed"])]
         return cmd
 
+    def _build_export_cmd(
+        self,
+        experiment_dir: Path,
+        output_dir: Path,
+    ) -> List[str]:
+        """Build the export_bundle.py invocation for a finished experiment.
+
+        The export step takes no overrides: all required inputs
+        (env_config.yaml, skrl/best_agent.pt, cnn_checkpoint.pt) must already
+        exist inside ``experiment_dir``. The training step is responsible for
+        placing them there.
+        """
+        cfg = self.config
+        export_cfg = cfg.get("export") or {}
+        return build_export_command(
+            isaac_lab_path=self.isaac_lab_path,
+            task_root=self.task_root,
+            task=cfg["task"],
+            experiment_path=experiment_dir,
+            output_dir=output_dir,
+            torchscript=bool(export_cfg.get("torchscript", False)),
+        )
+
     # ── state management ──────────────────────────────────────────────────────
     def _init_state(self) -> Dict[str, Any]:
         return {
@@ -645,6 +686,7 @@ class PipelineOrchestrator:
     _STEP_SENTINELS: Dict[str, str] = {
         "train": "skrl",  # directory created by the skrl trainer
         "collect": "telemetry_metadata.json",
+        "export": "manifest.json",  # written by export_bundle.py
     }
 
     def _verify_step_output(self, step: str, output_dir: Path) -> Tuple[int, Path]:
@@ -701,6 +743,15 @@ class PipelineOrchestrator:
                     in_dir = sim_output.get("curate", preview_dir / STEP_DIR["curate"])
                 cmd = self._build_train_cnn_cmd(in_dir, output_dir)
                 input_display = str(in_dir)
+            elif step == "export":
+                if self.ad_hoc_experiment and "train-cnn" not in steps_to_run:
+                    exp_dir = self.ad_hoc_experiment
+                else:
+                    exp_dir = sim_output.get(
+                        "train-cnn", preview_dir / STEP_DIR["train-cnn"]
+                    )
+                cmd = self._build_export_cmd(exp_dir, output_dir)
+                input_display = str(exp_dir)
 
             cmd_str = " ".join(str(c) for c in cmd)
             print(f"{_BLUE}[{i}] {step}{_NC}")
@@ -825,6 +876,10 @@ class PipelineOrchestrator:
                 input_dir = self._resolve_step_input(step)
                 cmd = self._build_train_cnn_cmd(input_dir, output_dir)
                 env = None
+            elif step == "export":
+                experiment_dir = self._resolve_step_input("export")
+                cmd = self._build_export_cmd(experiment_dir, output_dir)
+                env = None
 
             _info(f"Log: {log_path}")
 
@@ -861,6 +916,10 @@ class PipelineOrchestrator:
 
                 if step == "train":
                     _update_auto_pin(_PIN_LATEST_EXPERIMENT, actual_output_dir)
+                elif step == "export":
+                    from run import _PIN_LATEST_BUNDLE
+
+                    _update_auto_pin(_PIN_LATEST_BUNDLE, actual_output_dir)
             else:
                 self._state["steps"][step].update(
                     {

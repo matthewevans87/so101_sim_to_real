@@ -55,6 +55,33 @@ The `frozen_cnn` backbone is bootstrapped from a working `frozen_resnet18` polic
 
 The whole loop is driven by a single `pipeline` command (see Usage).
 
+### Camera calibration
+
+Accurate sim-to-real transfer requires the simulated wrist camera to see the same view as the physical camera. This involves two steps.
+
+**Intrinsics.** Lens distortion and focal length are measured by running a standard OpenCV checkerboard calibration (`so101_real/calibrate.py`) against a printed checkerboard, then converting the resulting OpenCV parameters (focal lengths `f_x`, `f_y`, principal point `c_x`, `c_y`) to Isaac Sim's pinhole aperture convention via `so101_rl/.../helpers/opencv_to_isaac_camera.py`. The calibrated values are stored in `so101_real/configs/camera_intrinsics.yaml` and loaded at sim startup.
+
+**Extrinsics (mount transform).** The camera is mounted on the gripper via the `CameraXframe` USD prim. Its exact position and orientation relative to the gripper cannot be read directly off the physical assembly, so it is determined interactively:
+
+1. Capture a reference frame from the real camera at a known arm pose using `so101_real capture-frame`.
+2. Run the interactive tuning tool with the physical robot connected:
+   ```bash
+   $ISAAC_LAB_PATH/isaaclab.sh -p so101_rl/scripts/tune_camera_pose.py \
+       --robot-config so101_real/configs/robot.yaml
+   ```
+   `tune_camera_pose.py` spawns an Isaac Lab scene with the SO-101, mirrors live joint positions from the robot (via `so101_rl/scripts/robot_bridge.py`, which runs in a separate Python process to isolate the `lerobot` dependency), renders the sim wrist camera, and shows a real-time overlay blending the sim render against the captured real frame in an `ffplay` window.
+3. In the Isaac Sim viewport, drag the `CameraXframe` prim at `/World/envs/env_0/Robot/gripper/mountscrew/camera_mount/CameraXframe` until the overlay converges. Hotkeys (`[`/`]` blend alpha, `c` cycle view mode, `r` reload real frame) assist visual alignment.
+4. Press `s` to print the calibrated transform as Python literals and YAML, then copy the values into `so101_rl/.../configurations/camera.py`.
+
+The calibrated mount transform (tuned 2026-05-09) is:
+
+```python
+CAMERA_TRANSLATE_VEC        = (0.00035243581412122693, 0.04831022672385376, 0.0264999898285746)
+CAMERA_ROTATION_QUAT_WXYZ   = (0.9803372249541024, -0.19707095311255154, -0.009634924733446605, -0.0030220909948313786)
+```
+
+The principal-point aperture offsets (`horizontal_aperture_offset`, `vertical_aperture_offset`) computed from the OpenCV calibration are overridden to `0.0` in `camera.py`: the physical lens is close enough to centred (< 0.1 mm offset) that the calibrated shift adds no perceptible benefit and complicates visual alignment in the tuning tool.
+
 ### Domain randomization
 
 To support eventual sim-to-real transfer, the environment randomizes (per-episode, per-env): scene lighting; camera pose; per-frame image augmentation (gaussian noise, brightness, contrast, motion blur, JPEG compression); cube color, size, and starting position; arm starting joint positions; and a configurable set of distractor objects of varied geometry, size, and color.

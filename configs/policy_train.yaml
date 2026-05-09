@@ -3,7 +3,7 @@ episode_length_s: 10.0
 sim:
   dt: 0.008333333333333333
 scene:
-  num_envs: 256
+  num_envs: 16
   env_spacing: 2.0
   replicate_physics: true
 
@@ -72,10 +72,10 @@ distractors:
 debug:
   save_images:
     pre_processing:
-      save: false
+      save: true
       interval: 10
     post_processing:
-      save: false
+      save: true
       interval: 10
   enable_gripper_arrow_markers: false
   enable_camera_frame_markers: false
@@ -440,7 +440,7 @@ vision_encoder:
   # 'frozen_resnet18' — frozen pretrained ResNet18 + SpatialSoftmax (1024-D)
   # 'frozen_cnn'      — frozen pretrained CNN + SpatialSoftmax (2×channels[-1]-D = 1024-D)
   #                     Model weights loaded via --cnn_checkpoint.
-  type: frozen_cnn
+  type: frozen_resnet18
   # Image dimensions passed to the CNN. The env's ResizePipelineStep resizes to these.
   # 16:9 aspect ratio matching the physical Arducam 1080P (1920x1080) camera.
   # 108x192 is a 10x downscale; a no-op during sim training when the camera renders at this size.

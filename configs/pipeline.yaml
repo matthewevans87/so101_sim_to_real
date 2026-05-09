@@ -8,11 +8,12 @@
 # All required fields are marked below. Fields left null will raise an error
 # at startup — before any step runs — per the project's explicit-config policy.
 #
-# The pipeline chains four steps:
+# The pipeline chains five steps:
 #   1. train      → artifacts/pipeline_TIMESTAMP/01_train/
 #   2. collect    → artifacts/pipeline_TIMESTAMP/02_collect/
 #   3. curate     → artifacts/pipeline_TIMESTAMP/03_curate/
 #   4. train-cnn  → artifacts/pipeline_TIMESTAMP/04_train_cnn/
+#   5. export     → artifacts/pipeline_TIMESTAMP/05_export/
 #
 # Each step's output dir is automatically wired as the next step's input.
 
@@ -73,3 +74,17 @@ cnn:
   # Takes precedence over conda_env if both are set.
   # null means use conda_env or the current interpreter.
   python: null
+
+# ── export parameters (deploy bundle) ────────────────────────────────────────
+#
+# Step 5 — export_bundle.py — runs after train-cnn and produces a
+# self-contained deploy bundle under:
+#   artifacts/pipeline_TIMESTAMP/05_export/
+#
+# The bundle includes: policy.pt, manifest.json, deploy_image_pipeline.yaml,
+# joint_config.yaml, (cnn_backbone.pt if frozen_cnn), bundle_provenance.json.
+
+export:
+  # Also save a TorchScript trace of the policy MLP (policy.ts.pt).
+  # Optional — useful for deployment targets without full PyTorch installed.
+  torchscript: false

@@ -48,6 +48,10 @@ from pathlib import Path
 
 import yaml
 
+# Local helper for constructing the export_bundle.py command line.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _export_cmd import build_export_command  # noqa: E402
+
 # ── constants ─────────────────────────────────────────────────────────────────
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 TASK_ROOT = PROJECT_ROOT / "so101_rl"
@@ -57,6 +61,7 @@ PINS_DIR = PROJECT_ROOT / "scripts" / "pins"
 # The filename suffix is chosen to match the expected file type so tab-completion
 # and human inspection both work naturally.
 _PINS: dict = {
+    "bundle": "latest_bundle",
     "cnn_checkpoint": "cnn_checkpoint.pt",
     "checkpoint": "checkpoint.pt",
     "experiment": "experiment",
@@ -67,6 +72,7 @@ _PINS: dict = {
 # Auto-managed symlink names (not exposed as pin --<flag> targets).
 _PIN_LATEST_EXPERIMENT = "latest_experiment"
 _PIN_LATEST_PIPELINE = "latest_pipeline"
+_PIN_LATEST_BUNDLE = "latest_bundle"
 
 
 def _update_auto_pin(link_name: str, target: Path) -> None:
@@ -270,6 +276,17 @@ def stage_assets(isaac_lab_path: str, task: str) -> None:
     dest.mkdir(parents=True, exist_ok=True)
     shutil.copytree(PROJECT_ROOT / "assets", dest, dirs_exist_ok=True)
     success(f"Assets staged to {dest}")
+
+    # Stage so101_real/configs (contains camera_intrinsics.yaml) so that
+    # camera.py can resolve it via ISAAC_LAB_WORKSPACE_PATH at runtime.
+    real_cfg_src = PROJECT_ROOT / "so101_real" / "configs"
+    if real_cfg_src.is_dir():
+        real_cfg_dest = (
+            Path(isaac_lab_path) / "workspace" / task / "so101_real" / "configs"
+        )
+        real_cfg_dest.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(real_cfg_src, real_cfg_dest, dirs_exist_ok=True)
+        success(f"so101_real/configs staged to {real_cfg_dest}")
 
 
 def stage_env_config(env_config_path: str, isaac_lab_path: str, task: str) -> Path:
@@ -692,40 +709,126 @@ def cmd_play(args) -> None:
 
 
 def cmd_export(args) -> None:
+    """Export a trained policy + CNN backbone to a self-contained deploy bundle."""
     isaac_lab_path = require_isaac_lab()
 
-    checkpoint = Path(args.checkpoint).resolve()
-    if not checkpoint.is_file():
-        error(f"Checkpoint not found: {checkpoint}")
+    # ── Resolve experiment directory ──────────────────────────────────────────
+    if args.experiment:
+        experiment_dir = Path(args.experiment).resolve()
+    else:
+        pin_experiment = PINS_DIR / _PIN_LATEST_EXPERIMENT
+        if pin_experiment.is_symlink():
+            experiment_dir = pin_experiment.resolve()
+            info(f"Using latest_experiment pin: {experiment_dir}")
+        else:
+            error(
+                "--experiment is required (or run a training first to set the "
+                "latest_experiment pin)."
+            )
+            sys.exit(1)
+
+    if not experiment_dir.is_dir():
+        error(f"Experiment directory not found: {experiment_dir}")
         sys.exit(1)
 
-    ckpt_root = checkpoint.parent.parent.parent
+    # ── Resolve output directory ──────────────────────────────────────────────
+    if args.output:
+        output_dir = Path(args.output).resolve()
+    else:
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        output_dir = experiment_dir / f"deploy_bundle_{timestamp}"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # ── Stage env config ──────────────────────────────────────────────────────
+    env_cfg_path = experiment_dir / "env_config.yaml"
     staged_cfg = None
-    env_cfg = ckpt_root / "env_config.yaml"
-    if env_cfg.is_file():
-        staged_cfg = stage_env_config(str(env_cfg), isaac_lab_path, args.task)
+    if env_cfg_path.is_file():
+        staged_cfg = stage_env_config(str(env_cfg_path), isaac_lab_path, args.task)
 
     check_gpu()
     stage_assets(isaac_lab_path, args.task)
     install_task(isaac_lab_path)
 
-    cmd = [
-        f"{isaac_lab_path}/isaaclab.sh",
-        "-p",
-        str(TASK_ROOT / "scripts" / "skrl" / "export.py"),
-        "--task",
-        args.task,
-        "--checkpoint",
-        str(checkpoint),
-        f"hydra.run.dir={ckpt_root}/hydra_export",
-    ]
-    if args.cameras:
-        cmd += ["--enable_cameras"]
+    cmd = build_export_command(
+        isaac_lab_path=isaac_lab_path,
+        task_root=TASK_ROOT,
+        task=args.task,
+        experiment_path=experiment_dir,
+        output_dir=output_dir,
+        torchscript=getattr(args, "torchscript", False),
+    )
 
     resolve_x11(getattr(args, "display", None))
     env = get_gui_env(Path(isaac_lab_path) / "workspace" / args.task, staged_cfg)
     env.update({k: os.environ[k] for k in ("DISPLAY", "XAUTHORITY") if k in os.environ})
     _log_x11_status()
+    rc = run_subprocess(cmd, env=env)
+    if rc == 0:
+        manifest_check = output_dir / "manifest.json"
+        if manifest_check.is_file():
+            _update_auto_pin(_PIN_LATEST_BUNDLE, output_dir)
+        else:
+            error(
+                "export_bundle.py exited 0 but manifest.json was not created. "
+                "Check the log for errors."
+            )
+            sys.exit(1)
+
+
+def cmd_deploy(args) -> None:
+    """Run real-robot inference from a deploy bundle (no Isaac Lab required)."""
+    # Resolve bundle path
+    if args.bundle:
+        bundle_path = Path(args.bundle).resolve()
+    else:
+        pin_bundle = PINS_DIR / _PIN_LATEST_BUNDLE
+        if pin_bundle.is_symlink():
+            bundle_path = pin_bundle.resolve()
+            info(f"Using latest_bundle pin: {bundle_path}")
+        else:
+            error(
+                "--bundle is required (or run an export first to set the "
+                "latest_bundle pin)."
+            )
+            sys.exit(1)
+
+    if not bundle_path.is_dir():
+        error(f"Bundle directory not found: {bundle_path}")
+        sys.exit(1)
+
+    if not args.robot_config:
+        error("--robot-config is required.")
+        sys.exit(1)
+
+    robot_config = Path(args.robot_config).resolve()
+    if not robot_config.is_file():
+        error(f"Robot config not found: {robot_config}")
+        sys.exit(1)
+
+    cmd = [
+        "python",
+        "-m",
+        "so101_real",
+        "run",
+        "--bundle",
+        str(bundle_path),
+        "--robot-config",
+        str(robot_config),
+    ]
+    if getattr(args, "episodes", None):
+        cmd += ["--episodes", str(args.episodes)]
+    if getattr(args, "seed", None) is not None:
+        cmd += ["--seed", str(args.seed)]
+    if getattr(args, "overlay", False):
+        cmd.append("--overlay")
+    if getattr(args, "record", False):
+        cmd.append("--record")
+    if getattr(args, "dry_run", False):
+        cmd.append("--dry-run")
+
+    resolve_x11(getattr(args, "display", None))
+    env = os.environ.copy()
+    env.update({k: os.environ[k] for k in ("DISPLAY", "XAUTHORITY") if k in os.environ})
     run_subprocess(cmd, env=env)
 
 
@@ -1219,12 +1322,66 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_play)
 
     # ── export ────────────────────────────────────────────────────────────────
-    p = sub.add_parser("export", help="Export a trained agent")
+    p = sub.add_parser(
+        "export",
+        help="Export a trained agent to a self-contained deploy bundle",
+    )
     p.add_argument("--task", required=True, metavar="TASK")
-    p.add_argument("--checkpoint", required=True, metavar="PATH")
-    p.add_argument("--cameras", action="store_true")
+    p.add_argument(
+        "--experiment",
+        metavar="PATH",
+        help="Training experiment directory (default: latest_experiment pin)",
+    )
+    p.add_argument(
+        "--output",
+        metavar="PATH",
+        help="Output directory for the deploy bundle (default: <experiment>/deploy_bundle_<ts>)",
+    )
+    p.add_argument(
+        "--torchscript",
+        action="store_true",
+        help="Also trace and save a TorchScript combined model",
+    )
     p.add_argument("--display", type=int, metavar="N")
     p.set_defaults(func=cmd_export)
+
+    # ── deploy ────────────────────────────────────────────────────────────────
+    p = sub.add_parser(
+        "deploy",
+        help="Run real-robot inference from a deploy bundle (no Isaac Lab required)",
+    )
+    p.add_argument(
+        "--bundle",
+        metavar="PATH",
+        help="Deploy bundle directory (default: latest_bundle pin)",
+    )
+    p.add_argument(
+        "--robot-config",
+        metavar="PATH",
+        required=True,
+        dest="robot_config",
+        help="Robot config YAML (so101_real/configs/robot.yaml template)",
+    )
+    p.add_argument(
+        "--episodes", type=int, metavar="N", help="Number of episodes to run"
+    )
+    p.add_argument("--seed", type=int, metavar="SEED")
+    p.add_argument("--overlay", action="store_true", help="Show live OpenCV overlay")
+    p.add_argument("--record", action="store_true", help="Record episodes to NPZ files")
+    p.add_argument(
+        "--dry-run",
+        action="store_true",
+        dest="dry_run",
+        help="Validate bundle and robot config without moving the robot",
+    )
+    p.add_argument(
+        "--display",
+        type=int,
+        metavar="N",
+        default=None,
+        help="X11 display number (e.g. 0 → DISPLAY=:0). Auto-discovered if omitted.",
+    )
+    p.set_defaults(func=cmd_deploy)
 
     # ── install ───────────────────────────────────────────────────────────────
     p = sub.add_parser("install", help="Install the task package into Isaac Lab")
@@ -1354,6 +1511,12 @@ def build_parser() -> argparse.ArgumentParser:
             "List all current pins:\n"
             "  ./scripts/run.py pin --list\n"
         ),
+    )
+    p.add_argument(
+        "--bundle",
+        metavar="PATH",
+        dest="bundle",
+        help="Pin a deploy bundle directory  →  scripts/pins/latest_bundle",
     )
     p.add_argument(
         "--cnn-checkpoint",

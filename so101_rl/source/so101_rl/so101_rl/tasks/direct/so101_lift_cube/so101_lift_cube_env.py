@@ -45,7 +45,9 @@ from torchvision.utils import save_image
 from so101_rl.configurations.camera import (
     CAMERA_ROTATION_QUAT_WXYZ,
     CAMERA_TRANSLATE_VEC,
+    CAMERA_POST_SPAWN_USD_ATTRS,
 )
+from so101_rl.helpers.opencv_to_isaac_camera import apply_post_spawn_attrs
 from .so101_lift_cube_env_cfg import So101LiftCubeCfg
 from so101_rl.viz.vision_debug import VisionDebugLogger
 from so101_rl.env_pipeline import (
@@ -77,7 +79,6 @@ from isaaclab.sensors import Camera, TiledCamera, ContactSensor, FrameTransforme
 import isaaclab.utils.math as math_utils
 import isaaclab.sim as sim_utils
 
-
 # Sequence of hook calls
 # pre_physics_step
 #   |-- _pre_physics_step(action)
@@ -98,6 +99,15 @@ class So101LiftCube(DirectRLEnv):
         self._render_mode = render_mode
 
         super().__init__(cfg, render_mode, **kwargs)
+
+        # Apply post-spawn USD attributes for fisheyeRadTanThinPrism camera model.
+        # These parameters (openCVFx/Fy, tangential p0/p1, thin-prism s0-s3) are not
+        # exposed in FisheyeCameraCfg and must be set directly on each camera prim.
+        # self.camera._view.prim_paths is populated by TiledCamera._initialize_impl(),
+        # which runs via scene.update() inside super().__init__().
+        for prim_path in self.camera._view.prim_paths:
+            prim = self.camera.stage.GetPrimAtPath(prim_path)
+            apply_post_spawn_attrs(prim, CAMERA_POST_SPAWN_USD_ATTRS)
 
         # Get handles to data views
         self.joint_pos = self.robot.data.joint_pos

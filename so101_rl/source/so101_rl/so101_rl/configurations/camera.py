@@ -1,18 +1,50 @@
 import os
+from pathlib import Path
 
 from isaaclab.sensors import CameraCfg, TiledCameraCfg
 import isaaclab.sim as sim_utils
 
+from so101_rl.helpers.opencv_to_isaac_camera import (
+    load_intrinsics,
+    opencv_to_isaac_pinhole,
+)
+
 WORKSPACE_PATH = os.environ.get("ISAAC_LAB_WORKSPACE_PATH", "/workspace")
 
-# Camera calibration from actual hardware:
-# - Mount angle: 146.31° (bend on mount)
-# - Mount distance: 46.5mm from bottom of mount to center of camera lens
-# - Translation: (y=64mm up, z=-35mm back) in gripper frame
-# - Rotation: ~146.31° around Y-axis (quaternion verified from Isaac Sim calibration)
-# Reference quaternion from matching project (w,x,y,z): (0.0, 0.0, 0.29237170472273677, 0.9563047559630354)
-CAMERA_TRANSLATE_VEC = (0, 0.06400000303983688, -0.03500000014901161)
-CAMERA_ROTATION_QUAT_WXYZ = (0.0, 0.0, 0.29237170472273677, 0.9563047559630354)
+# ---------------------------------------------------------------------------
+# Camera intrinsics: loaded from OpenCV calibration output.
+# Generate this file by running:
+#   python -m so101_real calibrate-camera --solve
+# ---------------------------------------------------------------------------
+_INTRINSICS_PATH = (
+    Path(WORKSPACE_PATH) / "so101_real" / "configs" / "camera_intrinsics.yaml"
+)
+if not _INTRINSICS_PATH.exists():
+    raise FileNotFoundError(
+        f"Camera intrinsics file not found: {_INTRINSICS_PATH}\n"
+        "Run the calibration pipeline first:\n"
+        "  python -m so101_real calibrate-camera --solve"
+    )
+_INTRINSICS = load_intrinsics(_INTRINSICS_PATH)
+_ISAAC_CAM = opencv_to_isaac_pinhole(_INTRINSICS)
+_PINHOLE_CFG_KWARGS = _ISAAC_CAM["pinhole_cfg"].copy()
+# Principal-point offsets are zeroed out: the physical lens is close enough to
+# centred that the calibrated offsets (< 0.1 mm) add no perceptible benefit
+# while introducing a render-time principal-point shift that complicates
+# visual inspection with tune_camera_pose.py.
+_PINHOLE_CFG_KWARGS["horizontal_aperture_offset"] = 0.0
+_PINHOLE_CFG_KWARGS["vertical_aperture_offset"] = 0.0
+
+# Camera extrinsic mount transform — tuned with tune_camera_pose.py on 2026-05-09.
+# Real robot joint positions were mirrored live into the sim arm and the
+# CameraXframe prim was dragged until the overlay converged.
+CAMERA_TRANSLATE_VEC = (0.00035243581412122693, 0.04831022672385376, 0.0264999898285746)
+CAMERA_ROTATION_QUAT_WXYZ = (
+    0.9803372249541024,
+    -0.19707095311255154,
+    -0.009634924733446605,
+    -0.0030220909948313786,
+)
 
 # Camera mount (SO-ARM101_camera_wrist_mount) USD asset and gripper-relative transform.
 # The mount Xform prim is placed at the same gripper-relative position/rotation as the
@@ -37,10 +69,9 @@ CAMERA_CFG = CameraCfg(
     # width=224,
     data_types=["rgb"],
     spawn=sim_utils.PinholeCameraCfg(
-        focal_length=6.12,  # 6.12mm from calibration
         focus_distance=400.0,
-        horizontal_aperture=6.3,  # 6.3mm sensor width
         clipping_range=(0.01, 10.0),
+        **_PINHOLE_CFG_KWARGS,
     ),
     offset=CameraCfg.OffsetCfg(
         pos=(
@@ -68,10 +99,9 @@ TILED_CAMERA_CFG = TiledCameraCfg(
     data_types=["rgb"],
     colorize_instance_segmentation=False,
     spawn=sim_utils.PinholeCameraCfg(
-        focal_length=6.12,
         focus_distance=400.0,
-        horizontal_aperture=6.3,
         clipping_range=(0.01, 10.0),
+        **_PINHOLE_CFG_KWARGS,
     ),
     offset=TiledCameraCfg.OffsetCfg(
         pos=(
@@ -103,3 +133,6 @@ OVERHEAD_CAMERA_CFG = CameraCfg(
         convention="opengl",
     ),
 )
+
+# No post-spawn USD attributes needed for the pinhole camera model.
+CAMERA_POST_SPAWN_USD_ATTRS: dict[str, float] = {}
