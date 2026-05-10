@@ -118,7 +118,7 @@ def cmd_run(args) -> None:
         loop.run(episodes=args.episodes, seed=seed)
 
     finally:
-        loop.destroy() if 'loop' in dir() else None
+        loop.destroy() if "loop" in dir() else None
         camera.close()
         robot.disconnect()
         if recorder is not None:

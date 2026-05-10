@@ -205,6 +205,7 @@ class _JointStateListener:
         # Write the listener script to a temp file to avoid shell quoting issues
         # with the -c approach (curly braces in the JSON call get mangled).
         import tempfile
+
         self._tmpfile = tempfile.NamedTemporaryFile(
             mode="w", suffix=".py", delete=False, prefix="dt_listener_"
         )
@@ -233,7 +234,9 @@ class _JointStateListener:
         self._thread.start()
         self._stderr_thread = threading.Thread(target=self._stderr_loop, daemon=True)
         self._stderr_thread.start()
-        print(f"[digital_twin] ROS2 listener started (pid={self._proc.pid}, topic={topic})")
+        print(
+            f"[digital_twin] ROS2 listener started (pid={self._proc.pid}, topic={topic})"
+        )
 
     def _stderr_loop(self) -> None:
         for line in self._proc.stderr:

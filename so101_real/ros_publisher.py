@@ -152,10 +152,14 @@ class RosPublisher:
                 target=self._stderr_loop, daemon=True
             )
             self._stderr_thread.start()
-            print(f"[RosPublisher] Publishing joint states -> {topic} "
-                  f"(pid={self._proc.pid})")
+            print(
+                f"[RosPublisher] Publishing joint states -> {topic} "
+                f"(pid={self._proc.pid})"
+            )
         except Exception as exc:
-            print(f"[RosPublisher] WARNING: failed to start publisher subprocess: {exc}")
+            print(
+                f"[RosPublisher] WARNING: failed to start publisher subprocess: {exc}"
+            )
             self._proc = None
 
     def _stderr_loop(self) -> None:
@@ -176,10 +180,12 @@ class RosPublisher:
         """Send current joint positions to the publisher subprocess."""
         if not self.enabled:
             return
-        payload = json.dumps({
-            "names": self._joint_names,
-            "positions": [float(q_rad[i]) for i in range(len(self._joint_names))],
-        })
+        payload = json.dumps(
+            {
+                "names": self._joint_names,
+                "positions": [float(q_rad[i]) for i in range(len(self._joint_names))],
+            }
+        )
         with self._lock:
             try:
                 self._proc.stdin.write(payload + "\n")

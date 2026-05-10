@@ -861,7 +861,9 @@ def _inject_ros2_env(env: dict, distro: str = "jazzy") -> None:
     _EXT_BASE = "/opt/isaac-sim/isaac-sim-5.1.0/exts/isaacsim.ros2.bridge"
     bundled_lib = f"{_EXT_BASE}/{distro}/lib"
     existing_ld = env.get("LD_LIBRARY_PATH", "")
-    env["LD_LIBRARY_PATH"] = f"{bundled_lib}:{existing_ld}" if existing_ld else bundled_lib
+    env["LD_LIBRARY_PATH"] = (
+        f"{bundled_lib}:{existing_ld}" if existing_ld else bundled_lib
+    )
     # Also expose system ROS2 site-packages so Python rclpy can init.
     ros_python = f"/opt/ros/{distro}/lib/python3.12/site-packages"
     existing_py = env.get("PYTHONPATH", "")
