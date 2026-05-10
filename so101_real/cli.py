@@ -25,6 +25,7 @@ def cmd_run(args) -> None:
     from .overlay import OverlayRenderer
     from .recorder import EpisodeRecorder
     from .robot import RobotConfig, So101Robot
+    from .ros_publisher import RosPublisher
 
     # ── Validate all inputs at startup ────────────────────────────────────────
     print("[so101_real] Loading bundle...")
@@ -50,7 +51,13 @@ def cmd_run(args) -> None:
     )
 
     if args.dry_run:
-        print("[so101_real] DRY RUN — robot actuation disabled.")
+        print(
+            "[so101_real] DRY RUN — bundle and config validated.\n"
+            "             Camera and robot will NOT be opened.\n"
+            f"             Would run {args.episodes} episode(s) at "
+            f"{bundle.control_hz:.1f} Hz on device: {ctrl_config.device}"
+        )
+        return
 
     # ── Optional recorder ─────────────────────────────────────────────────────
     recorder: Optional[EpisodeRecorder] = None
@@ -80,7 +87,10 @@ def cmd_run(args) -> None:
     overlay: Optional[OverlayRenderer] = None
     if args.overlay:
         overlay = OverlayRenderer(joint_names=bundle.active_joints)
-
+    # ── Optional ROS2 digital-twin publisher ───────────────────────────────────
+    ros_publisher: Optional[RosPublisher] = None
+    if getattr(args, "ros", False):
+        ros_publisher = RosPublisher(joint_names=bundle.active_joints)
     # ── Connect camera and robot ──────────────────────────────────────────────
     camera = CameraSource(camera_config)
     robot = So101Robot(config=robot_config, joint_names=bundle.active_joints)
@@ -100,6 +110,7 @@ def cmd_run(args) -> None:
             ctrl_config=ctrl_config,
             recorder=recorder,
             overlay=overlay,
+            ros_publisher=ros_publisher,
             dry_run=args.dry_run,
         )
 
@@ -107,6 +118,7 @@ def cmd_run(args) -> None:
         loop.run(episodes=args.episodes, seed=seed)
 
     finally:
+        loop.destroy() if 'loop' in dir() else None
         camera.close()
         robot.disconnect()
         if recorder is not None:
@@ -404,6 +416,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         dest="dry_run",
         help="Validate everything without moving the robot",
+    )
+    p.add_argument(
+        "--ros",
+        action="store_true",
+        dest="ros",
+        help="Publish measured joint states to /so101/joint_states (ROS2) for the digital twin",
     )
     p.set_defaults(func=cmd_run)
 

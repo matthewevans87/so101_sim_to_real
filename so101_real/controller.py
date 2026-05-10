@@ -29,7 +29,8 @@ from .camera import CameraSource
 from .image_pipeline import build_deploy_pipeline
 from .policy import load_policy
 from .recorder import EpisodeRecorder
-from .robot import RobotConfig, So101Robot
+from .robot import RobotConfig, So101Robot, ResetPoseCfg
+from .ros_publisher import RosPublisher
 from .safety import SafetyLayer
 from .vision import build_vision_encoder
 
@@ -96,6 +97,8 @@ class InferenceLoop:
         Optional EpisodeRecorder for logging.
     overlay:
         Optional OverlayRenderer for live visualization.
+    ros_publisher:
+        Optional RosPublisher for streaming joint states to the digital twin.
     dry_run:
         If True, skip actuation (send_joints is a no-op).
     """
@@ -109,6 +112,7 @@ class InferenceLoop:
         ctrl_config: ControllerConfig,
         recorder: Optional[EpisodeRecorder] = None,
         overlay=None,
+        ros_publisher: Optional[RosPublisher] = None,
         dry_run: bool = False,
     ) -> None:
         self._bundle = bundle
@@ -119,6 +123,7 @@ class InferenceLoop:
         self._recorder = recorder
         self._overlay = overlay
         self._dry_run = dry_run
+        self._ros_publisher = ros_publisher
 
         device = torch.device(ctrl_config.device)
 
@@ -175,12 +180,48 @@ class InferenceLoop:
 
         for ep_idx in range(episodes):
             print(f"[InferenceLoop] Episode {ep_idx + 1}/{episodes}")
+            self._reset_to_start_pose(control_hz)
             self._ema_target = None  # Reset EMA at episode start
             self._run_episode(ep_idx, tick_period)
             if self._recorder is not None:
                 self._recorder.end_episode()
 
         print("[InferenceLoop] All episodes complete.")
+
+    def _reset_to_start_pose(self, control_hz: float) -> None:
+        """Move the arm to the configured start pose at the beginning of an episode.
+
+        Interpolates linearly from the current joint positions to the target over
+        ``reset_pose.duration_s`` seconds, sending one command per control tick.
+        Skipped if ``reset_pose`` is absent or ``enabled: false`` in robot.yaml.
+        Also skipped in dry-run mode.
+        """
+        rp: Optional[ResetPoseCfg] = self._robot_config.reset_pose
+        if rp is None or not rp.enabled or self._dry_run:
+            return
+
+        n_joints = len(rp.joints_rad)
+        target = torch.tensor(rp.joints_rad, dtype=torch.float32)
+        n_steps = max(1, round(rp.duration_s * control_hz))
+        tick_period = 1.0 / control_hz
+
+        q_start = self._robot.read_joints().cpu().float()
+        if q_start.shape[0] != n_joints:
+            raise ValueError(
+                f"reset_pose.joints_rad has {n_joints} entries but robot has "
+                f"{q_start.shape[0]} joints.  Update robot.yaml to match the bundle."
+            )
+
+        print(
+            f"[InferenceLoop] Resetting to start pose over {rp.duration_s:.1f}s "
+            f"({n_steps} steps)..."
+        )
+        for step in range(n_steps):
+            t = (step + 1) / n_steps  # linear interpolation parameter in (0, 1]
+            q_cmd = q_start + t * (target - q_start)
+            self._robot.send_joints(q_cmd)
+            time.sleep(tick_period)
+        print("[InferenceLoop] Start pose reached.")
 
     def _run_episode(self, episode_id: int, tick_period: float) -> None:
         """Run a single episode until interrupted."""
@@ -211,6 +252,10 @@ class InferenceLoop:
 
         # 4. Read joint positions
         q_meas = self._robot.read_joints().to(self._device)  # (n_joints,)
+
+        # 4a. Publish to digital twin (ROS2) — no-op if ros_publisher is None
+        if self._ros_publisher is not None:
+            self._ros_publisher.publish(q_meas)
 
         # 5. Build obs: [vision_features | q]
         # actor_obs_metrics are validated empty at InferenceLoop.__init__
@@ -254,3 +299,9 @@ class InferenceLoop:
         # 12. Update overlay
         if self._overlay is not None:
             self._overlay.update(frame_rgb, q_meas, q_safe, action)
+
+    def destroy(self) -> None:
+        """Release resources (ROS2 publisher, if active)."""
+        if self._ros_publisher is not None:
+            self._ros_publisher.destroy()
+            self._ros_publisher = None

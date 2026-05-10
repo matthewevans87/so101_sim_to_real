@@ -32,7 +32,6 @@ import torch
 
 from isaaclab.app import AppLauncher
 
-
 parser = argparse.ArgumentParser(
     description="Roll out a trained skrl policy and collect telemetry samples."
 )
@@ -157,7 +156,6 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 
 import so101_rl.tasks  # noqa: F401
 
-
 SKRL_VERSION = "1.4.3"
 if version.parse(skrl.__version__) < version.parse(SKRL_VERSION):
     skrl.logger.error(
@@ -195,11 +193,38 @@ def _ensure_positive(name: str, value: int) -> None:
 
 
 def _find_checkpoint_and_task(experiment_path: Path) -> tuple[Path, str]:
-    checkpoint_path = (
-        experiment_path / "skrl" / "agent" / "checkpoints" / "best_agent.pt"
-    )
+    """Return the latest numbered checkpoint (e.g. agent_15000.pt), falling back
+    to best_agent.pt only when no numbered checkpoint exists.
+
+    ``best_agent.pt`` is selected by SKRL based on training entropy, not task
+    success rate, and often corresponds to an early, under-trained policy.  The
+    last numbered checkpoint is always the most recently trained weights.
+    """
+    checkpoints_dir = experiment_path / "skrl" / "agent" / "checkpoints"
+
+    # Collect agent_<N>.pt files and pick the one with the highest step count.
+    numbered: list[tuple[int, Path]] = []
+    if checkpoints_dir.exists():
+        for p in checkpoints_dir.glob("agent_*.pt"):
+            stem = p.stem  # e.g. "agent_15000"
+            try:
+                step = int(stem.split("_", 1)[1])
+                numbered.append((step, p))
+            except (IndexError, ValueError):
+                pass
+
+    if numbered:
+        numbered.sort(key=lambda x: x[0])
+        checkpoint_path = numbered[-1][1]
+        return checkpoint_path, ""
+
+    # Fall back to best_agent.pt if no numbered checkpoint is found.
+    checkpoint_path = checkpoints_dir / "best_agent.pt"
     if not checkpoint_path.exists():
-        raise FileNotFoundError(f"Checkpoint not found at {checkpoint_path}")
+        raise FileNotFoundError(
+            f"No checkpoint found in {checkpoints_dir}. "
+            "Expected agent_<N>.pt or best_agent.pt."
+        )
     return checkpoint_path, ""
 
 

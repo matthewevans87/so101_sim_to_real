@@ -255,6 +255,54 @@ python -m vision_backbone_demo \
     --device cuda --seed 42 --max-channels 16 --fps 20
 ```
 
+```bash
+# ── Real-robot deployment (no Isaac Lab required) ────────────────────────────
+
+# Run the latest exported bundle (uses the latest_bundle pin set by export):
+./scripts/run.py deploy \
+    --robot-config so101_real/configs/robot.yaml \
+    --episodes 5 \
+    --seed 42
+
+# Point to a specific export bundle directory:
+./scripts/run.py deploy \
+    --bundle /mnt/nas_1/matthew-evans/so101_sim_to_real/exports \
+    --robot-config so101_real/configs/robot.yaml \
+    --episodes 5 \
+    --seed 42
+
+# Validate bundle + robot config without moving the robot:
+./scripts/run.py deploy \
+    --bundle /mnt/nas_1/matthew-evans/so101_sim_to_real/exports \
+    --robot-config so101_real/configs/robot.yaml \
+    --episodes 1 --dry-run
+
+# With live OpenCV overlay and episode recording:
+./scripts/run.py deploy \
+    --bundle /mnt/nas_1/matthew-evans/so101_sim_to_real/exports \
+    --robot-config so101_real/configs/robot.yaml \
+    --episodes 5 --overlay --record
+```
+
+**`deploy` flags:**
+| Flag                  | Description                                                                                                                                                        |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `--bundle PATH`       | Deploy bundle directory (contains `policy.pt`, `cnn_backbone.pt`, `manifest.json`, etc.). Defaults to the `latest_bundle` pin set by the most recent `export` run. |
+| `--robot-config PATH` | Robot config YAML. Copy and edit `so101_real/configs/robot.yaml` (set serial port, calibration file, camera index).                                                |
+| `--episodes N`        | Number of episodes to execute.                                                                                                                                     |
+| `--seed N`            | RNG seed.                                                                                                                                                          |
+| `--overlay`           | Show a live OpenCV window with camera feed, joint positions, and actions.                                                                                          |
+| `--record`            | Save episode rollouts (frames + joint data) to `<bundle>/rollouts/`.                                                                                               |
+| `--dry-run`           | Validate bundle and robot config, print summary, then exit without moving the robot.                                                                               |
+
+**Before deploying**, edit `so101_real/configs/robot.yaml`:
+- `robot.port` — serial port of the SO-101 follower arm (e.g. `/dev/ttyACM0`)
+- `robot.calibration_file` — path to the LeRobot calibration JSON
+- `camera.device_index` — V4L2 index of the wrist camera
+- `camera.capture_width` / `capture_height` — physical resolution the camera supports
+
+`deploy` has **no Isaac Lab dependency** and runs directly under the system or conda Python that has `so101_real` installed (`pip install -e ".[deploy]"`). Isaac Sim is not required.
+
 All commands that write output accept `--output PATH` as a base directory. Outputs are always written to `<output>/<timestamp>/` (or `<output>/pipeline_<timestamp>/`, `<output>/sweep_<name>_<timestamp>/`), defaulting to `artifacts/`.
 
 **Common flags (most subcommands):**
@@ -276,7 +324,21 @@ Lighting, camera feed augmentation (noise, brightness, contrast, motion blur, JP
 
 ## Sim-to-Real Status
 
-This project currently runs **only in simulation** (NVIDIA Isaac Sim / Isaac Lab). Physical-hardware deployment on the SO-101 is the next planned milestone; the design choices throughout — wrist-only camera, joint-position control normalized to `[0, 1]`, frozen vision encoders, aggressive domain randomization, declarative reward terms — are all in service of that eventual transfer.
+The sim-to-real pipeline is now end-to-end: training, CNN bootstrapping, export, and real-hardware inference are all fully implemented. The design choices throughout — wrist-only camera, joint-position control normalized to `[0, 1]`, frozen vision encoders, aggressive domain randomization, declarative reward terms — are all in service of zero-shot transfer to the physical SO-101.
+
+The export step produces a self-contained **deploy bundle** (no Isaac Lab dependency) consumed directly by the `deploy` command:
+
+```
+exports/
+  policy.pt                   TorchScript-free policy MLP weights
+  cnn_backbone.pt             Frozen CNN backbone weights (frozen_cnn only)
+  deploy_image_pipeline.yaml  Inference-time image preprocessing steps
+  joint_config.yaml           Joint names, limits, and control frequency
+  manifest.json               Bundle schema + provenance
+  bundle_provenance.json      SHA256 links to source checkpoints and configs
+```
+
+See the **`deploy`** usage block above for the exact commands.
 
 ## Credits
 

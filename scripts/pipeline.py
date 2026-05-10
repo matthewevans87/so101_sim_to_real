@@ -638,18 +638,27 @@ class PipelineOrchestrator:
     ) -> List[str]:
         """Build the export_bundle.py invocation for a finished experiment.
 
-        The export step takes no overrides: all required inputs
-        (env_config.yaml, skrl/best_agent.pt, cnn_checkpoint.pt) must already
-        exist inside ``experiment_dir``. The training step is responsible for
-        placing them there.
+        export_bundle.py expects the 01_train experiment directory as its
+        --experiment-path, since that is where env_config.yaml, skrl/ and
+        cnn_checkpoint.pt all live.  The pipeline passes 04_train_cnn as
+        experiment_dir (the upstream step of export), so we resolve the
+        actual train output dir from pipeline state instead.
         """
         cfg = self.config
         export_cfg = cfg.get("export") or {}
+
+        # Resolve the 01_train directory from state.
+        train_output: Path = experiment_dir  # fallback to whatever was passed
+        if self._state:
+            train_info = self._state.get("steps", {}).get("train", {})
+            if train_info.get("output_dir") and train_info.get("status") == "completed":
+                train_output = Path(train_info["output_dir"])
+
         return build_export_command(
             isaac_lab_path=self.isaac_lab_path,
             task_root=self.task_root,
             task=cfg["task"],
-            experiment_path=experiment_dir,
+            experiment_path=train_output,
             output_dir=output_dir,
             torchscript=bool(export_cfg.get("torchscript", False)),
         )
@@ -879,7 +888,21 @@ class PipelineOrchestrator:
             elif step == "export":
                 experiment_dir = self._resolve_step_input("export")
                 cmd = self._build_export_cmd(experiment_dir, output_dir)
-                env = None
+                # export_bundle.py imports the env cfg module which requires
+                # both ISAAC_LAB_WORKSPACE_PATH and SO101_ENV_CONFIG.
+                # The env_config.yaml lives in the 01_train output dir, not
+                # the 04_train_cnn dir that _resolve_step_input("export") returns.
+                export_env_cfg: Optional[Path] = None
+                train_info = (self._state or {}).get("steps", {}).get("train", {})
+                train_output = train_info.get("output_dir")
+                if train_output:
+                    candidate = Path(train_output) / "env_config.yaml"
+                    if candidate.is_file():
+                        export_env_cfg = candidate
+                env = self._get_gui_env(
+                    Path(self.isaac_lab_path) / "workspace" / self.config["task"],
+                    export_env_cfg,
+                )
 
             _info(f"Log: {log_path}")
 

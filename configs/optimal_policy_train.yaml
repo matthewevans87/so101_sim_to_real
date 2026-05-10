@@ -1,3 +1,19 @@
+# Env config for the 2-generation CNN bootstrap pipeline.
+#
+# Reward configuration: confirmed-optimal minimal set from the
+# ablation_reward_contribution + confirm_optimal_reward_config sweeps
+# (2026-04-24 / 2026-05-01 campaigns). Achieves 86.8% success at 50k steps,
+# matching the full-reward baseline while training faster and more stably.
+#
+# Enabled rewards:   approach_phase_terminal (500), grasp_phase[absolute] (5),
+#                    lift_phase[progressive/absolute] (gates removed),
+#                    static[success_terminal] (1000), action regulariser,
+#                    cube_out_of_range_terminal, safety_touch_table_terminal.
+# Disabled rewards:  all other approach/grasp dense shaping, wrist_roll_pose,
+#                    avoid_bumping_cube, safety_touch_table, time_penalty.
+#
+# Vision encoder: frozen_resnet18 (Gen1 bootstrap).
+
 decimation: 2
 episode_length_s: 10.0
 sim:
@@ -12,11 +28,6 @@ joints:
   active: ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"]
   wrist_roll_name: "wrist_roll"
   starting_position: [null, null, -25.0, 65.0, -90.0, null]
-  # Per-joint noise (rad), aligned 1:1 with joints.all.  Wide noise on yaw
-  # (shoulder_pan), wrist_roll and gripper is harmless; lift-axis joints
-  # (shoulder_lift / elbow_flex / wrist_flex) need tight noise to avoid
-  # dipping arm links into the table at t=0.  fk_safety provides a hard
-  # backstop via Isaac Lab kinematic FK rejection-sampling at reset.
   starting_position_noise:
     enabled: true
     ranges:
@@ -28,7 +39,7 @@ joints:
       - [-0.40, 0.40]   # gripper
     fk_safety:
       enabled: true
-      min_link_z_above_table: 0.005   # m, 5 mm clearance to absorb FP noise
+      min_link_z_above_table: 0.005
       tracked_links:
         - shoulder
         - upper_arm
@@ -116,46 +127,37 @@ metrics:
   approach_phase:
     distance_pressure: 20.0
     alignment_pressure: 1.0
-    gripper_pos_pressure: 0.0  # disabled: gripper state is for grasp phase, not approach
+    gripper_pos_pressure: 0.0
     gripper_pos_target: 0.8753292519943295
   grasp_phase:
-    grip_force_sat_threshold: 10.0  # bilateral pinch force (N) at which grasp_phase saturates to 1.0
+    grip_force_sat_threshold: 10.0
   grip_cube:
-    distance_threshold: 0.02  # grip-zone-to-cube distance (m) for is_cube_in_grip_position
-    touch_force_threshold: 0.001  # minimum contact force (N) for is_cube_gripped
+    distance_threshold: 0.02
+    touch_force_threshold: 0.001
   cube_out_of_range:
-    distance_threshold: 0.40  # cube-to-base distance (m) beyond which episode may terminate
+    distance_threshold: 0.40
   lift_phase:
-    height_threshold: 0.20  # cube height (m) at which cube_lift_fraction reaches 1.0
+    height_threshold: 0.20
   approach_phase_terminal:
-    threshold: 0.80  # approach_phase value above which approach_phase_terminal is True
+    threshold: 0.80
   grasp_phase_terminal:
-    threshold: 0.80  # grasp_phase value above which grasp_phase_terminal is True
+    threshold: 0.80
   goal_zone_distance:
-    pressure: 0.3   # exp(-pressure * dist / cube_width); higher = sharper peak at goal
-    distance_threshold: 0.05  # metres — cube centroid within this distance is considered reached
+    pressure: 0.3
+    distance_threshold: 0.05
 
 episode_stats:
-  lift_height_threshold: 0.02  # cube height above resting position (m) at which cube is considered 'lifted'
-                               # for lift_rate, drop_rate, and time_to_lift statistics.
-                               # Must be above physics jitter (~0.001–0.002 m); 0.02 m (2 cm) is a safe margin.
-                               # Intentionally smaller than metrics.lift_phase.height_threshold (0.20).
+  lift_height_threshold: 0.02
 
 rewards:
-  # mode: absolute (default)     — reward the current metric value each step.
-  # mode: unsigned_progressive    — reward only the improvement delta vs the previous step
-  #                                 (clamped to min=0; regressions yield zero).
-  # mode: signed_progressive      — reward the signed delta; regressions yield negative reward.
-
-
-  # APPROACH
+  # APPROACH — only terminal kept; all dense approach rewards disabled.
   - type: approach_distance
-    enabled: true
+    enabled: false
     scale: 20.0
     mode: unsigned_progressive
 
   - type: approach_alignment
-    enabled: true
+    enabled: false
     scale: 1.0
     mode: unsigned_progressive
 
@@ -165,13 +167,13 @@ rewards:
 
   - type: approach_phase
     id: progressive
-    enabled: true
+    enabled: false
     scale: 5.0
     mode: unsigned_progressive
 
   - type: approach_phase
     id: absolute
-    enabled: true
+    enabled: false
     scale: 1.0
     mode: absolute
 
@@ -180,10 +182,10 @@ rewards:
     scale: 500.0
     fire_once: true
 
-  # GRASP
+  # GRASP — only dense absolute kept; progressive and terminal disabled.
   - type: grasp_phase
     id: progressive
-    enabled: true
+    enabled: false
     scale: 10.0
     mode: unsigned_progressive
     gates:
@@ -204,32 +206,24 @@ rewards:
         lte: 0.04
 
   - type: grasp_phase_terminal
-    enabled: true
+    enabled: false
     scale: 500.0
     fire_once: true
-        
-  # LIFT
+
+  # LIFT — gates removed because approach/grasp phase rewards are disabled.
   - type: lift_phase
     id: progressive
     enabled: true
     scale: 1000.0
     mode: signed_progressive
-    gates:
-      - metric: approach_phase
-        gte: 0.8
-      - metric: grasp_phase
-        gte: 0.7
+    gates: []
 
   - type: lift_phase
     id: absolute
     enabled: true
     scale: 5.0
     mode: absolute
-    gates:
-      - metric: approach_phase
-        gte: 0.8
-      - metric: grasp_phase
-        gte: 0.7
+    gates: []
 
   - type: static
     id: success_terminal
@@ -240,18 +234,18 @@ rewards:
       - metric: cube_lift_fraction
         gte: 1.0
 
-  # SHAPING
+  # SHAPING — all disabled.
   - type: wrist_roll_pose
-    enabled: true
+    enabled: false
     scale: 1.0
-    target_rad: -1.5707963267948966  # Keep wrist roll at -90° (ideal for top-down and side grasps)
+    target_rad: -1.5707963267948966
     pressure: 1.0
     mode: signed_progressive
-    
+
   - type: avoid_bumping_cube
-    enabled: true
+    enabled: false
     scale: -0.1
-    cube_widths: 1.0 # Anything less than 0.5 is impossible
+    cube_widths: 1.0
 
   - type: action
     enabled: true
@@ -260,28 +254,15 @@ rewards:
     gates:
       - metric: grasp_phase
         lt: 0.7
-  # - type: action
-  #   enabled: true
-  #   scale: -0.02
-  #   joints: ["shoulder_pan", "gripper"]
-  #   gates:
-  #     - metric: grasp_phase
-  #       gte: 0.7
 
-  # binary penalty for touching the table
   - type: safety_touch_table
-    enabled: true
+    enabled: false
     scale: -1.0
 
-  # Time-based penalty: at step i the per-step penalty is scale * i/N.
-  # Total episode penalty ≈ scale * N/2 (triangular sum), not scale * N.
-  # E.g. scale=-0.01, N≈600 steps → total ≈ -3 per episode (mild shaping).
-  # Tune scale so the total is small relative to sparse terminal rewards (±500).
   - type: time_penalty
-    enabled: true
+    enabled: false
     scale: -1.0
 
-  # terminal when cube is pushed out of reach of the robot base
   - type: cube_out_of_range_terminal
     enabled: true
     scale: 0.0
@@ -291,17 +272,6 @@ rewards:
     scale: 0.0
 
 
-# ===========================================================================
-# Termination conditions
-# ---------------------------------------------------------------------------
-# Each entry produces a TerminationCondition that ends the episode when its
-# gates evaluate True for an env on a step.  Termination is fully decoupled
-# from rewards: reward shaping that should accompany an end-of-episode event
-# is configured separately above (typically with `fire_once: true` and the
-# same gates).  Exactly one enabled entry must declare `is_success: true` so
-# the eval pipeline can classify the primary termination cause without
-# string-matching reward names.
-# ===========================================================================
 terminations:
   - id: success_lift_fraction_terminal
     enabled: true
@@ -372,29 +342,17 @@ domain_randomization:
     size_range: [0.975, 1.025]
     position_randomization:
       enabled: true
-      # NOTE: cube_out_of_range fires when
-      #   ||cube_pos_w - robot.root_pos_w|| > metrics.cube_out_of_range.
-      #   distance_threshold (= 0.40 m).
-      # The cube is sampled at env_origin + (r·cosθ, r·sinθ, z); the robot
-      # root is at env_origin + (0, 0, robot_root_z_offset_m), so the worst
-      # vertical separation is max(|z - offset|) = 0.04 - (-0.03) = 0.07 m.
-      # Worst distance = √(0.39² + 0.07²) = 0.3962 m, leaving ~3.8 mm of
-      # margin.  Enforced by
-      # So101EnvParams._validate_cross_field_invariants.
       radius_range: [0.35, 0.39]
       angle_range: [-15.0, 15.0]
       z_range: [0.03, 0.04]
-      # Must match SO101_CFG.init_state.pos[2] in
-      # so101_rl.configurations.so101.  Negative because the robot root is
-      # spawned 3 cm below the env origin.
       robot_root_z_offset_m: -0.03
   ground:
     enabled: false
   goal_zone:
     enabled: true
-    radius_range: [0.25, 0.35]  # m from robot base
-    angle_range: [-30.0, 30.0]  # degrees
-    z_range: [0.15, 0.20]       # m above table
+    radius_range: [0.25, 0.35]
+    angle_range: [-30.0, 30.0]
+    z_range: [0.15, 0.20]
 
 sensors:
   camera:
@@ -411,42 +369,17 @@ sensors:
     debug_vis: false
 
 observations:
-  # NOTE: As of skrl 1.4.3, the installed IsaacLabWrapper.step() reads only
-  # observations["policy"] and discards observations["critic"] (verified in
-  # ~/.conda/envs/env_isaaclab/lib/python3.11/site-packages/skrl/envs/wrappers/torch/isaaclab_envs.py).
-  # The PPO value network is therefore trained on the actor's obs vector
-  # regardless of `models.separate`. Until skrl is upgraded to a wrapper that
-  # routes the critic dict, the critic-specific entries below are commented
-  # out — populating them would just add dead compute. The empirical
-  # demonstration is in: configs/sweeps/ablation_shared_critic.yaml.
-  #
-  # critic_include_vision_features: true
-  # critic_obs_metrics:
-  #   - cube_pos_gz
-  #   - cube_rot6d_gz
-  #   - cube_height_w
-  #   - gripper_cube_contact_force_magnitude
-  #   - fixed_jaw_cube_contact_force_magnitude
-  #   - is_table_touched
-  #   - normalized_grip_zone_cube_distance
-  #   - cube_linear_velocity
-  #   - cube_angular_velocity
-  #   - gripper_open_width
   actor_obs_metrics: []
   telemetry_metrics:
     - gripper_cube_alignment
+    - cube_pos_gz
+    - cube_rot6d_gz
+    - cube_height_w
 
 vision_encoder:
-  # 'frozen_resnet18' — frozen pretrained ResNet18 + SpatialSoftmax (1024-D)
-  # 'frozen_cnn'      — frozen pretrained CNN + SpatialSoftmax (2×channels[-1]-D = 1024-D)
-  #                     Model weights loaded via --cnn_checkpoint.
   type: frozen_resnet18
-  # Image dimensions passed to the CNN. The env's ResizePipelineStep resizes to these.
-  # 16:9 aspect ratio matching the physical Arducam 1080P (1920x1080) camera.
-  # 108x192 is a 10x downscale; a no-op during sim training when the camera renders at this size.
   image_height: 108
   image_width: 192
-  # CNN backbone architecture — must match the pretraining config exactly.
   backbone:
     channels: [64, 128, 256, 512]
     kernel_sizes: [5, 4, 3, 3]

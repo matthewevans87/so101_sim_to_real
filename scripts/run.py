@@ -425,6 +425,11 @@ def cmd_train(args) -> None:
         cmd += ["--cnn_checkpoint", str(args.cnn_checkpoint)]
     if args.seed is not None:
         cmd += ["--seed", str(args.seed)]
+    if getattr(args, "agent_config", None):
+        agent_cfg_path = Path(args.agent_config)
+        if not agent_cfg_path.is_absolute():
+            agent_cfg_path = PROJECT_ROOT / agent_cfg_path
+        cmd += ["--agent_config", str(agent_cfg_path.resolve())]
 
     resolve_x11(getattr(args, "display", None))
     env = get_gui_env(Path(isaac_lab_path) / "workspace" / args.task, staged_cfg)
@@ -825,10 +830,85 @@ def cmd_deploy(args) -> None:
         cmd.append("--record")
     if getattr(args, "dry_run", False):
         cmd.append("--dry-run")
+    if getattr(args, "ros", False):
+        cmd.append("--ros")
 
     resolve_x11(getattr(args, "display", None))
     env = os.environ.copy()
     env.update({k: os.environ[k] for k in ("DISPLAY", "XAUTHORITY") if k in os.environ})
+    # Force unbuffered output so prints from so101_real appear in real time
+    # (subprocess stdout is a PIPE, which puts Python in fully-buffered mode).
+    env["PYTHONUNBUFFERED"] = "1"
+    # Inject ROS2 Jazzy environment when --ros is requested so rclpy can init.
+    # Use the deploy variant: only system PYTHONPATH, no Isaac Sim bundled libs.
+    if getattr(args, "ros", False):
+        _inject_ros2_env_deploy(env)
+    run_subprocess(cmd, env=env)
+
+
+def _inject_ros2_env(env: dict, distro: str = "jazzy") -> None:
+    """Inject ROS2 env vars for an **Isaac Sim** process (digital-twin).
+
+    Sets the bundled jazzy libs (inside isaacsim.ros2.bridge) on
+    LD_LIBRARY_PATH so that the OmniGraph C++ ROS2 nodes can link at
+    runtime, plus system site-packages for Python rclpy access.
+    """
+    env["ROS_DISTRO"] = distro
+    env["RMW_IMPLEMENTATION"] = "rmw_fastrtps_cpp"
+    # Bundled jazzy libs inside the isaacsim.ros2.bridge extension.
+    # These are what Isaac Sim's OmniGraph ROS2 nodes link against at runtime.
+    # Must be on LD_LIBRARY_PATH before the process starts.
+    _EXT_BASE = "/opt/isaac-sim/isaac-sim-5.1.0/exts/isaacsim.ros2.bridge"
+    bundled_lib = f"{_EXT_BASE}/{distro}/lib"
+    existing_ld = env.get("LD_LIBRARY_PATH", "")
+    env["LD_LIBRARY_PATH"] = f"{bundled_lib}:{existing_ld}" if existing_ld else bundled_lib
+    # Also expose system ROS2 site-packages so Python rclpy can init.
+    ros_python = f"/opt/ros/{distro}/lib/python3.12/site-packages"
+    existing_py = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = f"{ros_python}:{existing_py}" if existing_py else ros_python
+
+
+def _inject_ros2_env_deploy(env: dict, distro: str = "jazzy") -> None:
+    """Inject ROS2 env vars for the **lerobot** subprocess (deploy --ros).
+
+    Only sets ROS_DISTRO and the system site-packages path so that rclpy
+    and sensor_msgs are importable.  Does NOT touch LD_LIBRARY_PATH —
+    the Isaac Sim bundled libs must not be loaded into the lerobot process.
+    """
+    env["ROS_DISTRO"] = distro
+    ros_python = f"/opt/ros/{distro}/lib/python3.12/site-packages"
+    existing_py = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = f"{ros_python}:{existing_py}" if existing_py else ros_python
+
+
+def cmd_digital_twin(args) -> None:
+    """Launch the Isaac Sim digital twin viewer.
+
+    Subscribes to /so101/joint_states and mirrors positions to the SO-101
+    articulation in a live Isaac Sim viewport.  Run this alongside
+    ``run.py deploy --ros ...``.
+    """
+    isaac_lab_path = require_isaac_lab()
+    script = PROJECT_ROOT / "so101_rl" / "scripts" / "digital_twin.py"
+    if not script.is_file():
+        error(f"digital_twin.py not found: {script}")
+        sys.exit(1)
+
+    cmd = [
+        f"{isaac_lab_path}/isaaclab.sh",
+        "-p",
+        str(script),
+    ]
+    if getattr(args, "topic", None):
+        cmd += ["--topic", args.topic]
+    if getattr(args, "display", None) is not None:
+        cmd += ["--display", str(args.display)]
+
+    resolve_x11(getattr(args, "display", None))
+    env = get_gui_env(PROJECT_ROOT)
+    env.update({k: os.environ[k] for k in ("DISPLAY", "XAUTHORITY") if k in os.environ})
+    _inject_ros2_env(env)
+    _log_x11_status()
     run_subprocess(cmd, env=env)
 
 
@@ -1144,6 +1224,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--seed", type=int, metavar="N", help="RNG seed")
     p.add_argument("--display", type=int, metavar="N", help="X display socket number")
     p.add_argument(
+        "--agent-config",
+        metavar="PATH",
+        dest="agent_config",
+        help="Agent config YAML deep-merged over the task defaults (e.g. override trainer.timesteps)",
+    )
+    p.add_argument(
         "--output",
         metavar="PATH",
         help="Base output dir; artifacts saved to <output>/<timestamp>/ (default: artifacts/)",
@@ -1375,6 +1461,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Validate bundle and robot config without moving the robot",
     )
     p.add_argument(
+        "--ros",
+        action="store_true",
+        dest="ros",
+        help="Publish measured joint states to /so101/joint_states (ROS2) for the digital twin",
+    )
+    p.add_argument(
         "--display",
         type=int,
         metavar="N",
@@ -1382,6 +1474,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="X11 display number (e.g. 0 → DISPLAY=:0). Auto-discovered if omitted.",
     )
     p.set_defaults(func=cmd_deploy)
+
+    # ── digital-twin ───────────────────────────────────────────────────────────────────────────
+    p = sub.add_parser(
+        "digital-twin",
+        help="Launch Isaac Sim viewer mirroring real robot joints (ROS2)",
+    )
+    p.add_argument(
+        "--topic",
+        default="/so101/joint_states",
+        metavar="TOPIC",
+        help="ROS2 JointState topic to subscribe to (default: /so101/joint_states)",
+    )
+    p.add_argument(
+        "--display",
+        type=int,
+        metavar="N",
+        default=None,
+        help="X11 display number. Auto-discovered if omitted.",
+    )
+    p.set_defaults(func=cmd_digital_twin)
 
     # ── install ───────────────────────────────────────────────────────────────
     p = sub.add_parser("install", help="Install the task package into Isaac Lab")
@@ -1446,14 +1558,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--from",
         metavar="STEP",
         dest="from_step",
-        choices=["train", "collect", "curate", "train-cnn"],
+        choices=["train", "collect", "curate", "train-cnn", "export"],
         help="Start at this step (default: train)",
     )
     p.add_argument(
         "--to",
         metavar="STEP",
         dest="to_step",
-        choices=["train", "collect", "curate", "train-cnn"],
+        choices=["train", "collect", "curate", "train-cnn", "export"],
         help="Stop after this step, inclusive (default: train-cnn)",
     )
     p.add_argument(

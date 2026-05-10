@@ -17,6 +17,20 @@ import yaml
 
 
 @dataclass
+class ResetPoseCfg:
+    """Configuration for moving the arm to a fixed starting pose at episode start."""
+
+    enabled: bool
+    """When False the reset step is skipped entirely."""
+
+    joints_rad: list
+    """Target joint angles in radians, aligned with the bundle joint order."""
+
+    duration_s: float
+    """Seconds over which to linearly interpolate from current to target pose."""
+
+
+@dataclass
 class RobotConfig:
     """Explicit robot configuration — all fields required, no silent defaults.
 
@@ -35,6 +49,10 @@ class RobotConfig:
     Clips the difference between commanded and current joint positions.
     Prevents large sudden movements when the policy outputs an extreme action.
     """
+
+    reset_pose: Optional[ResetPoseCfg]
+    """Optional reset pose applied at the start of every episode.  ``None`` if the
+    ``reset_pose`` section is absent from the config file."""
 
     @classmethod
     def load(cls, path: str | Path) -> "RobotConfig":
@@ -55,10 +73,28 @@ class RobotConfig:
                 f"Robot config is missing required keys: {sorted(missing)}\n"
                 f"Config path: {path}"
             )
+
+        reset_pose: Optional[ResetPoseCfg] = None
+        rp_data = data.get("reset_pose")
+        if rp_data is not None:
+            required_rp = {"enabled", "joints_rad", "duration_s"}
+            missing_rp = required_rp - set(rp_data)
+            if missing_rp:
+                raise ValueError(
+                    f"reset_pose config is missing required keys: {sorted(missing_rp)}\n"
+                    f"Config path: {path}"
+                )
+            reset_pose = ResetPoseCfg(
+                enabled=bool(rp_data["enabled"]),
+                joints_rad=[float(v) for v in rp_data["joints_rad"]],
+                duration_s=float(rp_data["duration_s"]),
+            )
+
         return cls(
             port=str(robot["port"]),
             calibration_file=str(robot["calibration_file"]),
             max_delta_rad=float(robot["max_delta_rad"]),
+            reset_pose=reset_pose,
         )
 
 
