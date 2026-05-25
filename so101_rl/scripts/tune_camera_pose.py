@@ -234,14 +234,22 @@ import yaml
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, Articulation
 from isaaclab.scene import InteractiveScene, InteractiveSceneCfg
-from isaaclab.sensors import CameraCfg, Camera
+from isaaclab.sensors import TiledCameraCfg, TiledCamera
 from isaaclab.sim import SimulationContext
 from isaaclab.utils import configclass
 from pxr import Gf, UsdGeom
 
+# Ensure ISAAC_LAB_WORKSPACE_PATH points to the project root so that
+# camera.py can find camera_intrinsics.yaml.  When running via run.py the
+# staging step already sets this; when running this script directly the env
+# var may be unset (defaulting to /workspace inside camera.py, which is wrong).
+_project_root = Path(__file__).resolve().parents[2]
+if "ISAAC_LAB_WORKSPACE_PATH" not in os.environ:
+    os.environ["ISAAC_LAB_WORKSPACE_PATH"] = str(_project_root)
+
 # Project-local imports (available after AppLauncher because so101_rl is installed)
 from so101_rl.configurations.so101 import SO101_CFG
-from so101_rl.configurations.camera import CAMERA_CFG
+from so101_rl.configurations.camera import TILED_CAMERA_CFG
 
 # cv2 is available in this env but only for image I/O — imshow/waitKey do not work
 # because Isaac Sim ships headless OpenCV (no GTK).  Display is handled via ffplay.
@@ -270,9 +278,9 @@ class TuneCameraSceneCfg(InteractiveSceneCfg):
 
     robot: ArticulationCfg = SO101_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")  # type: ignore
 
-    camera: CameraCfg = CAMERA_CFG.replace(  # type: ignore
-        # Keep the {ENV_REGEX_NS} prefix from CAMERA_CFG so the cloner resolves
-        # to /World/envs/env_0/Robot/.../gripper_camera for num_envs=1.
+    camera: TiledCameraCfg = TILED_CAMERA_CFG.replace(  # type: ignore
+        # Keep the {ENV_REGEX_NS} prefix from TILED_CAMERA_CFG so the cloner
+        # resolves to /World/envs/env_0/Robot/.../gripper_camera for num_envs=1.
         height=args_cli.render_height,
         width=args_cli.render_width,
         data_types=["rgb"],
@@ -718,7 +726,7 @@ def main() -> None:
     print("[tune] Scene ready.")
 
     robot: Articulation = scene["robot"]
-    camera: Camera = scene["camera"]
+    camera: TiledCamera = scene["camera"]
 
     # Resolve joint indices in the articulation
     joint_indices, _ = robot.find_joints(_JOINT_NAMES)
@@ -828,8 +836,8 @@ def main() -> None:
                 if rgb_tensor is None or rgb_tensor.shape[0] == 0:
                     continue
 
-                # rgb_tensor: (1, H, W, 4) uint8 — drop alpha channel
-                sim_rgb = rgb_tensor[0, :, :, :3].cpu().numpy()  # (H, W, 3) RGB uint8
+                # rgb_tensor: (num_envs, H, W, 3) uint8 — TiledCamera pre-allocates correct shape
+                sim_rgb = rgb_tensor[0].cpu().numpy()  # (H, W, 3) RGB uint8
                 sim_bgr = cv2.cvtColor(sim_rgb, cv2.COLOR_RGB2BGR)
 
                 # -- Resize real image to sim render resolution for overlay
