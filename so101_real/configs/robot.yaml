@@ -35,9 +35,107 @@ camera:
   # Extra grab() calls before each retrieve() to flush the capture buffer
   buffer_flush_count: 5
 
+# ── Sim joint limits (from bundle joint_config.yaml) ─────────────────────────
+# These are the PhysX physics limits read from the robot USD at training time.
+# Source: pipeline_20260509_135944/05_export/joint_config.yaml
+# Used by joint_calibrate.py --mode sweep to derive scale and offset.
+# Update by copying joint_lower_rad / joint_upper_rad from your latest bundle's
+# joint_config.yaml in the order: shoulder_pan, shoulder_lift, elbow_flex,
+# wrist_flex, wrist_roll, gripper.
+sim_joint_limits:
+  shoulder_pan:  {lower_rad: -1.919860, upper_rad:  1.919860}
+  shoulder_lift: {lower_rad: -1.745330, upper_rad:  1.745330}
+  elbow_flex:    {lower_rad: -1.690000, upper_rad:  1.690000}
+  wrist_flex:    {lower_rad: -1.658060, upper_rad:  1.658060}
+  wrist_roll:    {lower_rad: -2.743850, upper_rad:  2.841210}
+  gripper:       {lower_rad: -0.174533, upper_rad:  1.745330}
+
+# ── Joint calibration ─────────────────────────────────────────────────────────
+# Per-joint linear corrections between LeRobot degrees (physical robot) and
+# sim radians (PhysX/USD convention used during training).
+#
+# Formula applied in read_joints():  q_sim = scale * q_lerobot + offset_rad
+# Inverse applied in send_joints():  q_lerobot = (q_sim - offset_rad) / scale
+#
+# For a multi-turn joint whose raw LeRobot reading wraps (e.g. wrist_roll),
+# additionally set:
+#   wrap_period_rad:        period of the encoder wrap in LeRobot radians
+#                           (typically 2*pi = 6.283185 for one full turn).
+#   lero_branch_center_rad: anchor used by read_joints() on the very first call
+#                           to pick the correct branch; subsequent reads are
+#                           anchored to the previous reading.  send_joints()
+#                           always projects onto the branch nearest the most
+#                           recent raw reading.
+# Both must be set together or both omitted.  Run --mode discontinuity to
+# measure the period empirically and --mode wrap-sweep to derive scale/offset.
+#
+# Analysis (2026-05-10):
+#   Joint ranges were compared between the LeRobot calibration file
+#   (so101.json) and the bundle joint_config.yaml (from sim PhysX limits).
+#   LeRobot formula: degrees = (Present_Position - mid) * 360 / 4095
+#                    where mid = (range_min + range_max) / 2
+#
+#   shoulder_pan:  LeRobot ±111.1° vs sim ±110.0°  → scale≈1.01, offset=0° → identity
+#   shoulder_lift: LeRobot ±102.4° vs sim ±100.0°  → scale≈1.02, offset=0° → identity
+#   elbow_flex:    LeRobot  ±97.2° vs sim  ±96.8°  → scale≈1.00, offset=0° → identity
+#   wrist_flex:    LeRobot ±103.1° vs sim  ±95.0°  → scale≈1.09, offset=0° → ⚠ 8.5%
+#   wrist_roll:    LeRobot ±180.0° vs sim ±160°    → scale≈1.13, offset≈-3° → ⚠ 12.5%
+#   gripper:       LeRobot ±64.8° vs sim [-10°,+100°] → CRITICAL mismatch
+#
+# GRIPPER: LeRobot defines 0° as the physical midpoint (half-open). The sim
+# defines 0 rad as the URDF reference (nearly closed, just 10° above minimum).
+# Without correction the gripper barely closes when the policy commands closure.
+#
+# Derived mapping (assuming physical limits match):
+#   sim_deg  = 0.8488 * lero_deg + 45.0
+#   sim_rad  = 0.8488 * lero_rad + 0.7854
+#
+# ARM JOINTS: small scale differences (~1–12%) with aligned zeros are within
+# typical sim-to-real tolerance. Leave at identity until empirical tuning.
+# Run `python -m so101_real.calibrate` with the arm in the sim start pose to
+# derive empirical corrections for wrist_flex and wrist_roll.
+joint_calibration:
+  # Full sweep calibration (2026-05-11) using physical joint stops.
+  # All joints except wrist_roll updated from two-stop sweep.
+  # wrist_roll kept from two-point manual fit: sweep measurement was invalid
+  # (direction reversal means sim-lower stop is at *positive* lerobot angle;
+  # the user moved the wrong way and measured ~24° span instead of ~320°).
+  shoulder_pan:
+    # Sweep (2026-05-11): lower lero=-118.198° → sim=-110.000°, upper lero=+117.846° → sim=+110.000°
+    lero_to_sim_scale: 0.932029
+    lero_to_sim_offset_rad: 0.00286
+  shoulder_lift:
+    # Sweep (2026-05-11): lower lero=-103.692° → sim=-100.000°, upper lero=+104.747° → sim=+100.000°
+    lero_to_sim_scale: 0.959511
+    lero_to_sim_offset_rad: -0.008833
+  elbow_flex:
+    # Sweep (2026-05-11): lower lero=-96.484° → sim=-96.830°, upper lero=+97.187° → sim=+96.830°
+    lero_to_sim_scale: 0.999945
+    lero_to_sim_offset_rad: -0.006137
+  wrist_flex:
+    # Sweep (2026-05-11): lower lero=-102.681° → sim=-95.000°, upper lero=+103.033° → sim=+95.000°
+    lero_to_sim_scale: 0.92361
+    lero_to_sim_offset_rad: -0.002834
+  wrist_roll:
+    # Wrap-aware sweep calibration (2026-05-25):
+    #   stop A raw lero=-76.8791° → sim=-157.2110°
+    #   stop B unwrapped lero=+254.9899° → sim=+162.7893°
+    #   lero span 331.869°, sim span 320.000°, residuals 0.000°
+    # Wrap period measured via --mode discontinuity (median jump 359.385° ≈ 2π,
+    # ratio 0.998); using exact 2π = 6.2832 rad.
+    lero_to_sim_scale: 0.964237
+    lero_to_sim_offset_rad: -1.450043
+    wrap_period_rad: 6.2832
+    lero_branch_center_rad: 1.554309
+  gripper:
+    # Sweep (2026-05-11): lower stop lero=+1.199° → sim=-10.000°, upper stop lero=+96.269° → sim=+100.000°
+    lero_to_sim_scale: 1.157043
+    lero_to_sim_offset_rad: -0.19875
+
+
 # ── Episode reset pose ────────────────────────────────────────────────────────
 # Joint positions (radians) the arm moves to at the start of every episode,
-# matching the sim default starting position (so101_env_params / so101.py).
+# in SIM convention (identical to training's starting_position).
 # Order must match bundle joint_config.yaml: [shoulder_pan, shoulder_lift,
 #   elbow_flex, wrist_flex, wrist_roll, gripper].
 #
@@ -48,11 +146,11 @@ camera:
 #   elbow_flex:   -25.0 deg → -0.436 rad
 #   wrist_flex:    65.0 deg →  1.134 rad
 #   wrist_roll:   -90.0 deg → -1.571 rad
-#   gripper:       0.0  deg →  0.000 rad
+#   gripper:       0.0  deg →  0.000 rad  (sim nearly-closed; → -53° in LeRobot via joint_calibration)
 reset_pose:
   enabled: true
-  # Target joint angles in radians (order: shoulder_pan, shoulder_lift,
-  # elbow_flex, wrist_flex, wrist_roll, gripper).
+  # Target joint angles in radians (SIM convention; joint_calibration is applied
+  # automatically in send_joints() before commanding the hardware).
   joints_rad: [0.0, 0.0, -0.436, 1.134, -1.571, 0.0]
   # Duration (seconds) over which to linearly interpolate to the reset pose.
   # Gives the arm time to move safely rather than jumping discontinuously.
