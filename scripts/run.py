@@ -341,6 +341,9 @@ def require_isaac_lab() -> str:
 
 
 def install_task(isaac_lab_path: str) -> None:
+    # --no-build-isolation avoids the slow per-invocation step where pip spins
+    # up a temporary build environment to install setuptools. Isaac Lab's Python
+    # already has setuptools available, so isolation is unnecessary here.
     run_subprocess(
         [
             f"{isaac_lab_path}/isaaclab.sh",
@@ -348,6 +351,7 @@ def install_task(isaac_lab_path: str) -> None:
             "-m",
             "pip",
             "install",
+            "--no-build-isolation",
             "-e",
             str(TASK_ROOT / "source" / "so101_rl"),
         ]
@@ -360,6 +364,7 @@ def install_task(isaac_lab_path: str) -> None:
             "-m",
             "pip",
             "install",
+            "--no-build-isolation",
             "-e",
             str(PROJECT_ROOT),
         ]
@@ -881,6 +886,41 @@ def _inject_ros2_env_deploy(env: dict, distro: str = "jazzy") -> None:
     ros_python = f"/opt/ros/{distro}/lib/python3.12/site-packages"
     existing_py = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = f"{ros_python}:{existing_py}" if existing_py else ros_python
+
+
+def cmd_stream(args) -> None:
+    """Read real robot joints and publish to ROS2 /so101/joint_states.
+
+    Use alongside ``run.py digital-twin`` to mirror the real arm in Isaac Sim
+    without running a policy.  Runs in the lerobot conda env so no Isaac Lab
+    is required.
+    """
+    if not args.robot_config:
+        error("--robot-config is required.")
+        sys.exit(1)
+
+    robot_config = Path(args.robot_config).resolve()
+    if not robot_config.is_file():
+        error(f"Robot config not found: {robot_config}")
+        sys.exit(1)
+
+    cmd = [
+        "python",
+        "-m",
+        "so101_real",
+        "stream",
+        "--robot-config",
+        str(robot_config),
+        "--hz",
+        str(args.hz),
+    ]
+    if args.no_torque:
+        cmd.append("--no-torque")
+
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
+    _inject_ros2_env_deploy(env)
+    run_subprocess(cmd, env=env)
 
 
 def cmd_digital_twin(args) -> None:
@@ -1496,6 +1536,32 @@ def build_parser() -> argparse.ArgumentParser:
         help="X11 display number. Auto-discovered if omitted.",
     )
     p.set_defaults(func=cmd_digital_twin)
+
+    # ── stream ────────────────────────────────────────────────────────────────
+    p = sub.add_parser(
+        "stream",
+        help="Read real robot joints and publish to ROS2 (for digital twin, no policy)",
+    )
+    p.add_argument(
+        "--robot-config",
+        required=True,
+        dest="robot_config",
+        metavar="PATH",
+        help="Path to robot.yaml",
+    )
+    p.add_argument(
+        "--hz",
+        type=float,
+        default=30.0,
+        help="Publishing rate in Hz (default: 30)",
+    )
+    p.add_argument(
+        "--no-torque",
+        action="store_true",
+        dest="no_torque",
+        help="Disable motor torque so you can move the arm freely while streaming",
+    )
+    p.set_defaults(func=cmd_stream)
 
     # ── install ───────────────────────────────────────────────────────────────
     p = sub.add_parser("install", help="Install the task package into Isaac Lab")
