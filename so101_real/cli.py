@@ -353,6 +353,10 @@ def cmd_robot_test(args) -> None:
     robot = So101Robot(config=config, joint_names=joint_names)
     robot.connect()
 
+    if args.no_torque:
+        robot._follower.bus.disable_torque()
+        print("[robot-test] Torque DISABLED \u2014 move the arm freely.")
+
     try:
         print("[robot-test] Press Ctrl-C to stop.")
         while True:
@@ -647,6 +651,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--bundle",
         metavar="PATH",
         help="Optional: read joint names from bundle manifest",
+    )
+    p.add_argument(
+        "--no-torque",
+        action="store_true",
+        dest="no_torque",
+        help="Disable servo torque so you can hand-move the arm during the readout.",
     )
     p.set_defaults(func=cmd_robot_test)
 
