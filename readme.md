@@ -1,5 +1,7 @@
 # Vision-Based Sim-to-Real Manipulation Pipeline
 
+> The full report for this project is available [here](./report/report.md).
+
 ## Overview
 
 Inspired by the likes of [skild.ai](https://www.youtube.com/watch?v=JQAfxp-FB0I), [NVIDIA](https://www.youtube.com/watch?v=S4tvirlG8sQ), and [Tesla](https://www.youtube.com/watch?v=g6bOwQdCJrc), this project is an investigation into what can be achieved by learning vision-conditioned RL policies on consumer hardware, with the eventual goal of zero-shot transfer to a physical [SO-101](https://github.com/TheRobotStudio/SO-ARM100) robotic arm.
@@ -302,6 +304,37 @@ python -m vision_backbone_demo \
 - `camera.capture_width` / `capture_height` — physical resolution the camera supports
 
 `deploy` has **no Isaac Lab dependency** and runs directly under the system or conda Python that has `so101_real` installed (`pip install -e ".[deploy]"`). Isaac Sim is not required.
+
+```bash
+# ── Digital twin (mirror real arm in Isaac Sim, no policy) ───────────────────
+# Two processes, one per terminal. The `stream` side reads joint positions
+# from the physical SO-101 and publishes them on a ROS2 JointState topic
+# (default `/so101/joint_states`); `digital-twin` launches an Isaac Sim
+# viewer that subscribes to the topic and mirrors the articulation live.
+# Useful for visually verifying calibration, joint sign conventions, and
+# camera mount alignment without running a policy.
+
+# Terminal 1 — Isaac Sim viewer (needs ISAAC_LAB_PATH; uses ROS2 jazzy bridge)
+./scripts/run.py digital-twin --display 2
+
+# Terminal 2 — publish real joint states (lerobot env, torque off so you can
+# pose the arm by hand)
+conda activate lerobot
+./scripts/run.py stream \
+    --robot-config so101_real/configs/robot.yaml \
+    --no-torque
+
+# ── Camera extrinsics tuning (interactive overlay) ───────────────────────────
+# Spawns Isaac Lab with the SO-101, mirrors live joint positions from the
+# physical robot, and renders an ffplay overlay of the sim wrist camera
+# against a previously captured real frame. Drag the CameraXframe prim in
+# the viewport until the overlay converges, then press `s` to print the
+# calibrated translation/quaternion. See the "Camera calibration" section
+# above for the full workflow.
+
+$ISAAC_LAB_PATH/isaaclab.sh -p so101_rl/scripts/tune_camera_pose.py \
+    --robot-config so101_real/configs/robot.yaml
+```
 
 All commands that write output accept `--output PATH` as a base directory. Outputs are always written to `<output>/<timestamp>/` (or `<output>/pipeline_<timestamp>/`, `<output>/sweep_<name>_<timestamp>/`), defaulting to `artifacts/`.
 

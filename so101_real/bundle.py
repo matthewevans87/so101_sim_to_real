@@ -73,20 +73,30 @@ class DeployBundle:
     def hidden_dims(self) -> list[int]:
         return list(self.manifest["policy"]["hidden_dims"])
 
+    # ── Provenance-only snapshots of robot facts at training time ────────
+    # These fields are *robot-intrinsic*, not policy-intrinsic.  They are
+    # carried by the bundle for provenance (what the policy was trained
+    # against) and for startup consistency checks against robot.yaml.  Live
+    # control code reads the runtime values from robot.yaml::joint_limits and
+    # robot.yaml::controller, NOT from these snapshots.
+
     @property
     def active_joints(self) -> list[str]:
         return list(self.manifest["active_joints"])
 
     @property
     def joint_lower_rad(self) -> list[float]:
+        """Provenance snapshot — robot.yaml::joint_limits is the runtime source."""
         return list(self.manifest["joint_lower_rad"])
 
     @property
     def joint_upper_rad(self) -> list[float]:
+        """Provenance snapshot — robot.yaml::joint_limits is the runtime source."""
         return list(self.manifest["joint_upper_rad"])
 
     @property
     def control_hz(self) -> float:
+        """Provenance snapshot — robot.yaml::controller.control_hz is the runtime source."""
         return float(self.manifest["control_hz"])
 
     @property

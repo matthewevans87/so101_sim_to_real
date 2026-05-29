@@ -33,53 +33,6 @@
             ]
         },
         {
-            "name": "Python: Run Vision Policy (FC)",
-            "type": "python",
-            "request": "launch",
-            "program": "${workspaceFolder}/so101_controller/run_vision_policy_controller.py",
-            "console": "integratedTerminal",
-            "args": [
-                "--camera",
-                "0",
-                "--checkpoint",
-                "logs/export/so101_rl/2025-12-04_15-13-53_export/so101_camerafindcube_v0_policy.pt",
-                "--policy-type",
-                "fc",
-                "--urdf-path",
-                "so101_controller/assets/SO101/so101_new_calib.urdf"
-            ]
-        },
-        {
-            "name": "Python: Run Vision Policy (Conv)",
-            "type": "python",
-            "request": "launch",
-            "program": "${workspaceFolder}/so101_controller/run_vision_policy_controller.py",
-            "console": "integratedTerminal",
-            "args": [
-                "--camera",
-                "0",
-                "--checkpoint",
-                "trained_policies/so101_lift_cube.pt",
-                "--policy-type",
-                "conv",
-                "--urdf-path",
-                "so101_controller/assets/SO101/so101_new_calib.urdf"
-            ]
-        },
-        {
-            "name": "Python: Run Joint Policy",
-            "type": "python",
-            "request": "launch",
-            "program": "${workspaceFolder}/so101_controller/run_joint_policy_controller.py",
-            "console": "integratedTerminal",
-            "args": [
-                "--checkpoint",
-                "logs/export/so101_rl/2025-11-27_17-17-00_export/so101_joint_pos_go_up_minimal_policy.pt",
-                "--urdf-path",
-                "so101_controller/assets/SO101/so101_new_calib.urdf"
-            ]
-        },
-        {
             "name": "Python: Attach (windows-x86_64/linux-x86_64)",
             "type": "python",
             "request": "attach",
@@ -131,6 +84,45 @@
             ],
             "console": "integratedTerminal",
             "justMyCode": false
+        },
+        {
+            "name": "Python: Probe so101_real (module)",
+            "type": "python",
+            "request": "launch",
+            "module": "so101_real",
+            "args": [
+                "probe",
+                "--robot-config",
+                "so101_real/configs/robot.yaml",
+                "--joint",
+                "wrist_roll",
+                "--value",
+                "20",
+                "--unit",
+                "sdeg",
+                "--ramp-s",
+                "0.5"
+            ],
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "Python: run-static (module)",
+            "type": "python",
+            "request": "launch",
+            "module": "so101_real",
+            "args": [
+                "run-static",
+                "--robot-config",
+                "so101_real/configs/robot.yaml",
+                "--unit",
+                "norm",
+                "--joints=0,0,0,0,0,0",
+                "--episodes",
+                "1",
+                "--duration-s",
+                "1"
+            ],
+            "console": "integratedTerminal"
         }
     ]
 }

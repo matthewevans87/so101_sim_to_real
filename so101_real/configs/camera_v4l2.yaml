@@ -1,0 +1,36 @@
+# V4L2 camera control settings for so101_real.
+#
+# Apply with:
+#   python -m so101_real configure-camera --camera-config so101_real/configs/camera_v4l2.yaml
+#
+# Controls reset when the camera is unplugged or the system reboots.
+# See so101_real/README.md → "Making the settings persistent" for a udev rule
+# that re-applies these values automatically on reconnect.
+
+# V4L2 device node (e.g. /dev/video0)
+device: /dev/video0
+
+# V4L2 controls written via `v4l2-ctl --set-ctrl=<name>=<value>`.
+# Each key must be a valid v4l2 control name for the camera.
+controls:
+  # Disable automatic framerate adjustment — prevents the driver from
+  # extending the frame period to compensate for long exposures.
+  exposure_dynamic_framerate: 0
+
+  # Exposure mode: 1 = Manual (required to lock exposure_time_absolute).
+  auto_exposure: 1
+
+  # Power line frequency for flicker reduction.
+  # 1 = 50 Hz (UK/EU mains); 2 = 60 Hz (US mains)
+  power_line_frequency: 2
+
+  # Exposure time in units of 100 µs.
+  # Must be a multiple of the flicker half-period to avoid beat artifacts.
+  # 60 Hz mains → flicker at 120 Hz → half-period ≈ 8.33 ms → safe values:
+  #   83 (≈ 8.3 ms), 167 (≈ 16.7 ms), 250 (≈ 25 ms)
+  # 50 Hz mains → flicker at 100 Hz → half-period = 10 ms → safe values:
+  #   100 (10 ms), 200 (20 ms), 300 (30 ms)
+  exposure_time_absolute: 83
+
+  # Sensor brightness offset.  Range: -64..64
+  brightness: -50

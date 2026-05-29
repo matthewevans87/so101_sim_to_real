@@ -1,37 +1,22 @@
 """robot.py — SO-101 robot interface for real-robot inference.
 
-Wraps the LeRobot SO101Follower API.  All external communication uses
-degrees (LeRobot convention).  Internally we work in radians to match
-the training obs/action contract.
+Wraps the LeRobot SO101Follower API.  External communication uses degrees
+(LeRobot convention); internally this codebase works in **canonical radians**
+(zero-at-home, matching the URDF the policy was trained against).  There is
+only one internal frame; no simulator is involved at runtime.
 
 Joint calibration
 -----------------
-LeRobot and the Isaac Sim USD may use different zero-points or scales for
-some joints.  The ``joint_calibration`` section of ``robot.yaml`` corrects
-for these differences via a per-joint linear transform applied after reading
-and before writing joint positions::
+LeRobot's per-motor calibration uses its own zero-points and scales that do
+not match the canonical (URDF) frame.  The ``joint_calibration`` section of
+``robot.yaml`` corrects this via a per-joint linear transform applied after
+reading and before writing joint positions::
 
-    q_sim  = lero_to_sim_scale * q_lerobot + lero_to_sim_offset_rad   # read
-    q_lerobot = (q_sim - lero_to_sim_offset_rad) / lero_to_sim_scale  # send
+    q_rad     = scale * q_lerobot_rad + offset_rad          # read
+    q_lerobot = (q_rad - offset_rad) / scale                 # send
 
 Only joints listed in ``joint_calibration`` are corrected; unlisted joints
 use the identity transform (scale=1.0, offset=0.0).
-
-Wrap handling (multi-turn joints, e.g. wrist_roll)
---------------------------------------------------
-A joint may additionally specify ``wrap_period_rad`` (and optionally
-``lero_branch_center_rad``) to declare that its raw LeRobot reading lives
-on a circle of period :math:`P` (typically :math:`2\\pi` for one full encoder
-turn).  When set:
-
-* ``read_joints()`` shifts the raw reading by an integer multiple of :math:`P`
-  to land closest to ``lero_branch_center_rad`` (or, if no prior reading,
-  the configured center).  This produces a continuous sim-space coordinate
-  even as the encoder crosses its wrap boundary.
-* ``send_joints()`` shifts the commanded LeRobot value by an integer multiple
-  of :math:`P` to land closest to the **most recent raw reading**, so the
-  servo never takes the long way around.  ``send_joints()`` therefore
-  requires that ``read_joints()`` was called at least once.
 """
 
 from __future__ import annotations
@@ -44,46 +29,34 @@ from typing import Optional
 import torch
 import yaml
 
+from .units import JointUnitConverter, from_robot_config
+
+
+@dataclass
+class JointLimitEntry:
+    """Physical range of a single joint in canonical radians."""
+
+    lower_rad: float
+    """Lower joint limit in canonical radians."""
+
+    upper_rad: float
+    """Upper joint limit in canonical radians."""
+
 
 @dataclass
 class JointCalibrationEntry:
-    """Per-joint linear calibration between LeRobot and sim (PhysX) conventions."""
+    """Per-joint linear map from LeRobot's native frame to canonical radians.
 
-    lero_to_sim_scale: float
+    Applied on read as ``q_rad = scale * q_lerobot_rad + offset_rad`` and
+    inverted on send.  A negative ``scale`` indicates the LeRobot motor
+    rotates in the opposite direction to the canonical (URDF) convention.
+    """
+
+    scale: float
     """Multiplier applied to the LeRobot radian value when reading."""
 
-    lero_to_sim_offset_rad: float
+    offset_rad: float
     """Additive offset (radians) applied after scaling when reading."""
-
-    wrap_period_rad: Optional[float] = None
-    """If not None, treat the raw LeRobot reading as a value on a circle of this
-    period (radians).  Typically ``2*pi`` for a single-turn encoder.  ``None``
-    disables wrap handling for this joint."""
-
-    lero_branch_center_rad: Optional[float] = None
-    """Anchor for the read-side unwrap when no prior reading is available.
-    Required when ``wrap_period_rad`` is set; ignored otherwise."""
-
-    @property
-    def sim_to_lero_scale(self) -> float:
-        return 1.0 / self.lero_to_sim_scale
-
-    @property
-    def sim_to_lero_offset_rad(self) -> float:
-        return -self.lero_to_sim_offset_rad / self.lero_to_sim_scale
-
-
-def unwrap_to_branch(q: float, period: float, center: float) -> float:
-    """Shift ``q`` by the integer multiple of ``period`` that minimises
-    ``|q + k*period - center|``.
-
-    Vectorised callers should use the inline expression directly; this helper
-    is provided for clarity and for use in calibration scripts.
-    """
-    if period <= 0.0:
-        raise ValueError(f"period must be positive, got {period}")
-    k = round((center - q) / period)
-    return q + k * period
 
 
 @dataclass
@@ -125,8 +98,23 @@ class RobotConfig:
     ``reset_pose`` section is absent from the config file."""
 
     joint_calibration: dict[str, JointCalibrationEntry]
-    """Per-joint linear transforms correcting for convention differences between
-    LeRobot and the sim.  Keyed by joint name; missing joints use identity."""
+    """Per-joint linear transforms correcting LeRobot's native frame into
+    canonical radians.  Keyed by joint name; missing joints use identity."""
+
+    joint_limits: dict[str, JointLimitEntry]
+    """Physical range of each joint in canonical radians.  Required in
+    robot.yaml; used for normalised-action mapping and safety checks."""
+
+    def joint_bounds(self) -> tuple[list[str], list[float], list[float]]:
+        """Return ``(joint_names, lower_rad, upper_rad)`` in YAML iteration order."""
+        names: list[str] = []
+        lowers: list[float] = []
+        uppers: list[float] = []
+        for name, entry in self.joint_limits.items():
+            names.append(name)
+            lowers.append(entry.lower_rad)
+            uppers.append(entry.upper_rad)
+        return names, lowers, uppers
 
     @classmethod
     def load(cls, path: str | Path) -> "RobotConfig":
@@ -135,6 +123,14 @@ class RobotConfig:
             raise FileNotFoundError(f"Robot config not found: {path}")
         with open(path, "r") as f:
             data = yaml.safe_load(f) or {}
+
+        # Reject legacy YAML keys explicitly so stale configs fail loudly.
+        if "sim_joint_limits" in data:
+            raise ValueError(
+                f"Robot config uses the legacy key 'sim_joint_limits'.  Rename it"
+                f" to 'joint_limits' (same schema). Config path: {path}"
+            )
+
         robot = data.get("robot")
         if robot is None:
             raise ValueError(
@@ -168,40 +164,44 @@ class RobotConfig:
         joint_calibration: dict[str, JointCalibrationEntry] = {}
         cal_data = data.get("joint_calibration") or {}
         for joint_name, entry in cal_data.items():
-            required_cal = {"lero_to_sim_scale", "lero_to_sim_offset_rad"}
+            # Reject legacy per-entry keys.
+            legacy = {"lero_to_sim_scale", "lero_to_sim_offset_rad"} & set(entry)
+            if legacy:
+                raise ValueError(
+                    f"joint_calibration[{joint_name!r}] uses legacy key(s) "
+                    f"{sorted(legacy)}. Rename 'lero_to_sim_scale' -> 'scale' and "
+                    f"'lero_to_sim_offset_rad' -> 'offset_rad'. Config path: {path}"
+                )
+            required_cal = {"scale", "offset_rad"}
             missing_cal = required_cal - set(entry)
             if missing_cal:
                 raise ValueError(
                     f"joint_calibration[{joint_name!r}] is missing required keys: "
                     f"{sorted(missing_cal)}\nConfig path: {path}"
                 )
-            wrap_period = entry.get("wrap_period_rad", None)
-            branch_center = entry.get("lero_branch_center_rad", None)
-            if wrap_period is not None:
-                wrap_period = float(wrap_period)
-                if wrap_period <= 0.0:
-                    raise ValueError(
-                        f"joint_calibration[{joint_name!r}].wrap_period_rad must be positive, "
-                        f"got {wrap_period}.\nConfig path: {path}"
-                    )
-                if branch_center is None:
-                    raise ValueError(
-                        f"joint_calibration[{joint_name!r}] sets wrap_period_rad but is "
-                        f"missing lero_branch_center_rad (required when wrap is enabled).\n"
-                        f"Config path: {path}"
-                    )
-                branch_center = float(branch_center)
-            elif branch_center is not None:
-                raise ValueError(
-                    f"joint_calibration[{joint_name!r}] sets lero_branch_center_rad but "
-                    f"wrap_period_rad is not set; both must be provided together or omitted.\n"
-                    f"Config path: {path}"
-                )
             joint_calibration[str(joint_name)] = JointCalibrationEntry(
-                lero_to_sim_scale=float(entry["lero_to_sim_scale"]),
-                lero_to_sim_offset_rad=float(entry["lero_to_sim_offset_rad"]),
-                wrap_period_rad=wrap_period,
-                lero_branch_center_rad=branch_center,
+                scale=float(entry["scale"]),
+                offset_rad=float(entry["offset_rad"]),
+            )
+
+        # Parse joint_limits (required)
+        jl_raw = data.get("joint_limits")
+        if not jl_raw:
+            raise ValueError(
+                f"robot.yaml is missing a required 'joint_limits' section.\n"
+                f"Config path: {path}"
+            )
+        joint_limits: dict[str, JointLimitEntry] = {}
+        for jname, jentry in jl_raw.items():
+            missing_jl = {"lower_rad", "upper_rad"} - set(jentry)
+            if missing_jl:
+                raise ValueError(
+                    f"joint_limits[{jname!r}] is missing required keys: "
+                    f"{sorted(missing_jl)}\nConfig path: {path}"
+                )
+            joint_limits[str(jname)] = JointLimitEntry(
+                lower_rad=float(jentry["lower_rad"]),
+                upper_rad=float(jentry["upper_rad"]),
             )
 
         return cls(
@@ -210,6 +210,7 @@ class RobotConfig:
             max_delta_rad=float(robot["max_delta_rad"]),
             reset_pose=reset_pose,
             joint_calibration=joint_calibration,
+            joint_limits=joint_limits,
         )
 
 
@@ -232,63 +233,34 @@ class So101Robot:
         self._cfg = config
         self._joint_names = joint_names
         self._follower: Optional[object] = None
-        # Pre-build per-joint correction tensors (identity where unconfigured)
-        n = len(joint_names)
-        scales = [
-            config.joint_calibration.get(
-                name, JointCalibrationEntry(1.0, 0.0)
-            ).lero_to_sim_scale
-            for name in joint_names
-        ]
-        offsets = [
-            config.joint_calibration.get(
-                name, JointCalibrationEntry(1.0, 0.0)
-            ).lero_to_sim_offset_rad
-            for name in joint_names
-        ]
-        self._cal_scale = torch.tensor(scales, dtype=torch.float32)  # lero → sim
-        self._cal_offset = torch.tensor(offsets, dtype=torch.float32)  # lero → sim
-
-        # Per-joint wrap configuration.  NaN sentinel = wrap disabled for that joint.
-        # Keeping NaN avoids a parallel mask tensor while letting torch.isfinite() check it.
-        wrap_periods = [
-            (
-                config.joint_calibration[name].wrap_period_rad
-                if name in config.joint_calibration
-                and config.joint_calibration[name].wrap_period_rad is not None
-                else float("nan")
-            )
-            for name in joint_names
-        ]
-        wrap_centers = [
-            (
-                config.joint_calibration[name].lero_branch_center_rad
-                if name in config.joint_calibration
-                and config.joint_calibration[name].lero_branch_center_rad is not None
-                else float("nan")
-            )
-            for name in joint_names
-        ]
-        self._wrap_period = torch.tensor(wrap_periods, dtype=torch.float32)
-        self._wrap_center = torch.tensor(wrap_centers, dtype=torch.float32)
-        self._has_wrap = bool(torch.isfinite(self._wrap_period).any().item())
-
-        # Cache of the most recent **unwrapped raw LeRobot** reading (radians).
-        # Populated by read_joints(); required by send_joints() for any wrapped joint.
-        self._last_raw_lero: Optional[torch.Tensor] = None
+        # Single source of truth for canonical ↔ LeRobot conversions.
+        # All rad/deg/lrad/ldeg arithmetic lives in JointUnitConverter; this
+        # class only knows about reading degrees off the bus and writing
+        # degrees back to it.
+        self._units = from_robot_config(
+            joint_names=joint_names,
+            joint_calibration=config.joint_calibration,
+        )
 
         if config.joint_calibration:
-            wrapped = [
-                name
-                for name in joint_names
-                if name in config.joint_calibration
-                and config.joint_calibration[name].wrap_period_rad is not None
-            ]
             print(
                 f"[So101Robot] Joint calibrations active: {list(config.joint_calibration)}"
             )
-            if wrapped:
-                print(f"[So101Robot] Wrap-aware joints: {wrapped}")
+
+    @property
+    def units(self) -> "JointUnitConverter":
+        """Per-joint unit converter (canonical ↔ LeRobot)."""
+        return self._units
+
+    @property
+    def _cal_scale(self) -> torch.Tensor:
+        """Backwards-compatible accessor: ``q_rad = scale * q_lrad + offset``."""
+        return self._units.lero_scale
+
+    @property
+    def _cal_offset(self) -> torch.Tensor:
+        """Backwards-compatible accessor: ``q_rad = scale * q_lrad + offset``."""
+        return self._units.lero_offset_rad
 
     def connect(self, dry_run: bool = False) -> None:
         """Open the serial connection to the robot.
@@ -305,20 +277,31 @@ class So101Robot:
             return
 
         try:
-            from lerobot.robots.so101_follower import SO101Follower, SO101FollowerConfig
+            # lerobot >= 0.5: SO100/SO101 are unified under `so_follower`.
+            # `SO101Follower` / `SO101FollowerConfig` are kept as aliases of
+            # `SOFollower` / `SOFollowerRobotConfig` for backwards compatibility.
+            from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
         except ImportError as exc:
             raise ImportError(
-                "lerobot is required for real-robot deployment.\n"
-                "Install with: pip install lerobot\n"
+                "lerobot >= 0.5 is required for real-robot deployment.\n"
+                "Install with: pip install 'lerobot[feetech]'\n"
                 f"Original error: {exc}"
             ) from exc
 
         calibration_path = Path(self._cfg.calibration_file).expanduser().resolve()
+        # NOTE: We intentionally pass max_relative_target=None to LeRobot.
+        # LeRobot's per-tick clamp uses (goal - present) and, when the joint
+        # is far from goal (e.g. shoulder_lift sagged past its lower limit
+        # under gravity), forces the Feetech PID into a low-error/low-torque
+        # regime that cannot overcome the gravity load -- the arm gets stuck.
+        # Per-tick motion limiting is handled upstream by our SafetyLayer
+        # (max_delta_rad) for closed-loop control, and by reset_pose's linear
+        # interpolation for startup recovery.
         robot_cfg = SO101FollowerConfig(
             port=self._cfg.port,
             id=calibration_path.stem,
             calibration_dir=calibration_path.parent,
-            max_relative_target=math.degrees(self._cfg.max_delta_rad),
+            max_relative_target=None,
             use_degrees=True,
         )
         follower = SO101Follower(robot_cfg)
@@ -329,16 +312,10 @@ class So101Robot:
     def read_joints(self) -> torch.Tensor:
         """Read current joint positions.
 
-        For joints with ``wrap_period_rad`` set, the raw LeRobot reading is
-        first unwrapped onto the nearest branch of either (a) the previously
-        cached raw reading or (b) the configured ``lero_branch_center_rad``
-        on the very first call.  The unwrapped raw value is cached for use
-        by the next ``send_joints()`` call.
-
         Returns
         -------
         torch.Tensor
-            Shape ``(n_joints,)`` float32, values in **radians** (sim convention).
+            Shape ``(n_joints,)`` float32, values in **canonical radians**.
         """
         if self._follower is None:
             # dry_run mode — return zeros
@@ -346,65 +323,30 @@ class So101Robot:
 
         obs = self._follower.get_observation()
         positions_deg = [obs[f"{name}.pos"] for name in self._joint_names]
-        positions_rad = torch.tensor(
+        q_lrad = torch.tensor(
             [math.radians(d) for d in positions_deg], dtype=torch.float32
         )
-
-        # Apply wrap unwrap to raw LeRobot values for joints that need it.
-        if self._has_wrap:
-            anchor = (
-                self._last_raw_lero
-                if self._last_raw_lero is not None
-                else self._wrap_center
-            )
-            # k = round((anchor - q) / period); q' = q + k*period.
-            # NaN periods produce NaN k → mask back to original value.
-            period = self._wrap_period
-            k = torch.round((anchor - positions_rad) / period)
-            unwrapped = positions_rad + k * period
-            mask = torch.isfinite(period)
-            positions_rad = torch.where(mask, unwrapped, positions_rad)
-
-        # Cache the (possibly unwrapped) raw value for the next send_joints() call.
-        self._last_raw_lero = positions_rad.clone()
-
-        # Apply lero → sim calibration: q_sim = scale * q_lerobot + offset
-        return self._cal_scale * positions_rad + self._cal_offset
+        return self._units.lero_rad_to_canonical(q_lrad)
 
     def send_joints(self, q_target_rad: torch.Tensor) -> None:
         """Send joint position targets.
 
-        For joints with ``wrap_period_rad`` set, the commanded LeRobot value
-        is shifted by an integer multiple of the period to land closest to
-        the most recent raw reading, ensuring the servo never takes the long
-        way around the wrap boundary.  This requires that ``read_joints()``
-        was called at least once before the first ``send_joints()``.
+        Applies the inverse calibration ``q_lerobot = (q_rad - offset) / scale``
+        and forwards the result to LeRobot's ``send_action``.  Per-tick safety
+        clamping is **not** applied here: it is the caller's responsibility
+        (``SafetyLayer`` in the closed-loop controller, linear interpolation
+        in ``reset_pose``).
 
         Parameters
         ----------
         q_target_rad:
-            Shape ``(n_joints,)`` float32, values in **radians** (sim convention).
+            Shape ``(n_joints,)`` float32, values in **canonical radians**.
         """
         if self._follower is None:
             return  # dry_run mode
 
         q_np = q_target_rad.detach().cpu().float()
-        # Apply inverse sim → lero calibration: q_lerobot = (q_sim - offset) / scale
-        q_lerobot = (q_np - self._cal_offset) / self._cal_scale
-
-        if self._has_wrap:
-            if self._last_raw_lero is None:
-                raise RuntimeError(
-                    "send_joints() called before read_joints() while wrap-aware joints "
-                    "are configured. The send-side branch projection requires a recent "
-                    "raw LeRobot reading. Call read_joints() at least once first."
-                )
-            period = self._wrap_period
-            k = torch.round((self._last_raw_lero - q_lerobot) / period)
-            projected = q_lerobot + k * period
-            mask = torch.isfinite(period)
-            q_lerobot = torch.where(mask, projected, q_lerobot)
-
+        q_lerobot = self._units.canonical_to_lero_rad(q_np)
         action = {
             f"{name}.pos": math.degrees(float(q_lerobot[i]))
             for i, name in enumerate(self._joint_names)

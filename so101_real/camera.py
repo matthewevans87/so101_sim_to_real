@@ -41,6 +41,15 @@ class CameraConfig:
     buffer_flush_count: int
     """Number of ``grab()`` calls before each ``retrieve()`` to drain stale frames."""
 
+    fourcc: str
+    """V4L2 pixel format (4-char code, e.g. ``'MJPG'`` or ``'YUYV'``).
+
+    Use ``'MJPG'`` for USB webcams that support Motion-JPEG — it is the only
+    format most cameras advertise at ≥30 fps for HD resolutions.  If this is
+    set incorrectly the driver will silently fall back to a lower-resolution
+    YUYV mode.
+    """
+
     @classmethod
     def load(cls, path: str | Path) -> "CameraConfig":
         path = Path(path).expanduser().resolve()
@@ -65,7 +74,8 @@ class CameraConfig:
             capture_width=int(cam["capture_width"]),
             capture_height=int(cam["capture_height"]),
             warmup_frames=int(cam.get("warmup_frames", 10)),
-            buffer_flush_count=int(cam.get("buffer_flush_count", 5)),
+            buffer_flush_count=int(cam.get("buffer_flush_count", 0)),
+            fourcc=str(cam.get("fourcc", "MJPG")),
         )
 
 
@@ -95,6 +105,10 @@ class CameraSource:
         """Open the camera and start the background grab thread."""
         cfg = self._cfg
         cap = cv2.VideoCapture(cfg.device_index, cv2.CAP_V4L2)
+        # Request the pixel format first — MJPEG must be set before the
+        # resolution or the driver defaults to YUYV, which on most webcams
+        # only supports ≤10 fps at 1080p.
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*cfg.fourcc))
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, cfg.capture_width)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, cfg.capture_height)
         # Minimize internal buffer to 1 frame to reduce latency.
