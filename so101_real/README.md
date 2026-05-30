@@ -89,6 +89,27 @@ ssh -Y matthew-evans@<workstation>
 
 ---
 
+## Control loop architecture
+
+`InferenceLoop` runs a tight 60 Hz control loop. The naïve design — grab frame → encode → infer → send — is bounded by the camera frame period (~45 ms at 22 fps for MJPEG 1920×1080), which would cap the control rate at ~22 Hz.
+
+Instead, `VisionJointObsBuilder` is automatically wrapped by `AsyncVisionJointObsBuilder` on construction: a daemon thread (`obs_async`) runs the camera + encoder pipeline continuously in the background while `_tick()` assembles each observation by combining the latest cached vision features with the freshly-read joint positions. The per-tick cost of `build()` is a single lock acquire + tensor cat (< 1 ms).
+
+```
+Background thread (obs_async):   get_frame → pipeline → encoder → cache features   ~20 Hz
+Control loop (_tick, 60 Hz):      read_joints → build(q_meas) → policy → EMA → safety → send
+                                                 ↑ tensor cat only
+```
+
+**Benefits:**
+- Control rate is 60 Hz regardless of camera or encoder speed.
+- Vision features refresh at the camera's natural rate (~20 Hz); the policy always sees the most recent available frame, never a frame held stale by serial I/O or encoder latency.
+- `last_frame_rgb` (used by the recorder and overlay) is kept in sync by the background thread, so recorded video matches the features the policy acted on.
+
+**Camera configuration matters:** at 1920×1080 the camera must be opened in MJPEG format (`fourcc: MJPG` in `robot.yaml`) or the V4L2 driver silently falls back to YUYV at 10 fps. The encoder runs on the device specified by `controller.device` (`cuda` is strongly recommended — 0.8 ms on an RTX-class GPU vs ~200 ms on CPU).
+
+---
+
 ## CLI subcommand reference
 
 Run `python -m so101_real <cmd> --help` for the full flag list of any command.

@@ -356,11 +356,6 @@ class InferenceLoop:
         self._n_joints = len(joint_lower_rad)
         self._ema_target: Optional[torch.Tensor] = None
 
-        # Per-stage timing diagnostics — printed every _timing_log_every ticks.
-        self._timing_log_every: int = 30
-        self._timing_count: int = 0
-        self._timing_accum: dict[str, float] = {}
-
     def run(
         self,
         episodes: int,
@@ -466,11 +461,8 @@ class InferenceLoop:
 
     def _tick(self, episode_id: int) -> None:
         """Execute one control step."""
-        t0 = time.monotonic()
-
         # 1. Read joint positions
         q_meas = self._robot.read_joints().to(self._device)  # (n_joints,)
-        t_read = time.monotonic()
 
         # 1a. Publish to digital twin (ROS2)
         if self._ros_publisher is not None:
@@ -478,12 +470,10 @@ class InferenceLoop:
 
         # 2. Build observation
         obs = self._obs_builder.build(q_meas)  # (1, obs_dim)
-        t_obs = time.monotonic()
 
         # 3. Policy forward pass — returns (1, n_act) in [-1, 1]
         with torch.no_grad():
             action = self._policy(obs).squeeze(0)  # (n_act,)
-        t_policy = time.monotonic()
 
         # 4. Map action ∈ [-1, 1] → canonical-radian joint targets.
         # Policies may emit values slightly outside [-1, 1]; the safety layer
@@ -504,7 +494,6 @@ class InferenceLoop:
         # 7. Send to robot
         if not self._dry_run:
             self._robot.send_joints(q_safe)
-        t_send = time.monotonic()
 
         # 8. Record (requires a camera frame from the obs builder)
         if self._recorder is not None:
@@ -528,30 +517,6 @@ class InferenceLoop:
             frame_rgb = self._obs_builder.last_frame_rgb
             if frame_rgb is not None:
                 self._overlay.update(frame_rgb, q_meas, q_safe, action)
-
-        # 10. Per-stage timing diagnostics
-        accum = self._timing_accum
-        accum["read"] = accum.get("read", 0.0) + (t_read - t0)
-        accum["obs"] = accum.get("obs", 0.0) + (t_obs - t_read)
-        accum["policy"] = accum.get("policy", 0.0) + (t_policy - t_obs)
-        accum["send"] = accum.get("send", 0.0) + (t_send - t_policy)
-        accum["total"] = accum.get("total", 0.0) + (t_send - t0)
-        self._timing_count += 1
-        if self._timing_count % self._timing_log_every == 0:
-            n = self._timing_log_every
-            budget_ms = 1000.0 / self._ctrl.control_hz
-            avg_total = accum["total"] / n * 1000
-            hz = 1000.0 / avg_total if avg_total > 0 else float("inf")
-            print(
-                f"[InferenceLoop] tick avg ({n} steps): "
-                f"read={accum['read']/n*1000:.1f}ms  "
-                f"obs={accum['obs']/n*1000:.1f}ms  "
-                f"policy={accum['policy']/n*1000:.1f}ms  "
-                f"send={accum['send']/n*1000:.1f}ms  "
-                f"total={avg_total:.1f}ms  "
-                f"(budget={budget_ms:.1f}ms → {hz:.1f} Hz achievable)"
-            )
-            self._timing_accum = {}
 
     def destroy(self) -> None:
         """Release resources (async obs builder and ROS2 publisher, if active)."""
