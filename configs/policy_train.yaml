@@ -41,6 +41,16 @@ joints:
 control:
   action_scale: 1.0
 
+# Action-processing pipeline (must match so101_real/configs/robot.yaml values).
+# Applies EMA smoothing + per-step delta clamping + joint-limit clamping to
+# every policy action in sim, matching the real robot's controller._tick() pipeline.
+joint_command:
+  enabled: false
+  ema_alpha: 0.90
+  max_delta_rad: 0.13    # ~7.5° per step at 60 Hz; embedded in bundle
+  ema_joints: ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll"]
+  clamp_joints: ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll"]
+
 safety:
   max_joint_velocity: 2.0
   min_ee_height: 0.01
@@ -72,10 +82,10 @@ distractors:
 debug:
   save_images:
     pre_processing:
-      save: true
+      save: false
       interval: 10
     post_processing:
-      save: true
+      save: false
       interval: 10
   enable_gripper_arrow_markers: false
   enable_camera_frame_markers: false
@@ -121,7 +131,7 @@ metrics:
   grasp_phase:
     grip_force_sat_threshold: 10.0  # bilateral pinch force (N) at which grasp_phase saturates to 1.0
   grip_cube:
-    distance_threshold: 0.02  # grip-zone-to-cube distance (m) for is_cube_in_grip_position
+    distance_threshold: 0.04  # grip-zone-to-cube distance (m) for is_cube_in_grip_position
     touch_force_threshold: 0.001  # minimum contact force (N) for is_cube_gripped
   cube_out_of_range:
     distance_threshold: 0.40  # cube-to-base distance (m) beyond which episode may terminate
@@ -169,9 +179,10 @@ rewards:
     scale: 5.0
     mode: unsigned_progressive
 
+# disabling per the ablation study findings
   - type: approach_phase
     id: absolute
-    enabled: true
+    enabled: false
     scale: 1.0
     mode: absolute
 
@@ -179,6 +190,12 @@ rewards:
     enabled: true
     scale: 500.0
     fire_once: true
+
+  # - type: close_gripper
+  #   enabled: true
+  #   scale: 10.0
+  #   close_target: 0.15   # gripper joint radian position when fully closed
+  #   max_open: 0.65       # open (0.80) - closed (0.15) = 0.65 rad
 
   # GRASP
   - type: grasp_phase
@@ -331,37 +348,37 @@ domain_randomization:
       preshape_image:
         enabled: false
       gaussian_noise:
-        enabled: false
-        std_range: [0.01, 0.02]
+        enabled: true
+        std_range: [0.005, 0.015]
       brightness:
-        enabled: false
+        enabled: true
         range: [0.85, 1.15]
       contrast:
-        enabled: false
-        range: [0.8, 1.2]
+        enabled: true
+        range: [0.85, 1.15]
       gaussian_blur:
         enabled: false
         kernel_size: 7
         sigma: 2.0
       cheap_webcam_effect:
-        enabled: false
+        enabled: true
       motion_blur:
-        enabled: false
+        enabled: true
         kernel_size: 5
-        strength_range: [0.1, 0.2]
+        strength_range: [0.05, 0.15]
       jpeg_compression:
-        enabled: false
-        quality_range: [60, 70]
+        enabled: true
+        quality_range: [60, 90]
     pose:
       enabled: false
       position_noise_range: [-0.001, 0.001]
       rotation_noise_deg_range: [-0.5, 0.5]
   world_lighting:
-    enabled: false
+    enabled: true
     intensity_range: [500.0, 1500.0]
     color_variation: 0.05
   env_lighting:
-    enabled: false
+    enabled: true
     height_range: [0.5, 2.0]
     intensity_range: [10000.0, 30000.0]
     color_variation: 0.05

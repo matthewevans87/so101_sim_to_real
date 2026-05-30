@@ -36,14 +36,14 @@ import numpy as np
 import torch
 import yaml
 
+from so101.utils.control import JointCommandSmoother
+
 from .bundle import DeployBundle
 from .camera import CameraSource
 from .image_pipeline import build_deploy_pipeline
 from .recorder import EpisodeRecorder
 from .robot import RobotConfig, So101Robot, ResetPoseCfg
 from .ros_publisher import RosPublisher
-from .safety import SafetyLayer
-from .units import JointUnitConverter
 from .vision import build_vision_encoder
 
 # ── ControllerConfig ──────────────────────────────────────────────────────────
@@ -58,8 +58,12 @@ class ControllerConfig:
     silent defaults.
     """
 
-    ema_alpha: float
-    """EMA smoothing coefficient for joint targets. 1.0 = no smoothing, 0.0 = freeze."""
+    ema_alpha: Optional[float]
+    """EMA smoothing coefficient for joint targets. 1.0 = no smoothing, 0.0 = freeze.
+
+    ``None`` means "use the value from the deploy bundle".  Set explicitly in
+    robot.yaml to override the bundle value.
+    """
 
     device: str
     """PyTorch device string for policy and vision encoder inference."""
@@ -79,18 +83,22 @@ class ControllerConfig:
             raise ValueError(
                 f"Robot config YAML must contain a top-level 'controller' key: {path}"
             )
-        required = {"ema_alpha", "device", "control_hz"}
+        required = {"device", "control_hz"}
         missing = required - set(ctrl)
         if missing:
             raise ValueError(
                 f"Controller config is missing required keys: {sorted(missing)}\n"
                 f"Config path: {path}"
             )
-        ema_alpha = float(ctrl["ema_alpha"])
-        if not (0.0 < ema_alpha <= 1.0):
-            raise ValueError(
-                f"controller.ema_alpha must be in (0, 1]; got {ema_alpha}."
-            )
+        ema_alpha_raw = ctrl.get("ema_alpha")
+        if ema_alpha_raw is None:
+            ema_alpha: Optional[float] = None
+        else:
+            ema_alpha = float(ema_alpha_raw)
+            if not (0.0 < ema_alpha <= 1.0):
+                raise ValueError(
+                    f"controller.ema_alpha must be in (0, 1]; got {ema_alpha}."
+                )
         control_hz = float(ctrl["control_hz"])
         if control_hz <= 0.0:
             raise ValueError(f"controller.control_hz must be > 0; got {control_hz}.")
@@ -310,6 +318,8 @@ class InferenceLoop:
         overlay=None,
         ros_publisher: Optional[RosPublisher] = None,
         dry_run: bool = False,
+        ema_mask: Optional[torch.Tensor] = None,
+        clamp_mask: Optional[torch.Tensor] = None,
     ) -> None:
         if len(joint_lower_rad) != len(joint_upper_rad):
             raise ValueError(
@@ -341,20 +351,16 @@ class InferenceLoop:
         device = torch.device(ctrl_config.device)
         self._device = device
 
-        self._safety = SafetyLayer(
-            joint_lower_rad=joint_lower_rad,
-            joint_upper_rad=joint_upper_rad,
+        # Shared action pipeline: normalised → canonical + EMA + delta clamp + limits.
+        # ema_mask and clamp_mask select which joints receive each operation (opt-in).
+        self._smoother = JointCommandSmoother(
+            lower_rad=torch.tensor(joint_lower_rad, dtype=torch.float32),
+            upper_rad=torch.tensor(joint_upper_rad, dtype=torch.float32),
+            ema_alpha=ctrl_config.ema_alpha,
             max_delta_rad=robot_config.max_delta_rad,
+            ema_mask=ema_mask,
+            clamp_mask=clamp_mask,
         )
-        # JointUnitConverter owns the normalized ↔ canonical-radian mapping.
-        # Joint names are not needed here (vectors only); use placeholders.
-        self._units = JointUnitConverter(
-            joint_names=[f"j{i}" for i in range(len(joint_lower_rad))],
-            lower_rad=joint_lower_rad,
-            upper_rad=joint_upper_rad,
-        )
-        self._n_joints = len(joint_lower_rad)
-        self._ema_target: Optional[torch.Tensor] = None
 
     def run(
         self,
@@ -389,7 +395,7 @@ class InferenceLoop:
         for ep_idx in range(episodes):
             print(f"[InferenceLoop] Episode {ep_idx + 1}/{episodes}")
             self._reset_to_start_pose(control_hz)
-            self._ema_target = None  # Reset EMA at episode start
+            self._smoother.reset_episode()  # Reset EMA at episode start
             self._run_episode(ep_idx, tick_period, max_steps_per_episode)
             if self._recorder is not None:
                 self._recorder.end_episode()
@@ -475,21 +481,9 @@ class InferenceLoop:
         with torch.no_grad():
             action = self._policy(obs).squeeze(0)  # (n_act,)
 
-        # 4. Map action ∈ [-1, 1] → canonical-radian joint targets.
-        # Policies may emit values slightly outside [-1, 1]; the safety layer
-        # below clamps the resulting joint targets so we skip validate_norm.
-        q_target = self._units.normalized_to_canonical(action)
-
-        # 5. EMA smoothing
-        if self._ema_target is None:
-            self._ema_target = q_target
-        else:
-            alpha = self._ctrl.ema_alpha
-            self._ema_target = alpha * q_target + (1.0 - alpha) * self._ema_target
-        q_smooth = self._ema_target
-
-        # 6. Safety layer
-        q_safe = self._safety.apply(q_smooth, q_meas)
+        # 4–6. Shared action pipeline: normalised → canonical + EMA + delta clamp + limits.
+        # Identical to JointCommandSmoother.step() in the sim env.
+        q_safe = self._smoother.step(action, q_meas)
 
         # 7. Send to robot
         if not self._dry_run:

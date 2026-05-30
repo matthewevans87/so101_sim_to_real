@@ -146,7 +146,7 @@ def _connect_raw(robot_config_path: Path):
     cfg_raw = RobotConfig(
         port=cfg.port,
         calibration_file=cfg.calibration_file,
-        max_delta_rad=cfg.max_delta_rad,
+        max_delta_rad=cfg.max_delta_rad if cfg.max_delta_rad is not None else 0.087,
         reset_pose=None,
         joint_calibration={},
     )
@@ -423,9 +423,7 @@ def _run_sweep(args: argparse.Namespace) -> None:
                 step2_sim_rad = sim_upper_rad
 
             # Build direction hints with predicted targets from existing calibration.
-            existing_offset = existing_cal.get(joint, {}).get(
-                "offset_rad", 0.0
-            )
+            existing_offset = existing_cal.get(joint, {}).get("offset_rad", 0.0)
             try:
                 pred1_deg = math.degrees(
                     (step1_sim_rad - existing_offset) / existing_scale

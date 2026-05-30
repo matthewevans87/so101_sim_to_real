@@ -103,6 +103,36 @@ class DeployBundle:
     def actor_obs_metrics(self) -> list[str]:
         return list(self.manifest.get("actor_obs_metrics") or [])
 
+    @property
+    def ema_alpha(self) -> float | None:
+        """EMA smoothing coefficient used during training.
+
+        ``None`` for bundles exported before this field was added (use
+        ``robot.yaml controller.ema_alpha`` as a fallback override).
+        """
+        v = self.manifest.get("ema_alpha")
+        return float(v) if v is not None else None
+
+    @property
+    def max_delta_rad(self) -> float | None:
+        """Maximum per-step delta clamp (radians) used during training.
+
+        ``None`` for bundles exported before this field was added (use
+        ``robot.yaml robot.max_delta_rad`` as a fallback override).
+        """
+        v = self.manifest.get("max_delta_rad")
+        return float(v) if v is not None else None
+
+    @property
+    def ema_joints(self) -> list[str]:
+        """Joint names that receive EMA smoothing."""
+        return list(self.manifest.get("ema_joints") or [])
+
+    @property
+    def clamp_joints(self) -> list[str]:
+        """Joint names that receive delta clamping."""
+        return list(self.manifest.get("clamp_joints") or [])
+
 
 def load_bundle(bundle_dir: str | Path) -> DeployBundle:
     """Load and validate a deploy bundle directory.

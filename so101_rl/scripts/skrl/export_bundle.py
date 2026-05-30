@@ -412,6 +412,13 @@ def main(
     decimation: int = int(isaac_cfg.decimation)
     control_hz: float = 1.0 / (sim_dt * decimation)
 
+    # Action-pipeline parameters — baked into training; must travel with the bundle
+    # so the real robot uses the same values without requiring manual robot.yaml edits.
+    ema_alpha: float = float(so101_params.joint_command.ema_alpha)
+    max_delta_rad: float = float(so101_params.joint_command.max_delta_rad)
+    ema_joints: list[str] = list(so101_params.joint_command.ema_joints or [])
+    clamp_joints: list[str] = list(so101_params.joint_command.clamp_joints or [])
+
     # Joint limits from env tensors (populated by env._setup_scene). The
     # attributes are required — if absent, the env contract changed and we
     # must not silently emit empty joint limits to the bundle.
@@ -506,6 +513,10 @@ def main(
         "joint_lower_rad": joint_lower_rad,
         "joint_upper_rad": joint_upper_rad,
         "control_hz": control_hz,
+        "ema_alpha": ema_alpha,
+        "max_delta_rad": max_delta_rad,
+        "ema_joints": ema_joints,
+        "clamp_joints": clamp_joints,
         "actor_obs_metrics": actor_obs_metrics,
     }
     manifest_path = output_dir / "manifest.json"

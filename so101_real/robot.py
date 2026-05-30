@@ -86,11 +86,14 @@ class RobotConfig:
     calibration_file: str
     """Path to the LeRobot calibration JSON file."""
 
-    max_delta_rad: float
+    max_delta_rad: Optional[float]
     """Maximum allowed joint displacement per control step (radians).
 
     Clips the difference between commanded and current joint positions.
     Prevents large sudden movements when the policy outputs an extreme action.
+
+    ``None`` means "use the value from the deploy bundle".  Set explicitly in
+    robot.yaml to override the bundle value (or to enforce a hardware ceiling).
     """
 
     reset_pose: Optional[ResetPoseCfg]
@@ -136,7 +139,7 @@ class RobotConfig:
             raise ValueError(
                 f"Robot config YAML must contain a top-level 'robot' key: {path}"
             )
-        required = {"port", "calibration_file", "max_delta_rad"}
+        required = {"port", "calibration_file"}
         missing = required - set(robot)
         if missing:
             raise ValueError(
@@ -204,10 +207,14 @@ class RobotConfig:
                 upper_rad=float(jentry["upper_rad"]),
             )
 
+        max_delta_raw = robot.get("max_delta_rad")
+        max_delta_rad: Optional[float] = (
+            float(max_delta_raw) if max_delta_raw is not None else None
+        )
         return cls(
             port=str(robot["port"]),
             calibration_file=str(robot["calibration_file"]),
-            max_delta_rad=float(robot["max_delta_rad"]),
+            max_delta_rad=max_delta_rad,
             reset_pose=reset_pose,
             joint_calibration=joint_calibration,
             joint_limits=joint_limits,

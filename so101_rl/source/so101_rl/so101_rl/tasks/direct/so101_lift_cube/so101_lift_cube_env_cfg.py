@@ -183,6 +183,7 @@ class So101LiftCubeCfg(DirectRLEnvCfg):
     # ── Typed config groups (self.cfg.<group>.<field>) ───────────────────────
     joints = _Y.joints
     control = _Y.control
+    joint_command = _Y.joint_command
     safety = _Y.safety
     gripper = _Y.gripper
     distractors = _Y.distractors

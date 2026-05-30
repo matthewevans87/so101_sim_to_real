@@ -224,6 +224,36 @@ class So101LiftCube(DirectRLEnv):
             self.device
         )  # (1, num_actions)
 
+        # Joint-command smoother: shared sim/real action pipeline.
+        if self.cfg.joint_command.enabled:
+            from so101.utils.control import JointCommandSmoother
+
+            _active = list(self.cfg.joints.active)
+            _ema_names = set(self.cfg.joint_command.ema_joints or [])
+            _clamp_names = set(self.cfg.joint_command.clamp_joints or [])
+            _ema_mask = (
+                torch.tensor([name in _ema_names for name in _active], dtype=torch.bool)
+                if _ema_names
+                else None
+            )
+            _clamp_mask = (
+                torch.tensor(
+                    [name in _clamp_names for name in _active], dtype=torch.bool
+                )
+                if _clamp_names
+                else None
+            )
+            self._smoother = JointCommandSmoother(
+                lower_rad=joint_lower_1d,  # (n_joints,) — 1-D, not unsqueezed
+                upper_rad=joint_upper_1d,
+                ema_alpha=self.cfg.joint_command.ema_alpha,
+                max_delta_rad=self.cfg.joint_command.max_delta_rad,
+                ema_mask=_ema_mask,
+                clamp_mask=_clamp_mask,
+            )
+        else:
+            self._smoother = None
+
         self.actions = torch.zeros(
             (self.num_envs, self.cfg.action_space),  # type: ignore
             device=self.device,
@@ -453,9 +483,24 @@ class So101LiftCube(DirectRLEnv):
         if self.device == "cpu":
             self.scene.filter_collisions(global_prim_paths=[])
 
-        # Lights
+        # Lights — dome provides soft ambient fill; key light adds a
+        # directional component approximating the real workspace desk lamp.
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
+
+        key_light_cfg = sim_utils.DistantLightCfg(
+            intensity=3000.0,
+            color=(1.0, 0.95, 0.85),  # warm white matching typical desk lamp
+            angle=0.53,  # degrees — narrow cone for defined shadows
+        )
+        # Orientation (w, x, y, z): tilt ~35° from vertical toward front-right
+        # of the workspace so it approximates the real desk lamp direction.
+        # Euler ZYX ≈ (0°, 35°, -45°) → quaternion computed offline.
+        key_light_cfg.func(
+            "/World/KeyLight",
+            key_light_cfg,
+            orientation=(0.8924, 0.2392, -0.3604, 0.0966),
+        )
 
         if self.cfg.debug.enable_camera_frame_markers:
             self.camera_frame_markers = define_camera_frame_markers()
@@ -476,21 +521,39 @@ class So101LiftCube(DirectRLEnv):
         if actions is None:
             return
 
-        actions = torch.clamp(actions, -1.0, 1.0)
-        t = 0.5 * (actions + 1.0)  # (num_envs, num_actions)
         self.prev_actions = self.actions.clone()
         self.actions = actions.clone()
 
-        if self.cfg.behavior.binary_gripper_action.enabled:
-            # make the target_pos of the gripper binary: fully open or set to the "grip" position
-            t[:, self._ee_body_idx] = torch.where(
-                t[:, self._ee_body_idx] > 0.5,
-                torch.tensor(self.cfg.gripper.open_target, device=self.device),
-                torch.tensor(self.cfg.gripper.closed_target, device=self.device),
+        if self._smoother is not None:
+            # Shared action pipeline: normalized → canonical + EMA + delta clamp + limits.
+            # Apply binary gripper override in normalized action space before the smoother
+            # so it goes through EMA and delta clamping like any other joint.
+            actions_cmd = actions
+            if self.cfg.behavior.binary_gripper_action.enabled:
+                open_norm = 2.0 * self.cfg.gripper.open_target - 1.0
+                closed_norm = 2.0 * self.cfg.gripper.closed_target - 1.0
+                actions_cmd = actions.clone()
+                g = actions_cmd[:, self._ee_body_idx]
+                actions_cmd[:, self._ee_body_idx] = torch.where(
+                    g > 0.0,
+                    torch.full_like(g, open_norm),
+                    torch.full_like(g, closed_norm),
+                )
+            q_current = self.joint_pos[:, self._dof_idx]
+            self._target_pos = self._smoother.step(actions_cmd, q_current)
+        else:
+            # Legacy path (joint_command.enabled: false — ablation only).
+            actions_clamped = torch.clamp(actions, -1.0, 1.0)
+            t = 0.5 * (actions_clamped + 1.0)
+            if self.cfg.behavior.binary_gripper_action.enabled:
+                t[:, self._ee_body_idx] = torch.where(
+                    t[:, self._ee_body_idx] > 0.5,
+                    torch.tensor(self.cfg.gripper.open_target, device=self.device),
+                    torch.tensor(self.cfg.gripper.closed_target, device=self.device),
+                )
+            self._target_pos = self._joint_lower + t * (
+                self._joint_upper - self._joint_lower
             )
-
-        target_pos = self._joint_lower + t * (self._joint_upper - self._joint_lower)
-        self._target_pos = target_pos
 
         if self.cfg.debug.enable_camera_frame_markers:
             ee_pos = self.robot.data.body_pos_w[:, self._ee_body_idx[0], :]
@@ -804,6 +867,14 @@ class So101LiftCube(DirectRLEnv):
         self.joint_pos[env_ids] = joint_pos
         self.joint_vel[env_ids] = joint_vel
         self.prev_actions[env_ids] = 0.0
+
+        # Reset smoother EMA state for the resetting environments so the first
+        # commanded target after reset is delta-clamped from the post-reset pose.
+        if self._smoother is not None:
+            _env_ids_t = torch.as_tensor(
+                list(env_ids), device=self.device, dtype=torch.long
+            )
+            self._smoother.reset(joint_pos[:, self._dof_idx], env_ids=_env_ids_t)
 
         self.robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
         self.robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)

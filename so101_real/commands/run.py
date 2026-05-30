@@ -38,6 +38,31 @@ def cmd_run(args) -> None:
         runtime_upper=runtime_upper,
     )
 
+    # Resolve action-pipeline parameters: robot.yaml (non-null) overrides bundle;
+    # bundle is the default.  Raises if neither source provides a value (old bundle
+    # with no robot.yaml override).
+    _ema = ctrl_config.ema_alpha
+    if _ema is None:
+        _ema = bundle.ema_alpha
+    if _ema is None:
+        raise ValueError(
+            "ema_alpha is not set.  Re-export the bundle (new bundles embed "
+            "ema_alpha) or add 'ema_alpha: <value>' under 'controller:' in "
+            "robot.yaml as a temporary override."
+        )
+    ctrl_config.ema_alpha = _ema
+
+    _delta = robot_config.max_delta_rad
+    if _delta is None:
+        _delta = bundle.max_delta_rad
+    if _delta is None:
+        raise ValueError(
+            "max_delta_rad is not set.  Re-export the bundle (new bundles embed "
+            "max_delta_rad) or add 'max_delta_rad: <value>' under 'robot:' in "
+            "robot.yaml as a temporary override."
+        )
+    robot_config.max_delta_rad = _delta
+
     if args.episodes is None:
         raise ValueError(
             "--episodes is required. "
@@ -114,6 +139,22 @@ def cmd_run(args) -> None:
             overlay=overlay,
             ros_publisher=ros_publisher,
             dry_run=args.dry_run,
+            ema_mask=(
+                torch.tensor(
+                    [name in bundle.ema_joints for name in bundle.active_joints],
+                    dtype=torch.bool,
+                )
+                if bundle.ema_joints
+                else None
+            ),
+            clamp_mask=(
+                torch.tensor(
+                    [name in bundle.clamp_joints for name in bundle.active_joints],
+                    dtype=torch.bool,
+                )
+                if bundle.clamp_joints
+                else None
+            ),
         )
         seed = args.seed if hasattr(args, "seed") else None
         try:
@@ -187,13 +228,16 @@ def _check_bundle_robot_consistency(
         )
 
     if mismatches:
-        raise ValueError(
-            "Bundle / robot.yaml mismatch — refusing to run.  The policy was "
-            "trained against different robot facts than what robot.yaml "
-            "currently declares.  Disagreements:\n"
+        import warnings
+
+        warnings.warn(
+            "Bundle / robot.yaml mismatch — the policy was trained against "
+            "different robot facts than what robot.yaml currently declares.  "
+            "Disagreements:\n"
             + "\n".join(mismatches)
             + "\nUpdate robot.yaml to match the bundle, or retrain with the "
-            "current robot.yaml."
+            "current robot.yaml.",
+            stacklevel=2,
         )
 
 

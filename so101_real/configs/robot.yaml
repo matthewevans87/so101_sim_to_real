@@ -20,9 +20,11 @@ robot:
   # (previously `.../so101_follower/`).
   calibration_file: /home/matthew-evans/.cache/huggingface/lerobot/calibration/robots/so_follower/lerobot.json
 
-  # Maximum joint displacement per control step (radians).
-  # ~5° per step at 30 Hz means the arm moves at most 150°/s.
-  max_delta_rad: 0.087  # ~5 degrees
+  # [optional] Maximum joint displacement per control step (radians).
+  # null = use the value embedded in the deploy bundle (recommended).
+  # Set to a float to override the bundle value, e.g. to enforce a hardware
+  # ceiling regardless of the policy (useful for joint_calibrate.py sweeps).
+  max_delta_rad: null
 
 # ── Camera ────────────────────────────────────────────────────────────────────
 camera:
@@ -119,10 +121,11 @@ reset_pose:
 
 # ── Inference controller ──────────────────────────────────────────────────────
 controller:
-  # EMA smoothing for joint targets.
-  # 1.0 = no smoothing (direct policy output)
-  # 0.7 = moderate smoothing (recommended)
-  ema_alpha: 0.7
+  # [optional] EMA smoothing coefficient for joint targets.
+  # null = use the value embedded in the deploy bundle (recommended).
+  # Set to a float in (0, 1] to override the bundle value.
+  # 1.0 = no smoothing;  0.9 = light smoothing (default for new bundles).
+  ema_alpha: 0.1
 
   # PyTorch device for policy and vision encoder.
   device: cuda
@@ -130,4 +133,4 @@ controller:
   # Control-loop rate in Hz.  Used by every command (bundle-driven `run` and
   # the bundle-free `run-static`).  Should match the rate the bundle was
   # trained at (typically 30 Hz).
-  control_hz: 60.0
+  control_hz: 10.0
