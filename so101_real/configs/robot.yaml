@@ -97,24 +97,28 @@ joint_calibration:
     offset_rad: -0.179722
 
 # ── Episode reset pose ────────────────────────────────────────────────────────
-# Joint positions (canonical radians) the arm moves to at the start of every
-# episode.  Order must match joint_limits above:
+# Joint positions the arm moves to at the start of every episode.
+# Specify values in any supported unit via `unit` (rad, deg, or norm).
+# Order must match joint_limits above:
 #   [shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll, gripper].
 #
-# Reference values from optimal_policy_train_cnn.yaml `joints.starting_position`
-# (degrees → radians):
-#   shoulder_pan:  0.0  deg →  0.000 rad
-#   shoulder_lift: 0.0  deg →  0.000 rad
-#   elbow_flex:   -25.0 deg → -0.436 rad
-#   wrist_flex:    65.0 deg →  1.134 rad
-#   wrist_roll:   -90.0 deg → -1.571 rad
-#   gripper:       0.0  deg →  0.000 rad  (canonical nearly-closed; → -53° in LeRobot via joint_calibration)
+# Reference starting position from optimal_policy_train_cnn.yaml (degrees):
+#   shoulder_pan:   0.0°   shoulder_lift:  0.0°   elbow_flex: -25.0°
+#   wrist_flex:    65.0°   wrist_roll:   -90.0°   gripper:     0.0°
 reset_pose:
   enabled: true
-  # Target joint angles in canonical radians (joint_calibration is applied
-  # automatically in send_joints() before commanding the hardware).
-  # joints_rad: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-  joints_rad: [-0.04031, -1.72905, 1.68694, 0.49864, -1.49617, -0.14599]
+  # Target joint positions in the units given by `unit`.
+  # Order: [shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll, gripper].
+  # joint_calibration is applied automatically in send_joints() before commanding hardware.
+
+  # joints: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  # rad | deg | norm  (norm = [-1, +1] over each joint's physical range)
+  # joints: [-0.04031, -1.72905, 1.68694, 0.49864, -1.49617, -0.14599]
+  # unit: rad
+
+  joints: [0.0, 0.0, -25.0, 65.0, -90.0, 0.0]
+  unit: deg
+
   # Duration (seconds) over which to linearly interpolate to the reset pose.
   # Gives the arm time to move safely rather than jumping discontinuously.
   duration_s: 3.0
@@ -125,7 +129,7 @@ controller:
   # null = use the value embedded in the deploy bundle (recommended).
   # Set to a float in (0, 1] to override the bundle value.
   # 1.0 = no smoothing;  0.9 = light smoothing (default for new bundles).
-  ema_alpha: 0.1
+  ema_alpha: 0.9
 
   # PyTorch device for policy and vision encoder.
   device: cuda

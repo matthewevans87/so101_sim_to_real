@@ -147,22 +147,6 @@ class RobotConfig:
                 f"Config path: {path}"
             )
 
-        reset_pose: Optional[ResetPoseCfg] = None
-        rp_data = data.get("reset_pose")
-        if rp_data is not None:
-            required_rp = {"enabled", "joints_rad", "duration_s"}
-            missing_rp = required_rp - set(rp_data)
-            if missing_rp:
-                raise ValueError(
-                    f"reset_pose config is missing required keys: {sorted(missing_rp)}\n"
-                    f"Config path: {path}"
-                )
-            reset_pose = ResetPoseCfg(
-                enabled=bool(rp_data["enabled"]),
-                joints_rad=[float(v) for v in rp_data["joints_rad"]],
-                duration_s=float(rp_data["duration_s"]),
-            )
-
         # Parse joint_calibration (optional; defaults to identity for all joints)
         joint_calibration: dict[str, JointCalibrationEntry] = {}
         cal_data = data.get("joint_calibration") or {}
@@ -187,7 +171,8 @@ class RobotConfig:
                 offset_rad=float(entry["offset_rad"]),
             )
 
-        # Parse joint_limits (required)
+        # Parse joint_limits (required) — parsed before reset_pose so that
+        # unit="norm" conversion has the limits available.
         jl_raw = data.get("joint_limits")
         if not jl_raw:
             raise ValueError(
@@ -205,6 +190,46 @@ class RobotConfig:
             joint_limits[str(jname)] = JointLimitEntry(
                 lower_rad=float(jentry["lower_rad"]),
                 upper_rad=float(jentry["upper_rad"]),
+            )
+
+        reset_pose: Optional[ResetPoseCfg] = None
+        rp_data = data.get("reset_pose")
+        if rp_data is not None:
+            if "joints_rad" in rp_data:
+                raise ValueError(
+                    f"reset_pose uses the legacy key 'joints_rad'.  Replace it with "
+                    f"'joints' and add 'unit: rad' (or 'deg' / 'norm'). "
+                    f"Config path: {path}"
+                )
+            required_rp = {"enabled", "joints", "unit", "duration_s"}
+            missing_rp = required_rp - set(rp_data)
+            if missing_rp:
+                raise ValueError(
+                    f"reset_pose config is missing required keys: {sorted(missing_rp)}\n"
+                    f"Config path: {path}"
+                )
+            _valid_units = ("rad", "deg", "norm")
+            _unit = str(rp_data["unit"])
+            if _unit not in _valid_units:
+                raise ValueError(
+                    f"reset_pose.unit must be one of {_valid_units}; got {_unit!r}. "
+                    f"Config path: {path}"
+                )
+            _joints_raw = [float(v) for v in rp_data["joints"]]
+            if _unit == "rad":
+                _joints_rad = _joints_raw
+            elif _unit == "deg":
+                _joints_rad = [math.radians(v) for v in _joints_raw]
+            else:  # norm — requires joint_limits
+                _jnames = list(joint_limits.keys())
+                _lowers = [joint_limits[n].lower_rad for n in _jnames]
+                _uppers = [joint_limits[n].upper_rad for n in _jnames]
+                _conv = from_robot_config(_jnames, lower_rad=_lowers, upper_rad=_uppers)
+                _joints_rad = _conv.to_canonical_rad(_joints_raw, "norm").tolist()
+            reset_pose = ResetPoseCfg(
+                enabled=bool(rp_data["enabled"]),
+                joints_rad=_joints_rad,
+                duration_s=float(rp_data["duration_s"]),
             )
 
         max_delta_raw = robot.get("max_delta_rad")

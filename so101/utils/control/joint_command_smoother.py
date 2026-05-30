@@ -76,14 +76,19 @@ class JointCommandSmoother:
         lower_rad: torch.Tensor,
         upper_rad: torch.Tensor,
         ema_alpha: float,
-        max_delta_rad: float,
+        max_delta_rad: Optional[float],
         ema_mask: Optional[torch.Tensor] = None,
         clamp_mask: Optional[torch.Tensor] = None,
     ) -> None:
         if not (0.0 < ema_alpha <= 1.0):
             raise ValueError(f"ema_alpha must be in (0, 1]; got {ema_alpha}.")
-        if max_delta_rad <= 0.0:
-            raise ValueError(f"max_delta_rad must be > 0; got {max_delta_rad}.")
+        if clamp_mask is not None:
+            if max_delta_rad is None:
+                raise ValueError(
+                    "max_delta_rad must be set when clamp_mask is provided."
+                )
+            if max_delta_rad <= 0.0:
+                raise ValueError(f"max_delta_rad must be > 0; got {max_delta_rad}.")
         span = upper_rad - lower_rad
         if not torch.all(span > 0):
             raise ValueError(
@@ -102,7 +107,9 @@ class JointCommandSmoother:
         self._lower = lower_rad.float().cpu()
         self._upper = upper_rad.float().cpu()
         self._alpha = float(ema_alpha)
-        self._max_delta = float(max_delta_rad)
+        self._max_delta: Optional[float] = (
+            float(max_delta_rad) if max_delta_rad is not None else None
+        )
         self._ema_mask: Optional[torch.Tensor] = (
             ema_mask.bool().cpu() if ema_mask is not None else None
         )
