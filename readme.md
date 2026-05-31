@@ -207,6 +207,9 @@ python -m vision_backbone_demo \
 
 `deploy` has **no Isaac Lab dependency** and runs directly under the system or conda Python that has `so101_real` installed (`pip install -e ".[deploy]"`). Isaac Sim is not required.
 
+`./scripts/run.py deploy` is a convenience wrapper around `python -m so101_real run` (it mainly adds bundle pin resolution and environment setup).
+For full real-hardware runtime details and direct `so101_real` commands, see [so101_real/README.md](./so101_real/README.md).
+
 ```bash
 # ── Digital twin (mirror real arm in Isaac Sim, no policy) ───────────────────
 # Two processes, one per terminal. The `stream` side reads joint positions

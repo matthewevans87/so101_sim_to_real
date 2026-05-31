@@ -8,7 +8,7 @@ Runs a trained SO-101 policy on physical hardware. No Isaac Lab dependency requi
 every joint reads `0 rad` at the home pose, matching what trained policies and
 the digital twin expect. Everything inside this package — joint bounds in
 `robot.yaml::joint_limits`, observation/action tensors, recorded telemetry,
-`run-static --joints "0,0,0,0,0,0"` — is in canonical radians.
+`run-static` targets *after unit conversion* — is in canonical radians.
 
 The only other frame is LeRobot's native one (raw motor positions from the
 follower bus), which is bridged by `robot.yaml::joint_calibration` using
@@ -17,6 +17,26 @@ follower bus), which is bridged by `robot.yaml::joint_calibration` using
 
 This conversion happens inside `So101Robot.read_joints` / `send_joints`; no
 caller of `so101_real` ever sees raw LeRobot values.
+
+### Unit conventions
+
+`so101_real` supports five unit labels:
+
+- `rad`: canonical radians (internal policy/runtime frame)
+- `deg`: canonical degrees
+- `norm`: normalized range `[-1, +1]` over `robot.yaml::joint_limits`
+- `lrad`: LeRobot motor-frame radians (diagnostics/calibration-facing)
+- `ldeg`: LeRobot motor-frame degrees
+
+Command support is intentionally split:
+
+- `run-static` and `robot-test` accept `rad|deg|norm`
+- `probe` accepts `rad|deg|norm|lrad|ldeg`
+- `run` consumes canonical units from the bundle/config path; there is no runtime `--unit` flag
+
+For `robot.yaml::reset_pose`, the schema is `joints` + `unit` (not `joints_rad`).
+Allowed `reset_pose.unit` values are `rad|deg|norm`; values are converted to canonical
+radians at config load.
 
 ## Quick start
 
@@ -116,6 +136,55 @@ Run `python -m so101_real <cmd> --help` for the full flag list of any command.
 The `./scripts/run.py` shortcuts shown above (`deploy`, `stream`,
 `digital-twin`) are thin wrappers over the same entry point.
 
+### Top-level commands
+
+To list commands:
+
+```bash
+python -m so101_real --help
+```
+
+Current top-level commands are:
+
+- `run` — run a trained policy from a deploy bundle on the physical robot
+- `run-static` — hold the arm at a fixed joint target (no bundle/camera)
+- `camera-test` — open and display the live camera feed
+- `calibrate-camera` — capture checkerboard frames and solve intrinsics
+- `configure-camera` — apply camera V4L2 controls from YAML
+- `compare-views` — composite real and sim frames for visual alignment checks
+- `stream` — publish measured joints to `/so101/joint_states` (ROS2)
+- `robot-test` — print live joint positions continuously
+- `probe` — run a traceable single-joint command/ramp diagnostic
+
+### Example command set
+
+```bash
+# Run a policy bundle on hardware
+python -m so101_real run \
+  --robot-config so101_real/configs/robot.yaml \
+  --bundle ./dev/policy \
+  --episodes 5 --overlay --ros
+
+# Apply camera V4L2 settings
+python -m so101_real configure-camera \
+  --camera-config so101_real/configs/camera_v4l2.yaml
+
+# Sanity-check camera feed from robot config
+python -m so101_real camera-test \
+  --robot-config so101_real/configs/robot.yaml
+
+# Send arm to home-ish target (normalized units)
+python -m so101_real run-static \
+  --robot-config so101_real/configs/robot.yaml \
+  --joints="0,0,0,0,0,0" \
+  --unit norm
+
+# Probe one joint conversion path (example: gripper to +0.2 rad)
+python -m so101_real probe \
+  --robot-config so101_real/configs/robot.yaml \
+  --joint gripper --value 0.2 --unit rad
+```
+
 | Subcommand         | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `run`              | Run a trained policy from a deploy bundle on the physical robot. Supports `--record` (NPZ + per-episode MP4), `--overlay` (live OpenCV window), `--ros` (publish joint states for the digital twin), and `--dry-run` (validate bundle + config without opening hardware).                                                                                                                                                                     |
@@ -134,7 +203,7 @@ Joint calibration is a separate module (own help text and modes):
 python -m so101_real.joint_calibrate --help
 ```
 
-See [Joint calibration (sim ↔ LeRobot)](#joint-calibration-sim--lerobot) below for the four modes (`single`, `sweep`, `discontinuity`, `wrap-sweep`).
+See [Joint calibration (sim ↔ LeRobot)](#joint-calibration-sim--lerobot) below for the available modes (`single`, `sweep`).
 
 ---
 
@@ -268,14 +337,16 @@ sudo udevadm control --reload-rules && sudo udevadm trigger
 
 Edit `so101_real/configs/robot.yaml` before first use:
 
-| Field                    | Description                                                |
-| ------------------------ | ---------------------------------------------------------- |
-| `robot.port`             | Serial port of the SO-101 arm (e.g. `/dev/ttyACM0`)        |
-| `robot.calibration_file` | Path to the LeRobot calibration JSON                       |
-| `robot.max_delta_rad`    | Maximum joint displacement per control step (safety clamp) |
-| `camera.device_index`    | V4L2 device index (0 = `/dev/video0`)                      |
-| `controller.ema_alpha`   | EMA smoothing on joint targets (1.0 = no smoothing)        |
-| `controller.device`      | PyTorch device for inference (`cpu` or `cuda:0`)           |
+| Field                    | Description                                                   |
+| ------------------------ | ------------------------------------------------------------- |
+| `robot.port`             | Serial port of the SO-101 arm (e.g. `/dev/ttyACM0`)           |
+| `robot.calibration_file` | Path to the LeRobot calibration JSON                          |
+| `robot.max_delta_rad`    | Maximum joint displacement per control step (safety clamp)    |
+| `reset_pose.joints`      | Episode-start joint targets (order must match `joint_limits`) |
+| `reset_pose.unit`        | Units for `reset_pose.joints`: `rad`, `deg`, or `norm`        |
+| `camera.device_index`    | V4L2 device index (0 = `/dev/video0`)                         |
+| `controller.ema_alpha`   | EMA smoothing on joint targets (1.0 = no smoothing)           |
+| `controller.device`      | PyTorch device for inference (`cpu` or `cuda:0`)              |
 
 ### Edge case: gravity-stuck joint at startup (`max_relative_target` disabled)
 
@@ -320,53 +391,16 @@ and confirm `max_relative_target=None` in `So101Robot.connect`.
 
 ## Joint calibration (sim ↔ LeRobot)
 
-Each joint has a linear map `q_sim = scale * q_lerobot + offset` recorded under `joint_calibration:` in `so101_real/configs/robot.yaml`. Free-spinning joints (currently only `wrist_roll`) also need `wrap_period_rad` and `lero_branch_center_rad` so the read/send transforms cross the encoder discontinuity correctly.
+Each joint has a linear map `q_sim = scale * q_lerobot + offset` recorded under `joint_calibration:` in `so101_real/configs/robot.yaml`.
 
-Use `python -m so101_real.joint_calibrate` with one of four modes:
+Use `python -m so101_real.joint_calibrate` with one of two modes:
 
-| Mode            | Purpose                                                              |
-| --------------- | -------------------------------------------------------------------- |
-| `single`        | Two-point manual fit at a chosen joint pose (legacy)                 |
-| `sweep`         | Drive joint stop-to-stop, fit `scale`/`offset` from min/max readings |
-| `discontinuity` | Measure the encoder wrap period of a free-spinning joint             |
-| `wrap-sweep`    | Stop-to-stop fit that unwraps across the discontinuity               |
+| Mode     | Purpose                                                              |
+| -------- | -------------------------------------------------------------------- |
+| `single` | Two-point manual fit at a chosen joint pose (legacy)                 |
+| `sweep`  | Drive joint stop-to-stop, fit `scale`/`offset` from min/max readings |
 
-### Calibrating a free-spinning joint (e.g. `wrist_roll`)
-
-1. **Measure the wrap period.** Slowly rotate the joint through several full turns when prompted; the script flags samples where consecutive readings jump by more than `--jump-threshold-rad` (default π/2) and reports the median jump magnitude (should be ≈ 2π = 6.2832 rad).
-
-   ```bash
-   python -m so101_real.joint_calibrate \
-     --robot-config so101_real/configs/robot.yaml \
-     --mode discontinuity \
-     --joints wrist_roll
-   ```
-
-   Output is saved to `so101_real/calibration/<joint>_discontinuity_<timestamp>.yaml`.
-
-2. **Fit scale, offset, and branch center.** Drive the joint to one physical hard stop (paired with the sim lower limit), press Enter, then *slowly* sweep to the other stop — crossing the wrap is fine, the script unwraps the stream cumulatively.
-
-   ```bash
-   python -m so101_real.joint_calibrate \
-     --robot-config so101_real/configs/robot.yaml \
-     --mode wrap-sweep \
-     --joints wrist_roll \
-     --wrap-period-rad 6.2832
-   ```
-
-   The script prints a pasteable YAML block; copy it into `joint_calibration.<joint>` in `robot.yaml`, replacing any prior entry. Both `wrap_period_rad` and `lero_branch_center_rad` must be present together (or both omitted).
-
-3. **Verify.** With torque off, hand-rotate the joint across the wrap and confirm the sim-space readout is smooth and monotonic:
-
-   ```bash
-   python -m so101_real robot-test \
-     --robot-config so101_real/configs/robot.yaml \
-     --no-torque
-   ```
-
-   Then run `dev/test_joint_wrap_transform.py` for the unit-test round-trips, and do a short policy rollout while starting `wrist_roll` from several different physical branches to confirm reset takes the short path each time.
-
-### Calibrating a non-wrapping joint
+### Calibrating a joint with sweep mode
 
 ```bash
 python -m so101_real.joint_calibrate \
