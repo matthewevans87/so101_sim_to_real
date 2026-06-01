@@ -1,4 +1,4 @@
-# Vision-Based Sim-to-Real Manipulation on Consumer Hardware
+# Vision-Based Sim-to-Real Manipulation on the SO-101
 
 ### Learning wrist-camera-only RL policies for the SO-101 arm in simulation, with a full deployment pipeline to physical hardware
 
