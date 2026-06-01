@@ -2,7 +2,6 @@ import isaaclab.sim as sim_utils
 from isaaclab.assets import RigidObjectCfg
 from isaaclab.sensors import ContactSensorCfg
 
-
 TABLE_SIZE = (2.0, 2.0, 1.0)  # (x, y, z) in meters
 
 TABLE_CFG = RigidObjectCfg(
@@ -27,7 +26,7 @@ TABLE_CFG = RigidObjectCfg(
             restitution=0.0,
         ),
         visual_material=sim_utils.PreviewSurfaceCfg(
-            diffuse_color=(0.2, 0.2, 0.2),  # dark gray table
+            diffuse_color=(0.9, 0.9, 0.9),  # white table (matches real workspace)
         ),
         activate_contact_sensors=True,
     ),

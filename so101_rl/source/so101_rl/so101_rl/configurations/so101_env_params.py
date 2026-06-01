@@ -16,7 +16,6 @@ from typing import get_type_hints
 
 import yaml
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -185,6 +184,25 @@ class JointsCfg:
 @dataclass
 class ControlCfg:
     action_scale: float
+
+
+@dataclass
+class JointCommandCfg:
+    """Shared action-processing pipeline config (must match so101_real/configs/robot.yaml).
+
+    When ``enabled`` is True the sim env applies the same EMA + delta-clamp
+    pipeline as the real robot.  Set ``enabled: false`` only for ablation.
+    """
+
+    enabled: bool
+    ema_alpha: float
+    """EMA coefficient in (0, 1].  1.0 = no smoothing; 0.7 = real default."""
+    max_delta_rad: float
+    """Maximum per-joint step size (radians).  Must match robot.yaml max_delta_rad."""
+    ema_joints: list[str] = field(default_factory=list)
+    """Joint names to apply EMA smoothing (opt-in).  Empty = no EMA for any joint."""
+    clamp_joints: list[str] = field(default_factory=list)
+    """Joint names to apply delta clamping (opt-in).  Empty = no clamping for any joint."""
 
 
 @dataclass
@@ -810,6 +828,7 @@ class So101EnvParams:
     scene: SceneCfg
     joints: JointsCfg
     control: ControlCfg
+    joint_command: JointCommandCfg
     safety: SafetyCfg
     gripper: GripperCfg
     distractors: DistractorsCfg

@@ -48,6 +48,10 @@ from pathlib import Path
 
 import yaml
 
+# Local helper for constructing the export_bundle.py command line.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _export_cmd import build_export_command  # noqa: E402
+
 # ── constants ─────────────────────────────────────────────────────────────────
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 TASK_ROOT = PROJECT_ROOT / "so101_rl"
@@ -57,6 +61,7 @@ PINS_DIR = PROJECT_ROOT / "scripts" / "pins"
 # The filename suffix is chosen to match the expected file type so tab-completion
 # and human inspection both work naturally.
 _PINS: dict = {
+    "bundle": "latest_bundle",
     "cnn_checkpoint": "cnn_checkpoint.pt",
     "checkpoint": "checkpoint.pt",
     "experiment": "experiment",
@@ -67,6 +72,7 @@ _PINS: dict = {
 # Auto-managed symlink names (not exposed as pin --<flag> targets).
 _PIN_LATEST_EXPERIMENT = "latest_experiment"
 _PIN_LATEST_PIPELINE = "latest_pipeline"
+_PIN_LATEST_BUNDLE = "latest_bundle"
 
 
 def _update_auto_pin(link_name: str, target: Path) -> None:
@@ -271,6 +277,17 @@ def stage_assets(isaac_lab_path: str, task: str) -> None:
     shutil.copytree(PROJECT_ROOT / "assets", dest, dirs_exist_ok=True)
     success(f"Assets staged to {dest}")
 
+    # Stage so101_real/configs (contains camera_intrinsics.yaml) so that
+    # camera.py can resolve it via ISAAC_LAB_WORKSPACE_PATH at runtime.
+    real_cfg_src = PROJECT_ROOT / "so101_real" / "configs"
+    if real_cfg_src.is_dir():
+        real_cfg_dest = (
+            Path(isaac_lab_path) / "workspace" / task / "so101_real" / "configs"
+        )
+        real_cfg_dest.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(real_cfg_src, real_cfg_dest, dirs_exist_ok=True)
+        success(f"so101_real/configs staged to {real_cfg_dest}")
+
 
 def stage_env_config(env_config_path: str, isaac_lab_path: str, task: str) -> Path:
     """Copy env config into Isaac Lab workspace. Returns the staged path."""
@@ -324,6 +341,9 @@ def require_isaac_lab() -> str:
 
 
 def install_task(isaac_lab_path: str) -> None:
+    # --no-build-isolation avoids the slow per-invocation step where pip spins
+    # up a temporary build environment to install setuptools. Isaac Lab's Python
+    # already has setuptools available, so isolation is unnecessary here.
     run_subprocess(
         [
             f"{isaac_lab_path}/isaaclab.sh",
@@ -331,6 +351,7 @@ def install_task(isaac_lab_path: str) -> None:
             "-m",
             "pip",
             "install",
+            "--no-build-isolation",
             "-e",
             str(TASK_ROOT / "source" / "so101_rl"),
         ]
@@ -343,6 +364,7 @@ def install_task(isaac_lab_path: str) -> None:
             "-m",
             "pip",
             "install",
+            "--no-build-isolation",
             "-e",
             str(PROJECT_ROOT),
         ]
@@ -408,6 +430,11 @@ def cmd_train(args) -> None:
         cmd += ["--cnn_checkpoint", str(args.cnn_checkpoint)]
     if args.seed is not None:
         cmd += ["--seed", str(args.seed)]
+    if getattr(args, "agent_config", None):
+        agent_cfg_path = Path(args.agent_config)
+        if not agent_cfg_path.is_absolute():
+            agent_cfg_path = PROJECT_ROOT / agent_cfg_path
+        cmd += ["--agent_config", str(agent_cfg_path.resolve())]
 
     resolve_x11(getattr(args, "display", None))
     env = get_gui_env(Path(isaac_lab_path) / "workspace" / args.task, staged_cfg)
@@ -692,39 +719,237 @@ def cmd_play(args) -> None:
 
 
 def cmd_export(args) -> None:
+    """Export a trained policy + CNN backbone to a self-contained deploy bundle."""
     isaac_lab_path = require_isaac_lab()
 
-    checkpoint = Path(args.checkpoint).resolve()
-    if not checkpoint.is_file():
-        error(f"Checkpoint not found: {checkpoint}")
+    # ── Resolve experiment directory ──────────────────────────────────────────
+    if args.experiment:
+        experiment_dir = Path(args.experiment).resolve()
+    else:
+        pin_experiment = PINS_DIR / _PIN_LATEST_EXPERIMENT
+        if pin_experiment.is_symlink():
+            experiment_dir = pin_experiment.resolve()
+            info(f"Using latest_experiment pin: {experiment_dir}")
+        else:
+            error(
+                "--experiment is required (or run a training first to set the "
+                "latest_experiment pin)."
+            )
+            sys.exit(1)
+
+    if not experiment_dir.is_dir():
+        error(f"Experiment directory not found: {experiment_dir}")
         sys.exit(1)
 
-    ckpt_root = checkpoint.parent.parent.parent
+    # ── Resolve output directory ──────────────────────────────────────────────
+    if args.output:
+        output_dir = Path(args.output).resolve()
+    else:
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        output_dir = experiment_dir / f"deploy_bundle_{timestamp}"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # ── Stage env config ──────────────────────────────────────────────────────
+    env_cfg_path = experiment_dir / "env_config.yaml"
     staged_cfg = None
-    env_cfg = ckpt_root / "env_config.yaml"
-    if env_cfg.is_file():
-        staged_cfg = stage_env_config(str(env_cfg), isaac_lab_path, args.task)
+    if env_cfg_path.is_file():
+        staged_cfg = stage_env_config(str(env_cfg_path), isaac_lab_path, args.task)
 
     check_gpu()
     stage_assets(isaac_lab_path, args.task)
     install_task(isaac_lab_path)
 
-    cmd = [
-        f"{isaac_lab_path}/isaaclab.sh",
-        "-p",
-        str(TASK_ROOT / "scripts" / "skrl" / "export.py"),
-        "--task",
-        args.task,
-        "--checkpoint",
-        str(checkpoint),
-        f"hydra.run.dir={ckpt_root}/hydra_export",
-    ]
-    if args.cameras:
-        cmd += ["--enable_cameras"]
+    cmd = build_export_command(
+        isaac_lab_path=isaac_lab_path,
+        task_root=TASK_ROOT,
+        task=args.task,
+        experiment_path=experiment_dir,
+        output_dir=output_dir,
+        torchscript=getattr(args, "torchscript", False),
+    )
 
     resolve_x11(getattr(args, "display", None))
     env = get_gui_env(Path(isaac_lab_path) / "workspace" / args.task, staged_cfg)
     env.update({k: os.environ[k] for k in ("DISPLAY", "XAUTHORITY") if k in os.environ})
+    _log_x11_status()
+    rc = run_subprocess(cmd, env=env)
+    if rc == 0:
+        manifest_check = output_dir / "manifest.json"
+        if manifest_check.is_file():
+            _update_auto_pin(_PIN_LATEST_BUNDLE, output_dir)
+        else:
+            error(
+                "export_bundle.py exited 0 but manifest.json was not created. "
+                "Check the log for errors."
+            )
+            sys.exit(1)
+
+
+def cmd_deploy(args) -> None:
+    """Run real-robot inference from a deploy bundle (no Isaac Lab required)."""
+    # Resolve bundle path
+    if args.bundle:
+        bundle_path = Path(args.bundle).resolve()
+    else:
+        pin_bundle = PINS_DIR / _PIN_LATEST_BUNDLE
+        if pin_bundle.is_symlink():
+            bundle_path = pin_bundle.resolve()
+            info(f"Using latest_bundle pin: {bundle_path}")
+        else:
+            error(
+                "--bundle is required (or run an export first to set the "
+                "latest_bundle pin)."
+            )
+            sys.exit(1)
+
+    if not bundle_path.is_dir():
+        error(f"Bundle directory not found: {bundle_path}")
+        sys.exit(1)
+
+    if not args.robot_config:
+        error("--robot-config is required.")
+        sys.exit(1)
+
+    robot_config = Path(args.robot_config).resolve()
+    if not robot_config.is_file():
+        error(f"Robot config not found: {robot_config}")
+        sys.exit(1)
+
+    cmd = [
+        "python",
+        "-m",
+        "so101_real",
+        "run",
+        "--bundle",
+        str(bundle_path),
+        "--robot-config",
+        str(robot_config),
+    ]
+    if getattr(args, "episodes", None):
+        cmd += ["--episodes", str(args.episodes)]
+    if getattr(args, "seed", None) is not None:
+        cmd += ["--seed", str(args.seed)]
+    if getattr(args, "overlay", False):
+        cmd.append("--overlay")
+    if getattr(args, "record", False):
+        cmd.append("--record")
+    if getattr(args, "dry_run", False):
+        cmd.append("--dry-run")
+    if getattr(args, "ros", False):
+        cmd.append("--ros")
+
+    resolve_x11(getattr(args, "display", None))
+    env = os.environ.copy()
+    env.update({k: os.environ[k] for k in ("DISPLAY", "XAUTHORITY") if k in os.environ})
+    # Force unbuffered output so prints from so101_real appear in real time
+    # (subprocess stdout is a PIPE, which puts Python in fully-buffered mode).
+    env["PYTHONUNBUFFERED"] = "1"
+    # Inject ROS2 Jazzy environment when --ros is requested so rclpy can init.
+    # Use the deploy variant: only system PYTHONPATH, no Isaac Sim bundled libs.
+    if getattr(args, "ros", False):
+        _inject_ros2_env_deploy(env)
+    run_subprocess(cmd, env=env)
+
+
+def _inject_ros2_env(env: dict, distro: str = "jazzy") -> None:
+    """Inject ROS2 env vars for an **Isaac Sim** process (digital-twin).
+
+    Sets the bundled jazzy libs (inside isaacsim.ros2.bridge) on
+    LD_LIBRARY_PATH so that the OmniGraph C++ ROS2 nodes can link at
+    runtime, plus system site-packages for Python rclpy access.
+    """
+    env["ROS_DISTRO"] = distro
+    env["RMW_IMPLEMENTATION"] = "rmw_fastrtps_cpp"
+    # Bundled jazzy libs inside the isaacsim.ros2.bridge extension.
+    # These are what Isaac Sim's OmniGraph ROS2 nodes link against at runtime.
+    # Must be on LD_LIBRARY_PATH before the process starts.
+    _EXT_BASE = "/opt/isaac-sim/isaac-sim-5.1.0/exts/isaacsim.ros2.bridge"
+    bundled_lib = f"{_EXT_BASE}/{distro}/lib"
+    existing_ld = env.get("LD_LIBRARY_PATH", "")
+    env["LD_LIBRARY_PATH"] = (
+        f"{bundled_lib}:{existing_ld}" if existing_ld else bundled_lib
+    )
+    # Also expose system ROS2 site-packages so Python rclpy can init.
+    ros_python = f"/opt/ros/{distro}/lib/python3.12/site-packages"
+    existing_py = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = f"{ros_python}:{existing_py}" if existing_py else ros_python
+
+
+def _inject_ros2_env_deploy(env: dict, distro: str = "jazzy") -> None:
+    """Inject ROS2 env vars for the **lerobot** subprocess (deploy --ros).
+
+    Only sets ROS_DISTRO and the system site-packages path so that rclpy
+    and sensor_msgs are importable.  Does NOT touch LD_LIBRARY_PATH —
+    the Isaac Sim bundled libs must not be loaded into the lerobot process.
+    """
+    env["ROS_DISTRO"] = distro
+    ros_python = f"/opt/ros/{distro}/lib/python3.12/site-packages"
+    existing_py = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = f"{ros_python}:{existing_py}" if existing_py else ros_python
+
+
+def cmd_stream(args) -> None:
+    """Read real robot joints and publish to ROS2 /so101/joint_states.
+
+    Use alongside ``run.py digital-twin`` to mirror the real arm in Isaac Sim
+    without running a policy.  Runs in the lerobot conda env so no Isaac Lab
+    is required.
+    """
+    if not args.robot_config:
+        error("--robot-config is required.")
+        sys.exit(1)
+
+    robot_config = Path(args.robot_config).resolve()
+    if not robot_config.is_file():
+        error(f"Robot config not found: {robot_config}")
+        sys.exit(1)
+
+    cmd = [
+        "python",
+        "-m",
+        "so101_real",
+        "stream",
+        "--robot-config",
+        str(robot_config),
+        "--hz",
+        str(args.hz),
+    ]
+    if args.no_torque:
+        cmd.append("--no-torque")
+
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
+    _inject_ros2_env_deploy(env)
+    run_subprocess(cmd, env=env)
+
+
+def cmd_digital_twin(args) -> None:
+    """Launch the Isaac Sim digital twin viewer.
+
+    Subscribes to /so101/joint_states and mirrors positions to the SO-101
+    articulation in a live Isaac Sim viewport.  Run this alongside
+    ``run.py deploy --ros ...``.
+    """
+    isaac_lab_path = require_isaac_lab()
+    script = PROJECT_ROOT / "so101_rl" / "scripts" / "digital_twin.py"
+    if not script.is_file():
+        error(f"digital_twin.py not found: {script}")
+        sys.exit(1)
+
+    cmd = [
+        f"{isaac_lab_path}/isaaclab.sh",
+        "-p",
+        str(script),
+    ]
+    if getattr(args, "topic", None):
+        cmd += ["--topic", args.topic]
+    if getattr(args, "display", None) is not None:
+        cmd += ["--display", str(args.display)]
+
+    resolve_x11(getattr(args, "display", None))
+    env = get_gui_env(PROJECT_ROOT)
+    env.update({k: os.environ[k] for k in ("DISPLAY", "XAUTHORITY") if k in os.environ})
+    _inject_ros2_env(env)
     _log_x11_status()
     run_subprocess(cmd, env=env)
 
@@ -1041,6 +1266,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--seed", type=int, metavar="N", help="RNG seed")
     p.add_argument("--display", type=int, metavar="N", help="X display socket number")
     p.add_argument(
+        "--agent-config",
+        metavar="PATH",
+        dest="agent_config",
+        help="Agent config YAML deep-merged over the task defaults (e.g. override trainer.timesteps)",
+    )
+    p.add_argument(
         "--output",
         metavar="PATH",
         help="Base output dir; artifacts saved to <output>/<timestamp>/ (default: artifacts/)",
@@ -1219,12 +1450,118 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_play)
 
     # ── export ────────────────────────────────────────────────────────────────
-    p = sub.add_parser("export", help="Export a trained agent")
+    p = sub.add_parser(
+        "export",
+        help="Export a trained agent to a self-contained deploy bundle",
+    )
     p.add_argument("--task", required=True, metavar="TASK")
-    p.add_argument("--checkpoint", required=True, metavar="PATH")
-    p.add_argument("--cameras", action="store_true")
+    p.add_argument(
+        "--experiment",
+        metavar="PATH",
+        help="Training experiment directory (default: latest_experiment pin)",
+    )
+    p.add_argument(
+        "--output",
+        metavar="PATH",
+        help="Output directory for the deploy bundle (default: <experiment>/deploy_bundle_<ts>)",
+    )
+    p.add_argument(
+        "--torchscript",
+        action="store_true",
+        help="Also trace and save a TorchScript combined model",
+    )
     p.add_argument("--display", type=int, metavar="N")
     p.set_defaults(func=cmd_export)
+
+    # ── deploy ────────────────────────────────────────────────────────────────
+    p = sub.add_parser(
+        "deploy",
+        help="Run real-robot inference from a deploy bundle (no Isaac Lab required)",
+    )
+    p.add_argument(
+        "--bundle",
+        metavar="PATH",
+        help="Deploy bundle directory (default: latest_bundle pin)",
+    )
+    p.add_argument(
+        "--robot-config",
+        metavar="PATH",
+        required=True,
+        dest="robot_config",
+        help="Robot config YAML (so101_real/configs/robot.yaml template)",
+    )
+    p.add_argument(
+        "--episodes", type=int, metavar="N", help="Number of episodes to run"
+    )
+    p.add_argument("--seed", type=int, metavar="SEED")
+    p.add_argument("--overlay", action="store_true", help="Show live OpenCV overlay")
+    p.add_argument("--record", action="store_true", help="Record episodes to NPZ files")
+    p.add_argument(
+        "--dry-run",
+        action="store_true",
+        dest="dry_run",
+        help="Validate bundle and robot config without moving the robot",
+    )
+    p.add_argument(
+        "--ros",
+        action="store_true",
+        dest="ros",
+        help="Publish measured joint states to /so101/joint_states (ROS2) for the digital twin",
+    )
+    p.add_argument(
+        "--display",
+        type=int,
+        metavar="N",
+        default=None,
+        help="X11 display number (e.g. 0 → DISPLAY=:0). Auto-discovered if omitted.",
+    )
+    p.set_defaults(func=cmd_deploy)
+
+    # ── digital-twin ───────────────────────────────────────────────────────────────────────────
+    p = sub.add_parser(
+        "digital-twin",
+        help="Launch Isaac Sim viewer mirroring real robot joints (ROS2)",
+    )
+    p.add_argument(
+        "--topic",
+        default="/so101/joint_states",
+        metavar="TOPIC",
+        help="ROS2 JointState topic to subscribe to (default: /so101/joint_states)",
+    )
+    p.add_argument(
+        "--display",
+        type=int,
+        metavar="N",
+        default=None,
+        help="X11 display number. Auto-discovered if omitted.",
+    )
+    p.set_defaults(func=cmd_digital_twin)
+
+    # ── stream ────────────────────────────────────────────────────────────────
+    p = sub.add_parser(
+        "stream",
+        help="Read real robot joints and publish to ROS2 (for digital twin, no policy)",
+    )
+    p.add_argument(
+        "--robot-config",
+        required=True,
+        dest="robot_config",
+        metavar="PATH",
+        help="Path to robot.yaml",
+    )
+    p.add_argument(
+        "--hz",
+        type=float,
+        default=30.0,
+        help="Publishing rate in Hz (default: 30)",
+    )
+    p.add_argument(
+        "--no-torque",
+        action="store_true",
+        dest="no_torque",
+        help="Disable motor torque so you can move the arm freely while streaming",
+    )
+    p.set_defaults(func=cmd_stream)
 
     # ── install ───────────────────────────────────────────────────────────────
     p = sub.add_parser("install", help="Install the task package into Isaac Lab")
@@ -1289,14 +1626,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--from",
         metavar="STEP",
         dest="from_step",
-        choices=["train", "collect", "curate", "train-cnn"],
+        choices=["train", "collect", "curate", "train-cnn", "export"],
         help="Start at this step (default: train)",
     )
     p.add_argument(
         "--to",
         metavar="STEP",
         dest="to_step",
-        choices=["train", "collect", "curate", "train-cnn"],
+        choices=["train", "collect", "curate", "train-cnn", "export"],
         help="Stop after this step, inclusive (default: train-cnn)",
     )
     p.add_argument(
@@ -1354,6 +1691,12 @@ def build_parser() -> argparse.ArgumentParser:
             "List all current pins:\n"
             "  ./scripts/run.py pin --list\n"
         ),
+    )
+    p.add_argument(
+        "--bundle",
+        metavar="PATH",
+        dest="bundle",
+        help="Pin a deploy bundle directory  →  scripts/pins/latest_bundle",
     )
     p.add_argument(
         "--cnn-checkpoint",

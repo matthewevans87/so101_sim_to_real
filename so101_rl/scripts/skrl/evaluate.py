@@ -255,12 +255,26 @@ else:
 
 
 def find_checkpoint_and_task(experiment_path: Path) -> tuple[Path, str]:
-    """Find the checkpoint file from the experiment directory."""
-    checkpoint_path = (
-        experiment_path / "skrl" / "agent" / "checkpoints" / "best_agent.pt"
-    )
-    if not checkpoint_path.exists():
-        raise FileNotFoundError(f"Checkpoint not found at {checkpoint_path}")
+    """Find the checkpoint for legacy experiments (no run_manifest.json).
+
+    Returns the highest-numbered ``agent_<N>.pt`` — the last checkpoint
+    written by training.  ``best_agent.pt`` is intentionally NOT used:
+    SKRL selects it by an entropy / KL metric that does not correlate with
+    task success rate.
+    """
+    ckpt_dir = experiment_path / "skrl" / "agent" / "checkpoints"
+    step_ckpts: list[tuple[int, Path]] = []
+    for p in ckpt_dir.glob("agent_*.pt"):
+        try:
+            step_ckpts.append((int(p.stem.split("_", 1)[1]), p))
+        except (ValueError, IndexError):
+            continue
+    if not step_ckpts:
+        raise FileNotFoundError(
+            f"No 'agent_<N>.pt' checkpoints found in {ckpt_dir}.\n"
+            "Expected at least one checkpoint from a completed training run."
+        )
+    _, checkpoint_path = max(step_ckpts, key=lambda t: t[0])
     return checkpoint_path, ""
 
 
