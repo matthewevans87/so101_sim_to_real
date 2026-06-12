@@ -239,6 +239,20 @@ conda activate lerobot
 
 $ISAAC_LAB_PATH/isaaclab.sh -p so101_rl/scripts/tune_camera_pose.py \
     --robot-config so101_real/configs/robot.yaml
+
+# ── Three-feed sim-real alignment + auto-fit ────────────────────────────────
+# Extends tune_camera_pose with: (a) a third feed showing the sim render
+# AFTER the deploy image pipeline (i.e. the exact view the policy consumes),
+# (b) live MAD/NCC diff metrics between real and sim-post-pipeline, and
+# (c) an `o` hotkey that runs an ORB-based Nelder-Mead fit of the camera
+# mount transform against the real reference frame. Press `s` to write the
+# converged transform out as Python literals (paste into camera.py).
+
+$ISAAC_LAB_PATH/isaaclab.sh -p so101_rl/scripts/align_camera.py \
+    --no-robot \
+    --joint-pose so101_real/configs/calibration_pose.yaml \
+    --real-image so101_real/calibration/captures/live_frame.png \
+    --bundle scripts/pins/latest_bundle
 ```
 
 All commands that write output accept `--output PATH` as a base directory. Outputs are always written to `<output>/<timestamp>/` (or `<output>/pipeline_<timestamp>/`, `<output>/sweep_<name>_<timestamp>/`), defaulting to `artifacts/`.

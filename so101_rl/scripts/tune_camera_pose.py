@@ -239,21 +239,37 @@ from isaaclab.sim import SimulationContext
 from isaaclab.utils import configclass
 from pxr import Gf, UsdGeom
 
-# Ensure ISAAC_LAB_WORKSPACE_PATH points to the project root so that
-# camera.py can find camera_intrinsics.yaml.  When running via run.py the
-# staging step already sets this; when running this script directly the env
-# var may be unset (defaulting to /workspace inside camera.py, which is wrong).
+# Ensure ISAAC_LAB_WORKSPACE_PATH points to the project root.
 _project_root = Path(__file__).resolve().parents[2]
 if "ISAAC_LAB_WORKSPACE_PATH" not in os.environ:
     os.environ["ISAAC_LAB_WORKSPACE_PATH"] = str(_project_root)
 
 # Project-local imports (available after AppLauncher because so101_rl is installed)
 from so101_rl.configurations.so101 import SO101_CFG
-from so101_rl.configurations.camera import TILED_CAMERA_CFG
+from so101_rl.configurations.camera import build_gripper_tiled_camera_cfg
+from so101_rl.helpers.opencv_to_isaac_camera import load_intrinsics
+from so101_rl.configurations.so101_env_params import So101EnvParams
 
 # cv2 is available in this env but only for image I/O — imshow/waitKey do not work
 # because Isaac Sim ships headless OpenCV (no GTK).  Display is handled via ffplay.
 import cv2
+
+# Load intrinsics from the env YAML (SO101_ENV_CONFIG must be set by the caller).
+_env_config_path = os.environ.get("SO101_ENV_CONFIG")
+if not _env_config_path:
+    raise RuntimeError(
+        "SO101_ENV_CONFIG is not set. "
+        "Pass --env_config to run.py or export SO101_ENV_CONFIG before running this script."
+    )
+_tune_env_params = So101EnvParams.load(_env_config_path)
+_tune_cam_sensor = _tune_env_params.sensors.camera
+_tune_intrinsics = load_intrinsics(
+    Path(os.environ.get("ISAAC_LAB_WORKSPACE_PATH", "/workspace"))
+    / _tune_cam_sensor.intrinsics_path
+)
+_TILED_CAMERA_CFG = build_gripper_tiled_camera_cfg(
+    _tune_intrinsics, args_cli.render_height, args_cli.render_width
+)
 
 # ---------------------------------------------------------------------------
 # Joint name order expected by the sim articulation and the real robot
@@ -278,11 +294,7 @@ class TuneCameraSceneCfg(InteractiveSceneCfg):
 
     robot: ArticulationCfg = SO101_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")  # type: ignore
 
-    camera: TiledCameraCfg = TILED_CAMERA_CFG.replace(  # type: ignore
-        # Keep the {ENV_REGEX_NS} prefix from TILED_CAMERA_CFG so the cloner
-        # resolves to /World/envs/env_0/Robot/.../gripper_camera for num_envs=1.
-        height=args_cli.render_height,
-        width=args_cli.render_width,
+    camera: TiledCameraCfg = _TILED_CAMERA_CFG.replace(  # type: ignore
         data_types=["rgb"],
     )
 

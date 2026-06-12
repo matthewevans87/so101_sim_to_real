@@ -59,7 +59,11 @@ def build_vision_encoder(
             backbone_cfg=backbone_cfg,
             device=device,
         )
-        return CnnSpatialSoftmaxFeatureExtractor(model=cnn_model, device=device)
+        return CnnSpatialSoftmaxFeatureExtractor(
+            model=cnn_model,
+            device=device,
+            target_size=(bundle.image_height, bundle.image_width),
+        )
 
     raise ValueError(
         f"Unknown vision_encoder.type: {encoder_type!r}.\n"

@@ -133,8 +133,20 @@ class DeployBundle:
         """Joint names that receive delta clamping."""
         return list(self.manifest.get("clamp_joints") or [])
 
+    @property
+    def camera_intrinsics_path(self) -> Path | None:
+        """Absolute path to the bundled ``camera_intrinsics.yaml``, or ``None``.
 
-def load_bundle(bundle_dir: str | Path) -> DeployBundle:
+        Present when the policy was trained with ``model: opencv_pinhole``
+        (i.e. ``export_bundle.py`` copied the intrinsics file into the bundle).
+        ``None`` for bundles exported before this field was added or when
+        ``model: pinhole`` was used.
+        """
+        f = self.manifest.get("camera_intrinsics_file")
+        return (self.bundle_dir / f) if f else None
+
+
+def load_bundle(bundle_dir: str | Path) -> "DeployBundle":
     """Load and validate a deploy bundle directory.
 
     Raises

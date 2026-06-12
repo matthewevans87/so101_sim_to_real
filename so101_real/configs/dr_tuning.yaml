@@ -1,0 +1,50 @@
+# DR Augmentation Tuning Config
+# ──────────────────────────────────────────────────────────────────────────────
+# Used by align_camera.py (--dr-config flag) to insert domain-randomisation
+# augmentation steps into the sim render pipeline so the "sim post+DR" panel
+# shows exactly what the policy sees during training.
+#
+# Workflow:
+#   1. Launch align_camera.py with:
+#        --dr-config so101_real/configs/dr_tuning.yaml
+#   2. The "sim post+DR" panel (rightmost) applies these augmentations live.
+#   3. Edit this file and save — the panel reloads automatically within ~0.5 s.
+#   4. Press 'a' to toggle augmentation on/off for instant A/B comparison.
+#   5. When satisfied, copy the tuned values into:
+#        configs/policy_train.yaml → domain_randomization.camera.feed
+#
+# Steps with enabled: false are skipped entirely.
+# Values below match the policy_train_frozen_resnet18.yaml defaults.
+# ──────────────────────────────────────────────────────────────────────────────
+
+steps:
+  # Simulate sensor readout noise.
+  - type: GaussianNoise
+    enabled: false
+    std_range: [0.005, 0.015]
+
+  # Random global brightness multiplier.
+  - type: Brightness
+    enabled: false
+    range: [0.85, 1.15]
+
+  # Random contrast adjustment around the per-image mean.
+  - type: Contrast
+    enabled: false
+    range: [0.85, 1.15]
+
+  # Downsample + upsample to mimic low-quality sensor texture loss.
+  - type: CheapWebcamEffect
+    enabled: false
+
+
+  # Directional motion blur (horizontal, vertical, or diagonal).
+  - type: MotionBlur
+    enabled: false
+    kernel_size: 5
+    strength_range: [0.05, 0.15]
+
+  # Simulate JPEG compression block artefacts.
+  - type: JpegCompression
+    enabled: false
+    quality_range: [60, 90]

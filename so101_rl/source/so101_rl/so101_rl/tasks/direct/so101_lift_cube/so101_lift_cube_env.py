@@ -18,15 +18,12 @@ from so101.utils.image_processing import (
     CameraBrightnessPipelineStep,
     CameraContrastPipelineStep,
     CheapWebcamEffectPipelineStep,
-    ClampPipelineStep,
     GaussianBlurPipelineStep,
     GaussianNoisePipelineStep,
-    ImageNetNormalizationPipelineStep,
     ImagePipeline,
     ImagePipelineStep,
     JpegCompressionPipelineStep,
     MotionBlurPipelineStep,
-    ResizePipelineStep,
     Uint8ToFloatCHWPipelineStep,
 )
 from so101_rl.helpers.visual_markers import (
@@ -45,10 +42,12 @@ from torchvision.utils import save_image
 from so101_rl.configurations.camera import (
     CAMERA_ROTATION_QUAT_WXYZ,
     CAMERA_TRANSLATE_VEC,
-    CAMERA_POST_SPAWN_USD_ATTRS,
 )
-from so101_rl.helpers.opencv_to_isaac_camera import apply_post_spawn_attrs
-from .so101_lift_cube_env_cfg import So101LiftCubeCfg
+from so101_rl.helpers.opencv_to_isaac_camera import (
+    apply_opencv_pinhole_distortion,
+    load_intrinsics,
+)
+from .so101_lift_cube_env_cfg import So101LiftCubeCfg, SO101_ENV_PARAMS as _ENV_PARAMS
 from so101_rl.viz.vision_debug import VisionDebugLogger
 from so101_rl.env_pipeline import (
     DRContext,
@@ -100,14 +99,20 @@ class So101LiftCube(DirectRLEnv):
 
         super().__init__(cfg, render_mode, **kwargs)
 
-        # Apply post-spawn USD attributes for fisheyeRadTanThinPrism camera model.
-        # These parameters (openCVFx/Fy, tangential p0/p1, thin-prism s0-s3) are not
-        # exposed in FisheyeCameraCfg and must be set directly on each camera prim.
+        # Apply OpenCV pinhole lens distortion (OmniLensDistortionOpenCvPinholeAPI schema)
+        # when the camera model is "opencv_pinhole".  Intrinsics come from the env YAML
+        # (sensors.camera.model / intrinsics_path) — never from a hardcoded fallback.
         # self.camera._view.prim_paths is populated by TiledCamera._initialize_impl(),
         # which runs via scene.update() inside super().__init__().
-        for prim_path in self.camera._view.prim_paths:
-            prim = self.camera.stage.GetPrimAtPath(prim_path)
-            apply_post_spawn_attrs(prim, CAMERA_POST_SPAWN_USD_ATTRS)
+        _camera_cfg = _ENV_PARAMS.sensors.camera
+        if _camera_cfg.model == "opencv_pinhole":
+            import os as _os
+            from pathlib import Path as _Path
+            _workspace = _os.environ.get("ISAAC_LAB_WORKSPACE_PATH", "/workspace")
+            _intrinsics = load_intrinsics(_Path(_workspace) / _camera_cfg.intrinsics_path)
+            for prim_path in self.camera._view.prim_paths:
+                prim = self.camera.stage.GetPrimAtPath(prim_path)
+                apply_opencv_pinhole_distortion(prim, _intrinsics)
 
         # Get handles to data views
         self.joint_pos = self.robot.data.joint_pos
@@ -373,11 +378,6 @@ class So101LiftCube(DirectRLEnv):
             self.vision_feature_extractor = ResNet18SpatialSoftmaxFeatureExtractor(
                 device=self.device
             )
-            if self.cfg.domain_randomization.camera.feed.preshape_image.enabled:
-                # 224x224 matches ImageNet pretraining resolution for best feature quality
-                _image_pipeline_steps.insert(1, ResizePipelineStep((224, 224)))
-            _image_pipeline_steps.append(ImageNetNormalizationPipelineStep())
-            _image_pipeline_steps.append(ClampPipelineStep())
         elif _vision_type == "frozen_cnn":
             ve = self.cfg.vision_encoder
             if ve.backbone is None:
@@ -385,10 +385,6 @@ class So101LiftCube(DirectRLEnv):
                     "vision_encoder.backbone must be set when "
                     "vision_encoder.type == 'frozen_cnn'."
                 )
-            _image_pipeline_steps.insert(
-                1,
-                ResizePipelineStep((ve.image_height, ve.image_width)),
-            )
             backbone_cfg = {
                 "in_channels": 3,
                 "channels": list(ve.backbone.channels),
@@ -406,9 +402,10 @@ class So101LiftCube(DirectRLEnv):
             else:
                 _model = MultiTaskCnn(backbone_cfg=backbone_cfg, heads_cfg=None)
             self.vision_feature_extractor = CnnSpatialSoftmaxFeatureExtractor(
-                model=_model, device=self.device
+                model=_model,
+                device=self.device,
+                target_size=(ve.image_height, ve.image_width),
             )
-            _image_pipeline_steps.append(ClampPipelineStep())
         else:
             raise ValueError(
                 f"Unknown vision_encoder.type: {_vision_type!r}. "

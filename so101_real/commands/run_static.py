@@ -14,7 +14,7 @@ def cmd_run_static(args) -> None:
     from ..policies import StaticPositionPolicy
     from ..robot import RobotConfig, So101Robot
     from ..ros_publisher import RosPublisher
-    from ..units import JointUnitConverter, JointParser
+    from so101.utils.units import JointUnitConverter, JointParser
 
     raw_arg = args.joints.strip().strip("\"'")
     try:

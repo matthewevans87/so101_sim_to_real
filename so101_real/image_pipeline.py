@@ -11,10 +11,7 @@ from __future__ import annotations
 import yaml
 
 from so101.utils.image_processing.image_pipeline import (
-    ClampPipelineStep,
-    ImageNetNormalizationPipelineStep,
     ImagePipeline,
-    ResizePipelineStep,
     Uint8ToFloatCHWPipelineStep,
 )
 
@@ -29,29 +26,8 @@ def _make_uint8_to_float_chw(params: dict) -> Uint8ToFloatCHWPipelineStep:
     return Uint8ToFloatCHWPipelineStep()
 
 
-def _make_resize(params: dict) -> ResizePipelineStep:
-    if "height" not in params or "width" not in params:
-        raise ValueError(
-            "Resize pipeline step requires 'height' and 'width' parameters."
-        )
-    return ResizePipelineStep((int(params["height"]), int(params["width"])))
-
-
-def _make_imagenet_normalization(params: dict) -> ImageNetNormalizationPipelineStep:
-    return ImageNetNormalizationPipelineStep()
-
-
-def _make_clamp(params: dict) -> ClampPipelineStep:
-    lo = float(params.get("min", 0.0))
-    hi = float(params.get("max", 1.0))
-    return ClampPipelineStep(lo, hi)
-
-
 _STEP_REGISTRY: dict[str, callable] = {
     "Uint8ToFloatCHW": _make_uint8_to_float_chw,
-    "Resize": _make_resize,
-    "ImageNetNormalization": _make_imagenet_normalization,
-    "Clamp": _make_clamp,
 }
 
 

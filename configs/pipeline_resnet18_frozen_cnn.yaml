@@ -1,0 +1,90 @@
+# Pipeline configuration for so101_sim_to_real
+#
+# Usage:
+#   ./scripts/run.py pipeline --config configs/pipeline_template.yaml
+#   ./scripts/run.py pipeline --config configs/pipeline_template.yaml --from collect --experiment artifacts/2026-03-26_10-00-00
+#   ./scripts/run.py pipeline --config configs/pipeline_template.yaml --dry-run
+#
+# All required fields are marked below. Fields left null will raise an error
+# at startup — before any step runs — per the project's explicit-config policy.
+#
+# The pipeline chains five steps:
+#   1. train      → artifacts/pipeline_TIMESTAMP/01_train/
+#   2. collect    → artifacts/pipeline_TIMESTAMP/02_collect/
+#   3. curate     → artifacts/pipeline_TIMESTAMP/03_curate/
+#   4. train-cnn  → artifacts/pipeline_TIMESTAMP/04_train_cnn/
+#   5. export     → artifacts/pipeline_TIMESTAMP/05_export/
+#
+# Each step's output dir is automatically wired as the next step's input.
+
+# ── Shared parameters ─────────────────────────────────────────────────────────
+
+# [required] RL task name registered with Isaac Lab
+task: So101-LiftCube-v0
+
+# # [required] Environment config YAML for the train step
+env_config: configs/policy_train_frozen_resnet18.yaml
+
+# [required] RNG seed — used by collect, curate, and train-cnn for reproducibility.
+# Must be an explicit integer; null is rejected at validation time.
+seed: 42
+
+# Run Isaac Sim in headless mode (no GUI window). Recommended for server runs.
+headless: false
+
+# Enable Isaac cameras. Required for the collect step to capture RGB frames.
+cameras: true
+
+# Override num_envs from the env_config YAML.
+# null means inherit the value from env_config (no override).
+envs: null
+
+# ── collect parameters ────────────────────────────────────────────────────────
+
+collect:
+  # [required] Collect one telemetry sample every N environment steps per env.
+  sample_interval: 8
+
+  # [required] Stop collection after N complete episodes across all envs.
+  episodes: 10000
+
+  # Number of samples to buffer before flushing an NPZ shard to disk.
+  # null uses the collect_telemetry.py default (2048).
+  shard_size: 2048
+
+  # Override num_envs for the collect step only.
+  # More envs → faster collection. null inherits the value from env_config.
+  envs: 128
+
+# ── CNN parameters (curate + train-cnn) ──────────────────────────────────────
+
+cnn:
+  # [required] CNN pretrain config YAML — governs backbone architecture,
+  # curation hyperparameters, training schedule, and loss weights.
+  config: configs/cnn_pretrain.yaml
+
+  # PyTorch device for the train-cnn step.
+  device: cuda:0
+
+  # Conda environment name to use for curate and train-cnn.
+  # null means run with the current Python interpreter (i.e. system or active venv).
+  conda_env: null
+
+  # Explicit Python executable path for curate and train-cnn.
+  # Takes precedence over conda_env if both are set.
+  # null means use conda_env or the current interpreter.
+  python: null
+
+# ── export parameters (deploy bundle) ────────────────────────────────────────
+#
+# Step 5 — export_bundle.py — runs after train-cnn and produces a
+# self-contained deploy bundle under:
+#   artifacts/pipeline_TIMESTAMP/05_export/
+#
+# The bundle includes: policy.pt, manifest.json, deploy_image_pipeline.yaml,
+# joint_config.yaml, (cnn_backbone.pt if frozen_cnn), bundle_provenance.json.
+
+export:
+  # Also save a TorchScript trace of the policy MLP (policy.ts.pt).
+  # Optional — useful for deployment targets without full PyTorch installed.
+  torchscript: false

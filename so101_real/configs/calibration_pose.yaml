@@ -1,0 +1,44 @@
+# Calibration joint pose for sim-real wrist-camera alignment.
+#
+# Used by ``so101_rl/scripts/align_camera.py --joint-pose`` and as the
+# stationary pose for the corresponding ``so101_real stream`` session.
+#
+# unit: declares the unit for all joint values below.
+# Valid values: rad (canonical radians), deg (canonical degrees),
+#               norm (normalised [-1,1] per joint_limits in robot.yaml),
+#               lrad (LeRobot radians), ldeg (LeRobot degrees).
+# norm / lrad / ldeg require --robot-config to be supplied to align_camera.py.
+#
+# Mirrors the reset pose in so101_real/configs/robot.yaml (0, 0, -25°, 65°,
+# -90°, 0°) but is kept separate so we can tune it for the calibration scene
+# without affecting deploy-time behaviour.
+#
+# Workflow
+# --------
+# 1. Power off torque on the follower:
+#       ./scripts/run.py stream --robot-config so101_real/configs/robot.yaml --no-torque
+# 2. Pose the arm by hand to roughly match these values (the digital twin
+#    viewer makes this much easier — run alongside).
+# 3. Place the cube in the closed gripper.
+# 4. Capture the reference real frame:
+#       ffmpeg -f v4l2 -video_size 1920x1080 -i /dev/video0 -frames:v 1 \
+#              -update 1 so101_real/calibration/captures/live_frame.png -y
+# 5. Run the alignment tool:
+#       isaaclab.sh -p so101_rl/scripts/align_camera.py \
+#         --no-robot \
+#         --joint-pose so101_real/configs/calibration_pose.yaml \
+#         --real-image so101_real/calibration/captures/live_frame.png
+
+unit: norm
+
+# Values captured from the real robot via:
+#   python -m so101_real probe --robot-config so101_real/configs/robot.yaml --unit norm
+# This pose closely mirrors the training reset pose (elbow -25°, wrist_flex +65°,
+# wrist_roll -90°) which is known to place the gripper above the table surface in sim.
+
+shoulder_pan:  -0.02144
+shoulder_lift:  0.04071
+elbow_flex:     0.00522
+wrist_flex:     0.02207
+wrist_roll:    -0.00872
+gripper:       -0.01489

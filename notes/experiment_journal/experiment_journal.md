@@ -643,12 +643,12 @@ sweep's `eval` block (100 episodes requested → 128 actual at 64 envs).
 
 ### Headline numbers (old → new)
 
-| exp     | success_rate     | lift_rate        | mean_reward         | mean_episode_length |
-|---------|------------------|------------------|---------------------|---------------------|
-| exp_001 | 60.9% → **71.1%** | 64.8% → **75.8%** | 2772 → 2785          | 121.6 → 122.6        |
-| exp_002 | 57.8% → 55.5%    | 70.3% → 68.8%    | 2587 → 2375          | 109.6 → 102.9        |
-| exp_003 | 58.6% → 62.5%    | 65.6% → 68.8%    | 2728 → 2649          | 157.2 → 149.8        |
-| exp_004 | 43.8% → **52.3%** | 54.7% → **62.5%** | 2616 → 2585          | 156.9 → 169.3        |
+| exp     | success_rate      | lift_rate         | mean_reward | mean_episode_length |
+| ------- | ----------------- | ----------------- | ----------- | ------------------- |
+| exp_001 | 60.9% → **71.1%** | 64.8% → **75.8%** | 2772 → 2785 | 121.6 → 122.6       |
+| exp_002 | 57.8% → 55.5%     | 70.3% → 68.8%     | 2587 → 2375 | 109.6 → 102.9       |
+| exp_003 | 58.6% → 62.5%     | 65.6% → 68.8%     | 2728 → 2649 | 157.2 → 149.8       |
+| exp_004 | 43.8% → **52.3%** | 54.7% → **62.5%** | 2616 → 2585 | 156.9 → 169.3       |
 
 `success_rate` shifts of >10pp on exp_001 and >8pp on exp_004 are flagged. None
 of these are within run-to-run noise for a single 128-episode pass; they
@@ -676,7 +676,7 @@ on the canonical `termination_pipeline.success_condition_log_name`
 The new primary distributions are coherent and sum to 100%:
 
 | exp     | success_termination_id | static (success) | cube_out_of_range | safety_touch_table | time_out |
-|---------|------------------------|------------------|-------------------|--------------------|----------|
+| ------- | ---------------------- | ---------------- | ----------------- | ------------------ | -------- |
 | exp_001 | `static`               | 91 (71.1%)       | 32 (25.0%)        | 1 (0.8%)           | 4 (3.1%) |
 | exp_002 | `static`               | 71 (55.5%)       | 48 (37.5%)        | 7 (5.5%)           | 2 (1.6%) |
 | exp_003 | `static`               | 80 (62.5%)       | 40 (31.2%)        | 5 (3.9%)           | 3 (2.3%) |
@@ -718,3 +718,51 @@ from independent code paths and disagreed.
 - `scripts/reeval_sweep.py` — driver, reusable for any finished sweep.
 - `evaluate.py --eval-subdir <name>` — new flag (default `evaluation`)
   to write into a sibling directory without overwriting prior results.
+
+
+## June 21, 2026
+I've fixed a major discrepancy between the real cube and sim cube: the scale of their lettering was significantly different. 
+Verified with
+
+```bash
+$ISAAC_LAB_PATH/isaaclab.sh -p ./so101_rl/scripts/align_camera.py --no-robot --joint-pose ./so101_real/configs/calibration_pose.yaml --bundle scripts/pins/latest_bundle --robot-config ./so101_real/configs/robot.yaml
+```
+
+Next: tuning the image processing pipeline so that it approximately matches the real camera.
+
+Calibrated with 
+```bash
+$ISAAC_LAB_PATH/isaaclab.sh -p so101_rl/scripts/align_camera.py \
+--no-robot \
+--joint-pose so101_real/configs/calibration_pose.yaml \
+--bundle scripts/pins/latest_bundle \
+--robot-config so101_real/configs/robot.yaml \
+--dr-config so101_real/configs/dr_tuning.yaml
+```
+
+obtained
+```python
+CAMERA_TRANSLATE_VEC = (0.0024274926870509234, 0.06289257033167978, 0.018434688464961834)
+CAMERA_ROTATION_QUAT_WXYZ = (0.9653239238224213, -0.26103063132267995, 0.0029862271098858887, 0.0019529605770781968)
+```
+
+In Progress: Retrain up through 2nd GEN CNN from scratch. re-eval sim2real.
+
+```bash
+# Bootstrap -> CNN1
+./scripts/run.py pipeline \
+--config /home/matthew-evans/src/so101_sim_to_real/configs/pipeline_resnet18.yaml \
+--output /mnt/nas_1/matthew-evans/so101_sim_to_real/pipelines \
+--from train --to train-cnn \
+--display 2
+
+# CNN1 -> CNN2
+./scripts/run.py pipeline \
+--config /home/matthew-evans/src/so101_sim_to_real/configs/pipeline_resnet18_frozen_cnn.yaml \
+--output /mnt/nas_1/matthew-evans/so101_sim_to_real/pipelines \
+--from train --to train-cnn \
+--display 2
+--experiment #TO ADD \
+```
+
+*Note:* Might need to swap out pin-hole camera for wide angle camera lens.

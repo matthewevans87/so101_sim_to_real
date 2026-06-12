@@ -3,6 +3,7 @@
 from . import (
     calibrate_camera,
     camera_test,
+    capture_frame,
     compare_views,
     configure_camera,
     probe,
@@ -15,6 +16,7 @@ from . import (
 __all__ = [
     "calibrate_camera",
     "camera_test",
+    "capture_frame",
     "compare_views",
     "configure_camera",
     "probe",

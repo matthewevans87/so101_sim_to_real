@@ -29,6 +29,29 @@ def cmd_run(args) -> None:
     ctrl_config = ControllerConfig.load(args.robot_config)
     camera_config = CameraConfig.load(args.robot_config)
 
+    # Fill sim bounds from bundle when --use-bundle-joint-limits is requested
+    # or when any joint is missing sim bounds.
+    joint_names_in_config = list(robot_config.joint_limits.keys())
+    joints_missing_sim = [
+        n for n in joint_names_in_config
+        if not robot_config.joint_limits[n].has_sim
+    ]
+    if joints_missing_sim:
+        if not args.use_bundle_joint_limits:
+            raise ValueError(
+                f"robot.yaml joint_limits is missing 'sim' bounds for: {joints_missing_sim}.\n"
+                f"Either add 'sim: [lower_rad, upper_rad]' for each joint in robot.yaml,\n"
+                f"or pass --use-bundle-joint-limits to pull sim bounds from the bundle.\n"
+                f"Bundle: {args.bundle}"
+            )
+    if args.use_bundle_joint_limits:
+        robot_config = robot_config.with_sim_limits(
+            list(bundle.joint_lower_rad), list(bundle.joint_upper_rad)
+        )
+        print(
+            f"[so101_real] Sim joint limits filled from bundle: {bundle.bundle_dir.name}"
+        )
+
     runtime_joints, runtime_lower, runtime_upper = robot_config.joint_bounds()
     _check_bundle_robot_consistency(
         bundle=bundle,
@@ -289,5 +312,16 @@ def add_parser(sub) -> None:
         action="store_true",
         dest="ros",
         help="Publish measured joint states to /so101/joint_states (ROS2)",
+    )
+    p.add_argument(
+        "--use-bundle-joint-limits",
+        action="store_true",
+        dest="use_bundle_joint_limits",
+        help=(
+            "Fill missing 'sim' joint bounds from the bundle's embedded limits. "
+            "Required when robot.yaml::joint_limits entries omit the 'sim' field. "
+            "When present, the bundle's joint_lower_rad / joint_upper_rad override "
+            "any 'sim' values already in robot.yaml."
+        ),
     )
     p.set_defaults(func=cmd_run)

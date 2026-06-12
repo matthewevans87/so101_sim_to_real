@@ -23,7 +23,7 @@ from typing import Protocol
 
 import torch
 
-from .units import JointUnitConverter
+from so101.utils.units import JointUnitConverter
 
 
 class Policy(Protocol):

@@ -10,7 +10,7 @@ from typing import Optional
 def cmd_probe(args) -> None:
     import torch
     from ..robot import RobotConfig, So101Robot
-    from ..units import from_robot_config, JointParser
+    from so101.utils.units import from_robot_config, JointParser
 
     JOINTS = [
         "shoulder_pan",
@@ -36,11 +36,14 @@ def cmd_probe(args) -> None:
             f"active joint list {list(joint_names)}.  Re-order one to match."
         )
 
+    lero_scale = [robot_config.joint_limits[n].lero_scale for n in joint_names]
+    lero_offset = [robot_config.joint_limits[n].lero_offset_rad for n in joint_names]
     converter = from_robot_config(
         joint_names=joint_names,
         lower_rad=lower_rad,
         upper_rad=upper_rad,
-        joint_calibration=robot_config.joint_calibration,
+        lero_scale=lero_scale,
+        lero_offset_rad=lero_offset,
     )
 
     print(f"[probe] Connecting on {robot_config.port}...")
@@ -53,11 +56,11 @@ def cmd_probe(args) -> None:
         )
         print(f"  {'joint':<14} {'scale':>10} {'offset_rad':>12}")
         for name in joint_names:
-            cal = robot_config.joint_calibration.get(name)
-            if cal is None:
+            entry = robot_config.joint_limits.get(name)
+            if entry is None or not entry.has_real:
                 print(f"  {name:<14} {'-':>10} {'-':>12}  (identity)")
             else:
-                print(f"  {name:<14} {cal.scale:>10.6f} {cal.offset_rad:>12.6f}")
+                print(f"  {name:<14} {entry.lero_scale:>10.6f} {entry.lero_offset_rad:>12.6f}")
 
         show_norm = converter.has_joint_limits and args.unit == "norm"
 

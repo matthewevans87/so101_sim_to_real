@@ -143,12 +143,21 @@ def _connect_raw(robot_config_path: Path):
         from robot import RobotConfig, So101Robot  # type: ignore[no-redef]
 
     cfg = RobotConfig.load(robot_config_path)
-    cfg_raw = RobotConfig(
-        port=cfg.port,
-        calibration_file=cfg.calibration_file,
+    # Build a no-hardware-calibration config (identity transforms) so the raw
+    # LeRobot readings come through unmodified.  We blank out the 'real' bounds
+    # so JointUnitConverter only has identity lero transforms.
+    import dataclasses
+    from so101_real.robot import JointLimitEntry  # noqa: PLC0415
+
+    identity_limits = {
+        name: dataclasses.replace(entry, real_lower_rad=0.0, real_upper_rad=1.0)
+        for name, entry in cfg.joint_limits.items()
+    }
+    cfg_raw = dataclasses.replace(
+        cfg,
         max_delta_rad=cfg.max_delta_rad if cfg.max_delta_rad is not None else 0.087,
         reset_pose=None,
-        joint_calibration={},
+        joint_limits=identity_limits,
     )
     robot = So101Robot(cfg_raw, _JOINT_ORDER)
     robot.connect(dry_run=False)
@@ -210,10 +219,20 @@ def _run_single(args: argparse.Namespace) -> None:
         print(f"\n[ERROR] Could not read robot: {exc}")
         return
 
-    # ── Load existing calibration for reference ───────────────────────────────
+    # ── Load existing calibration for reference (to preserve existing scale) ──
     with open(args.robot_config) as f:
         config_data = yaml.safe_load(f)
-    existing_cal = config_data.get("joint_calibration") or {}
+    jl_raw = config_data.get("joint_limits") or {}
+
+    def _existing_lero_scale(name: str) -> float:
+        entry = jl_raw.get(name, {})
+        sim = entry.get("sim")
+        real = entry.get("real")
+        if sim and real:
+            span_sim = sim[1] - sim[0]
+            span_real = real[1] - real[0]
+            return span_sim / span_real if span_real != 0 else 1.0
+        return 1.0
 
     # ── Print comparison table ─────────────────────────────────────────────────
     print()
@@ -223,7 +242,7 @@ def _run_single(args: argparse.Namespace) -> None:
     )
     print("-" * 72)
 
-    suggested_cal: dict[str, dict] = {}
+    suggested: dict[str, dict] = {}
     for name in _JOINT_ORDER:
         lero_deg = positions_deg[name]
         sim_d = sim_deg[name]
@@ -243,29 +262,30 @@ def _run_single(args: argparse.Namespace) -> None:
         )
 
         if abs_delta >= 2.0:
-            existing = existing_cal.get(name, {})
-            scale = existing.get("scale", 1.0)
-            offset_deg = sim_d - scale * lero_deg
-            suggested_cal[name] = {
-                "scale": round(scale, 6),
-                "offset_rad": round(math.radians(offset_deg), 6),
-            }
+            scale = _existing_lero_scale(name)
+            # With a single measurement we can only fix the offset; scale unchanged.
+            # Rewrite as: real stop at sim_d degrees means the real value that
+            # maps TO sim_d is lero_deg.  But single-point can't fix both.
+            # Emit a note to use sweep instead.
+            suggested[name] = {"lero_deg": lero_deg, "sim_deg": sim_d}
 
     print()
-    if suggested_cal:
-        print("Suggested joint_calibration (paste into robot.yaml):\n")
-        print("joint_calibration:")
-        for name, entry in suggested_cal.items():
-            print(f"  {name}:")
-            print(f"    scale: {entry['scale']}")
-            print(f"    offset_rad: {entry['offset_rad']}")
-        print()
+    if suggested:
         print(
-            "NOTE: Scale=1.0 is assumed (single measurement point).\n"
-            "Use --mode sweep to derive scale empirically via two-stop calibration."
+            "Joints outside 2° tolerance.  Single-pose measurement cannot derive\n"
+            "reliable 'real' bounds — run --mode sweep for a proper calibration.\n\n"
+            "Approximate diagnosis (use sweep to get accurate values):\n"
+        )
+        for name, info in suggested.items():
+            print(
+                f"  {name}: raw LeRobot={info['lero_deg']:+.2f}°  sim={info['sim_deg']:+.2f}°"
+            )
+        print(
+            "\nRun:  python -m so101_real.joint_calibrate --mode sweep "
+            "--robot-config <path>"
         )
     else:
-        print("All joints within 2° tolerance — no additional corrections needed.")
+        print("All joints within 2° tolerance — no corrections needed.")
     print()
 
 
@@ -294,7 +314,7 @@ def _load_joint_limits(args: argparse.Namespace) -> dict[str, dict[str, float]]:
         print(f"[joint limits] Loaded from {jc_path}")
         return limits
 
-    # Fall back to robot.yaml::joint_limits
+    # Fall back to robot.yaml::joint_limits (new unified schema)
     with open(args.robot_config) as f:
         config_data = yaml.safe_load(f)
     raw = config_data.get("joint_limits")
@@ -306,9 +326,15 @@ def _load_joint_limits(args: argparse.Namespace) -> dict[str, dict[str, float]]:
         )
     limits: dict[str, dict[str, float]] = {}
     for name, entry in raw.items():
+        sim = entry.get("sim") if isinstance(entry, dict) else None
+        if sim is None:
+            raise ValueError(
+                f"joint_limits[{name!r}] is missing 'sim' bounds in robot.yaml.\n"
+                f"Add 'sim: [lower_rad, upper_rad]' or pass --joint-config."
+            )
         limits[name] = {
-            "lower_rad": float(entry["lower_rad"]),
-            "upper_rad": float(entry["upper_rad"]),
+            "lower_rad": float(sim[0]),
+            "upper_rad": float(sim[1]),
         }
     print(f"[joint limits] Loaded from {args.robot_config} :: joint_limits")
     return limits
@@ -336,11 +362,31 @@ def _run_sweep(args: argparse.Namespace) -> None:
         print(f"[ERROR] {exc}")
         return
 
-    # Load existing calibration to detect sign-reversed joints so we can
-    # give correct movement directions.
+    # Load existing joint_limits to detect sign-reversed joints and predict targets.
     with open(args.robot_config) as f:
         config_data = yaml.safe_load(f)
-    existing_cal = config_data.get("joint_calibration") or {}
+    jl_raw = config_data.get("joint_limits") or {}
+
+    def _existing_scale(jname: str) -> float:
+        """Derive scale from existing sim/real bounds, or default to 1.0."""
+        entry = jl_raw.get(jname, {})
+        sim = entry.get("sim")
+        real = entry.get("real")
+        if sim and real:
+            span_sim = sim[1] - sim[0]
+            span_real = real[1] - real[0]
+            return span_sim / span_real if span_real != 0 else 1.0
+        return 1.0
+
+    def _existing_offset(jname: str) -> float:
+        """Derive offset_rad from existing sim/real bounds, or default to 0.0."""
+        entry = jl_raw.get(jname, {})
+        sim = entry.get("sim")
+        real = entry.get("real")
+        if sim and real:
+            scale = _existing_scale(jname)
+            return sim[0] - scale * real[0]
+        return 0.0
 
     # Show the limits we'll use and warn about reversed joints up front.
     print(f"{'Joint':15s}  {'Sim lower':>12s}  {'Sim upper':>12s}  Note")
@@ -350,7 +396,7 @@ def _run_sweep(args: argparse.Namespace) -> None:
         if not lim:
             print(f"{name:15s}  (no limits — will skip)")
             continue
-        scale_sign = existing_cal.get(name, {}).get("scale", 1.0)
+        scale_sign = _existing_scale(name)
         note = "[REVERSED]" if scale_sign < 0 else ""
         print(
             f"{name:15s}  {math.degrees(lim['lower_rad']):+10.3f}°  "
@@ -394,8 +440,8 @@ def _run_sweep(args: argparse.Namespace) -> None:
             sim_upper_deg = math.degrees(sim_upper_rad)
 
             # Determine expected lerobot direction from existing calibration
-            existing_scale = existing_cal.get(joint, {}).get("scale", 1.0)
-            reversed_joint = existing_scale < 0
+            existing_scale_val = _existing_scale(joint)
+            reversed_joint = existing_scale_val < 0
 
             if reversed_joint:
                 # sim-lower corresponds to positive lerobot, sim-upper to negative
@@ -423,13 +469,13 @@ def _run_sweep(args: argparse.Namespace) -> None:
                 step2_sim_rad = sim_upper_rad
 
             # Build direction hints with predicted targets from existing calibration.
-            existing_offset = existing_cal.get(joint, {}).get("offset_rad", 0.0)
+            existing_offset_val = _existing_offset(joint)
             try:
                 pred1_deg = math.degrees(
-                    (step1_sim_rad - existing_offset) / existing_scale
+                    (step1_sim_rad - existing_offset_val) / existing_scale_val
                 )
                 pred2_deg = math.degrees(
-                    (step2_sim_rad - existing_offset) / existing_scale
+                    (step2_sim_rad - existing_offset_val) / existing_scale_val
                 )
                 step1_hint = (
                     f"↑ INCREASING  (aim for ~{pred1_deg:+.1f}°)"
@@ -534,8 +580,12 @@ def _run_sweep(args: argparse.Namespace) -> None:
                 "offset_rad": round(offset_rad, 6),
                 "_lero_lower_deg": round(math.degrees(lero_at_sim_lower), 4),
                 "_lero_upper_deg": round(math.degrees(lero_at_sim_upper), 4),
+                "_lero_lower_rad": round(lero_at_sim_lower, 6),
+                "_lero_upper_rad": round(lero_at_sim_upper, 6),
                 "_sim_lower_deg": round(sim_lower_deg, 4),
                 "_sim_upper_deg": round(sim_upper_deg, 4),
+                "_sim_lower_rad": round(sim_lower_rad, 6),
+                "_sim_upper_rad": round(sim_upper_rad, 6),
                 "_date": today,
             }
 
@@ -550,18 +600,21 @@ def _run_sweep(args: argparse.Namespace) -> None:
 
     # ── Print final YAML ──────────────────────────────────────────────────────
     print("\n\n" + "=" * 60)
-    print("SWEEP CALIBRATION RESULTS — paste into robot.yaml")
+    print("SWEEP CALIBRATION RESULTS — update joint_limits in robot.yaml")
     print("=" * 60 + "\n")
-    print("joint_calibration:")
+    print("joint_limits:")
     for joint, cal in suggested_cal.items():
         print(f"  {joint}:")
         print(
-            f"    # Sweep calibration ({cal['_date']}):"
-            f" lower stop lero={cal['_lero_lower_deg']:+.4f}° → sim={cal['_sim_lower_deg']:+.4f}°,"
-            f" upper stop lero={cal['_lero_upper_deg']:+.4f}° → sim={cal['_sim_upper_deg']:+.4f}°"
+            f"    # Sweep ({cal['_date']}):"
+            f" lero_lower={cal['_lero_lower_deg']:+.4f}°  lero_upper={cal['_lero_upper_deg']:+.4f}°"
         )
-        print(f"    scale: {cal['scale']}")
-        print(f"    offset_rad: {cal['offset_rad']}")
+        print(
+            f"    sim:  [{cal['_sim_lower_rad']:.6f},  {cal['_sim_upper_rad']:.6f}]"
+        )
+        print(
+            f"    real: [{cal['_lero_lower_rad']:.6f},  {cal['_lero_upper_rad']:.6f}]"
+        )
     print()
 
 

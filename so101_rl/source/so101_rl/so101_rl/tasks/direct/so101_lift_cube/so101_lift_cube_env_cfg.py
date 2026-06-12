@@ -4,6 +4,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import os
+from pathlib import Path
 
 from so101_rl.configurations.black_cube import BLACK_CUBE_CFG
 from so101_rl.configurations.debug import VIS_MARKER_CFG
@@ -13,10 +14,10 @@ from so101_rl.configurations.so101 import (
     MOVING_JAW_CONTACT_SENSOR_CFG,
 )
 from so101_rl.configurations.camera import (
-    CAMERA_CFG,
     OVERHEAD_CAMERA_CFG,
-    TILED_CAMERA_CFG,
+    build_gripper_tiled_camera_cfg,
 )
+from so101_rl.helpers.opencv_to_isaac_camera import load_intrinsics
 from so101_rl.configurations.table import TABLE_CFG, TABLE_CONTACT_SENSOR_CFG
 
 from isaaclab.assets import RigidObjectCfg
@@ -37,6 +38,18 @@ from so101_rl.configurations.so101_env_params import EpisodeStatsCfg, So101EnvPa
 from so101_rl.env_pipeline import KEY_OBS_DIMS
 
 _Y: So101EnvParams = So101EnvParams.load(os.environ["SO101_ENV_CONFIG"])
+
+# Load camera intrinsics from the path specified in the env YAML (sensors.camera).
+# This is the single authoritative source for lens parameters during training.
+_cam_sensor = _Y.sensors.camera
+_cam_intrinsics = load_intrinsics(
+    Path(os.environ.get("ISAAC_LAB_WORKSPACE_PATH", "/workspace"))
+    / _cam_sensor.intrinsics_path
+)
+_TILED_CAMERA_CFG = build_gripper_tiled_camera_cfg(
+    _cam_intrinsics, _cam_sensor.height, _cam_sensor.width
+)
+
 _ENABLE_OVERHEAD_CAMERA = os.environ.get(
     "SO101_ENABLE_OVERHEAD_CAMERA", "0"
 ).lower() in (
@@ -103,10 +116,8 @@ class So101LiftCubeCfg(DirectRLEnvCfg):
 
     cube_cfg: RigidObjectCfg = BLACK_CUBE_CFG.replace(prim_path="/World/envs/env_.*/Object")  # type: ignore
 
-    camera_cfg: TiledCameraCfg = TILED_CAMERA_CFG.replace(  # type: ignore
+    camera_cfg: TiledCameraCfg = _TILED_CAMERA_CFG.replace(  # type: ignore
         prim_path="/World/envs/env_.*/Robot/gripper/mountscrew/camera_mount/CameraXframe/gripper_camera",
-        height=_Y.sensors.camera.height,
-        width=_Y.sensors.camera.width,
     )
 
     overhead_camera_cfg: CameraCfg | None = (
@@ -223,3 +234,8 @@ class So101LiftCubeCfg(DirectRLEnvCfg):
             f"No reward list entry with type='{type_name}'. "
             f"Present types: {[e.get('type') for e in self.rewards]}"
         )
+
+
+# Public alias so so101_lift_cube_env.py can import the parsed params without
+# re-loading the YAML.
+SO101_ENV_PARAMS = _Y

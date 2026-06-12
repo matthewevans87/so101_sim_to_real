@@ -1,6 +1,7 @@
-"""units.py — Joint unit conversions for the SO-101 real-robot pipeline.
+"""units.py — Joint unit conversions shared across SO-101 sim and real pipelines.
 
-A single source of truth for the five units used across :mod:`so101_real`:
+A single source of truth for the five units used across :mod:`so101_real` and
+:mod:`so101_rl`:
 
 * ``"rad"``  — *canonical* radians, i.e. the URDF / training frame
   (zero-at-home, training conventions).  All policy-facing joint values
@@ -450,31 +451,60 @@ def from_robot_config(
     lower_rad: Optional[Sequence[float]] = None,
     upper_rad: Optional[Sequence[float]] = None,
     joint_calibration: Optional[dict] = None,
+    lero_scale: Optional[Sequence[float]] = None,
+    lero_offset_rad: Optional[Sequence[float]] = None,
 ) -> JointUnitConverter:
-    """Build a :class:`JointUnitConverter` from raw ``robot.yaml`` fragments.
+    """Build a :class:`JointUnitConverter` from ``robot.yaml`` data.
 
-    ``joint_calibration`` is the parsed dict from
-    :class:`so101_real.robot.RobotConfig.joint_calibration`; missing
-    joints default to identity ``(scale=1.0, offset_rad=0.0)``.  Pass
-    ``None`` to omit LeRobot support entirely.
+    Two calling conventions are supported:
+
+    **New (unified schema)** — pass pre-computed ``lero_scale`` and
+    ``lero_offset_rad`` lists (derived from ``JointLimitEntry.lero_scale`` /
+    ``lero_offset_rad`` properties)::
+
+        from_robot_config(joint_names, lero_scale=[...], lero_offset_rad=[...])
+
+    **Legacy** — pass the old ``joint_calibration`` dict keyed by joint name
+    with ``.scale`` / ``.offset_rad`` attributes (duck-typed)::
+
+        from_robot_config(joint_names, joint_calibration=cfg.joint_calibration)
+
+    ``lower_rad`` / ``upper_rad`` are always optional; supply them to enable
+    ``unit='norm'`` conversions.  ``lero_scale`` / ``lero_offset_rad`` take
+    precedence over ``joint_calibration`` if both are supplied.
     """
-    lero_scale: Optional[list[float]] = None
-    lero_offset: Optional[list[float]] = None
-    if joint_calibration is not None:
-        lero_scale = []
-        lero_offset = []
+    _lero_scale: Optional[list[float]] = None
+    _lero_offset: Optional[list[float]] = None
+
+    if lero_scale is not None and lero_offset_rad is not None:
+        # New calling convention — pre-computed lists, one entry per joint.
+        _lero_scale = [float(s) for s in lero_scale]
+        _lero_offset = [float(o) for o in lero_offset_rad]
+    elif joint_calibration is not None:
+        # Legacy calling convention — dict keyed by joint name.
+        _lero_scale = []
+        _lero_offset = []
         for name in joint_names:
             entry = joint_calibration.get(name)
             if entry is None:
-                lero_scale.append(1.0)
-                lero_offset.append(0.0)
+                _lero_scale.append(1.0)
+                _lero_offset.append(0.0)
             else:
-                lero_scale.append(float(entry.scale))
-                lero_offset.append(float(entry.offset_rad))
+                # Support both attribute access (dataclass) and dict access.
+                if hasattr(entry, "lero_scale"):
+                    _lero_scale.append(float(entry.lero_scale))
+                    _lero_offset.append(float(entry.lero_offset_rad))
+                elif hasattr(entry, "scale"):
+                    _lero_scale.append(float(entry.scale))
+                    _lero_offset.append(float(entry.offset_rad))
+                else:
+                    _lero_scale.append(float(entry["scale"]))
+                    _lero_offset.append(float(entry["offset_rad"]))
+
     return JointUnitConverter(
         joint_names=joint_names,
         lower_rad=lower_rad,
         upper_rad=upper_rad,
-        lero_scale=lero_scale,
-        lero_offset_rad=lero_offset,
+        lero_scale=_lero_scale,
+        lero_offset_rad=_lero_offset,
     )

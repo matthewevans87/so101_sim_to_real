@@ -263,30 +263,7 @@ def _resolve_experiment_inputs(
 
 def _build_deploy_image_pipeline(so101_params, vision_type: str) -> list[dict]:
     """Return ordered image pipeline steps for deployment (no DR augmentations)."""
-    steps: list[dict] = [{"type": "Uint8ToFloatCHW"}]
-
-    ve = so101_params.vision_encoder
-    if vision_type == "frozen_resnet18":
-        preshape = so101_params.domain_randomization.camera.feed.preshape_image
-        if preshape.enabled:
-            steps.append({"type": "Resize", "height": 224, "width": 224})
-        steps.append(
-            {
-                "type": "ImageNetNormalization",
-                "mean": [0.485, 0.456, 0.406],
-                "std": [0.229, 0.224, 0.225],
-            }
-        )
-    elif vision_type == "frozen_cnn":
-        steps.append(
-            {"type": "Resize", "height": ve.image_height, "width": ve.image_width}
-        )
-        # frozen_cnn expects [0, 1] — only Clamp, no ImageNet normalization
-    else:
-        raise ValueError(f"Unknown vision_encoder.type: {vision_type!r}")
-
-    steps.append({"type": "Clamp", "min": 0.0, "max": 1.0})
-    return steps
+    return [{"type": "Uint8ToFloatCHW"}]
 
 
 def _extract_backbone_cfg(so101_params) -> dict | None:
@@ -466,6 +443,24 @@ def main(
         cnn_checkpoint_path = cnn_dest
         print(f"[export_bundle] Saved cnn_backbone.pt → {cnn_dest}")
 
+    # ── Copy camera intrinsics (if model == "opencv_pinhole") ────────────────
+    camera_intrinsics_file: str | None = None
+    camera_cfg = so101_params.sensors.camera
+    if camera_cfg.model == "opencv_pinhole":
+        workspace_path = os.environ.get("ISAAC_LAB_WORKSPACE_PATH", "/workspace")
+        intrinsics_src = Path(workspace_path) / camera_cfg.intrinsics_path
+        if not intrinsics_src.is_file():
+            raise FileNotFoundError(
+                f"Camera intrinsics file not found: {intrinsics_src}\n"
+                "Run the calibration pipeline first:\n"
+                "  python -m so101_real calibrate-camera --solve\n"
+                "Then set sensors.camera.intrinsics_path in the env config YAML."
+            )
+        intrinsics_dest = output_dir / "camera_intrinsics.yaml"
+        shutil.copy2(intrinsics_src, intrinsics_dest)
+        camera_intrinsics_file = "camera_intrinsics.yaml"
+        print(f"[export_bundle] Saved camera_intrinsics.yaml → {intrinsics_dest}")
+
     # ── Save deploy_image_pipeline.yaml ──────────────────────────────────────
     pipeline_steps = _build_deploy_image_pipeline(so101_params, vision_type)
     pipeline_path = output_dir / "deploy_image_pipeline.yaml"
@@ -509,6 +504,7 @@ def main(
         "cnn_backbone_file": "cnn_backbone.pt" if vision_type == "frozen_cnn" else None,
         "deploy_image_pipeline_file": "deploy_image_pipeline.yaml",
         "joint_config_file": "joint_config.yaml",
+        "camera_intrinsics_file": camera_intrinsics_file,
         "active_joints": active_joints,
         "joint_lower_rad": joint_lower_rad,
         "joint_upper_rad": joint_upper_rad,

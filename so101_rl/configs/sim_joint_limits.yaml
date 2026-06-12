@@ -1,0 +1,23 @@
+# sim_joint_limits.yaml — empirically settled SO-101 sim joint bounds.
+# Generated 2026-06-05 by so101_rl/scripts/calibrate_sim_joints.py
+# settled = position recorded after commanding each PhysX limit.
+# physx   = USD/PhysX declared limit (what the training env uses for norm).
+joint_limits:
+  shoulder_pan:
+    # settled: [-1.895069, 1.895066]  (timeout/timeout)  physx: [-1.919860, 1.919860]
+    sim:  [-1.919860,  1.919860]
+  shoulder_lift:
+    # settled: [-1.737014, 1.733237]  (timeout/timeout)  physx: [-1.745330, 1.745330]
+    sim:  [-1.745330,  1.745330]
+  elbow_flex:
+    # settled: [-1.671731, 1.664563]  (timeout/timeout)  physx: [-1.690000, 1.690000]
+    sim:  [-1.690000,  1.690000]
+  wrist_flex:
+    # settled: [-1.633245, 1.633228]  (timeout/timeout)  physx: [-1.658060, 1.658060]
+    sim:  [-1.658060,  1.658060]
+  wrist_roll:
+    # settled: [-2.718828, 2.816207]  (timeout/timeout)  physx: [-2.743850, 2.841210]
+    sim:  [-2.743850,  2.841210]
+  gripper:
+    # settled: [-0.166200, 1.736996]  (timeout/timeout)  physx: [-0.174533, 1.745330]
+    sim:  [-0.174533,  1.745330]

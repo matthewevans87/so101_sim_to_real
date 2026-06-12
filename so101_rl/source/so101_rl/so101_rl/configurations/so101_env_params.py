@@ -562,11 +562,6 @@ class ActionRewardCfg(RewardCfg):
 
 
 @dataclass
-class PreshapeImageCfg:
-    enabled: bool
-
-
-@dataclass
 class GaussianNoiseCfg:
     enabled: bool
     std_range: list[float]
@@ -586,7 +581,6 @@ class ContrastCfg:
 
 @dataclass
 class CameraFeedCfg:
-    preshape_image: PreshapeImageCfg
     gaussian_noise: GaussianNoiseCfg
     brightness: BrightnessCfg
     contrast: ContrastCfg
@@ -722,6 +716,17 @@ class DomainRandomizationCfg:
 class CameraSensorCfg:
     height: int
     width: int
+    model: str
+    """Camera lens distortion model. Options:
+    - ``"opencv_pinhole"`` — apply OpenCV pinhole (Brown-Conrady) distortion using
+      the ``OmniLensDistortionOpenCvPinholeAPI`` USD schema.  Intrinsics are loaded
+      from ``intrinsics_path``.
+    - ``"pinhole"`` — no lens distortion (ideal pinhole, faster, no intrinsics needed).
+    """
+    intrinsics_path: str
+    """Path to the ``camera_intrinsics.yaml`` produced by ``calibrate-camera --solve``.
+    Resolved relative to the ``ISAAC_LAB_WORKSPACE_PATH`` environment variable.
+    Only used when ``model == "opencv_pinhole"``."""
 
 
 @dataclass

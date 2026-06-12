@@ -7,6 +7,10 @@ import torch.nn as nn
 from so101.utils.feature_extraction.spatial_softmax import (
     SpatialSoftmax,
 )
+from so101.utils.image_processing.image_pipeline import (
+    ClampPipelineStep,
+    ResizePipelineStep,
+)
 
 
 class VisionFeatureExtractor(ABC):
@@ -46,7 +50,31 @@ class ResNet18SpatialSoftmaxFeatureExtractor(VisionFeatureExtractor):
 
         self._spatial_softmax = SpatialSoftmax().to(self.device)
 
+        # ImageNet normalisation constants — stored as plain tensors so they
+        # move to the right device lazily in extract() without being treated
+        # as learnable parameters.
+        self._imagenet_mean = torch.tensor(
+            [0.485, 0.456, 0.406], dtype=torch.float32
+        ).view(1, 3, 1, 1)
+        self._imagenet_std = torch.tensor(
+            [0.229, 0.224, 0.225], dtype=torch.float32
+        ).view(1, 3, 1, 1)
+
+        # Preprocessing owned by the extractor: Clamp → Resize to ImageNet resolution.
+        self._clamp = ClampPipelineStep(0.0, 1.0)
+        self._resize = ResizePipelineStep((224, 224))
+
     def extract(self, images: torch.Tensor) -> torch.Tensor:
+        # Clamp and resize before normalisation.  images is (N, 3, H, W) float
+        # produced by the shared pipeline (Uint8ToFloatCHW → DR augmentations).
+        images = self._clamp.process(images)
+        images = self._resize.process(images)
+
+        # Apply ImageNet normalisation.
+        mean = self._imagenet_mean.to(images.device)
+        std = self._imagenet_std.to(images.device)
+        images = (images - mean) / std
+
         # Extract features with frozen ResNet
         with torch.inference_mode():
             conv_feats = self._vision_backbone(images)  # (N, C, Hc, Wc)
@@ -73,7 +101,7 @@ class CnnSpatialSoftmaxFeatureExtractor(VisionFeatureExtractor):
         device: PyTorch device string (e.g. ``"cuda:0"``).
     """
 
-    def __init__(self, model: "MultiTaskCnn", device: str = "cuda"):
+    def __init__(self, model: "MultiTaskCnn", device: str = "cuda", target_size: tuple[int, int] = (108, 192)):
         from so101.model.model import (
             MultiTaskCnn,
         )  # noqa: F811 (deferred to avoid circular import)
@@ -93,7 +121,13 @@ class CnnSpatialSoftmaxFeatureExtractor(VisionFeatureExtractor):
         self._vision_backbone = self._backbone._conv_trunk
         self._spatial_softmax = SpatialSoftmax().to(self.device)
 
+        # Preprocessing owned by the extractor: Clamp → Resize to policy resolution.
+        self._clamp = ClampPipelineStep(0.0, 1.0)
+        self._resize = ResizePipelineStep(target_size)
+
     def extract(self, images: torch.Tensor) -> torch.Tensor:
+        images = self._clamp.process(images)
+        images = self._resize.process(images)
         with torch.inference_mode():
             conv_feats = self._vision_backbone(images)  # (N, channels[-1], Hc, Wc)
             return self._spatial_softmax(conv_feats)  # (N, 2*channels[-1])

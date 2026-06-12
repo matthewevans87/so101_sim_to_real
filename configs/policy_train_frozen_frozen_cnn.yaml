@@ -345,8 +345,6 @@ terminations:
 domain_randomization:
   camera:
     feed:
-      preshape_image:
-        enabled: false
       gaussian_noise:
         enabled: true
         std_range: [0.005, 0.015]
@@ -417,6 +415,8 @@ sensors:
   camera:
     height: 108
     width: 192
+    model: opencv_pinhole
+    intrinsics_path: so101_real/configs/camera_intrinsics.yaml
   gripper_contact:
     debug_vis: false
   moving_jaw_contact:
@@ -452,12 +452,13 @@ observations:
   actor_obs_metrics: []
   telemetry_metrics:
     - gripper_cube_alignment
+    - cube_rot6d_gz
 
 vision_encoder:
   # 'frozen_resnet18' — frozen pretrained ResNet18 + SpatialSoftmax (1024-D)
   # 'frozen_cnn'      — frozen pretrained CNN + SpatialSoftmax (2×channels[-1]-D = 1024-D)
   #                     Model weights loaded via --cnn_checkpoint.
-  type: frozen_resnet18
+  type: frozen_cnn
   # Image dimensions passed to the CNN. The env's ResizePipelineStep resizes to these.
   # 16:9 aspect ratio matching the physical Arducam 1080P (1920x1080) camera.
   # 108x192 is a 10x downscale; a no-op during sim training when the camera renders at this size.

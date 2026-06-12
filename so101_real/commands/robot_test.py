@@ -8,7 +8,7 @@ import time
 def cmd_robot_test(args) -> None:
     import torch
     from ..robot import RobotConfig, So101Robot
-    from ..units import JointUnitConverter
+    from so101.utils.units import JointUnitConverter
 
     config = RobotConfig.load(args.robot_config)
     joint_names, lower_list, upper_list = config.joint_bounds()

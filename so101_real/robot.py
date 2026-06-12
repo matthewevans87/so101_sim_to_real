@@ -5,18 +5,30 @@ Wraps the LeRobot SO101Follower API.  External communication uses degrees
 (zero-at-home, matching the URDF the policy was trained against).  There is
 only one internal frame; no simulator is involved at runtime.
 
-Joint calibration
------------------
-LeRobot's per-motor calibration uses its own zero-points and scales that do
-not match the canonical (URDF) frame.  The ``joint_calibration`` section of
-``robot.yaml`` corrects this via a per-joint linear transform applied after
-reading and before writing joint positions::
+Joint limits schema
+-------------------
+Each joint in ``robot.yaml::joint_limits`` carries two sub-fields:
 
-    q_rad     = scale * q_lerobot_rad + offset_rad          # read
-    q_lerobot = (q_rad - offset_rad) / scale                 # send
+``sim: [lower, upper]``
+    Canonical URDF radians — the normalization range the policy was trained
+    against.  Required for ``unit="norm"`` conversion.  When running
+    ``python -m so101_real run``, these values are checked against the
+    bundle's embedded limits; pass ``--use-bundle-joint-limits`` to fill them
+    automatically from the bundle rather than from ``robot.yaml``.
 
-Only joints listed in ``joint_calibration`` are corrected; unlisted joints
-use the identity transform (scale=1.0, offset=0.0).
+``real: [lower, upper]``
+    LeRobot motor radians at the physical hard stops, measured by
+    ``joint_calibrate.py --mode sweep``.  From these two stops the
+    calibration transform is derived at parse time::
+
+        scale      = (sim_hi - sim_lo) / (real_hi - real_lo)
+        offset_rad = sim_lo - scale * real_lo
+        q_rad      = scale * q_lerobot_rad + offset_rad   (read)
+        q_lerobot  = (q_rad - offset_rad) / scale          (send)
+
+Both sub-fields are required for hardware-facing commands.  ``sim`` alone
+(without ``real``) is accepted when the config is used for sim-only tooling
+(``align_camera.py``, ``calibrate_sim_joints.py``).
 """
 
 from __future__ import annotations
@@ -29,34 +41,89 @@ from typing import Optional
 import torch
 import yaml
 
-from .units import JointUnitConverter, from_robot_config
+from so101.utils.units import JointUnitConverter, from_robot_config
 
 
 @dataclass
 class JointLimitEntry:
-    """Physical range of a single joint in canonical radians."""
+    """Per-joint limits unifying sim normalization bounds and real-robot calibration.
 
-    lower_rad: float
-    """Lower joint limit in canonical radians."""
+    The ``sim`` field provides the canonical URDF radian bounds used for
+    ``norm`` conversion.  The ``real`` field records the LeRobot motor
+    positions (in radians) at the physical hard stops; from these the
+    ``lero_scale`` / ``lero_offset_rad`` calibration transform is derived.
 
-    upper_rad: float
-    """Upper joint limit in canonical radians."""
-
-
-@dataclass
-class JointCalibrationEntry:
-    """Per-joint linear map from LeRobot's native frame to canonical radians.
-
-    Applied on read as ``q_rad = scale * q_lerobot_rad + offset_rad`` and
-    inverted on send.  A negative ``scale`` indicates the LeRobot motor
-    rotates in the opposite direction to the canonical (URDF) convention.
+    Both fields are optional at the dataclass level so that sim-only tooling
+    can load configs without ``real`` data; the ``So101Robot`` constructor
+    validates that ``has_real`` is True before connecting to hardware.
     """
 
-    scale: float
-    """Multiplier applied to the LeRobot radian value when reading."""
+    sim_lower_rad: Optional[float]
+    """Lower bound in canonical (URDF) radians.  Required for ``unit='norm'``."""
 
-    offset_rad: float
-    """Additive offset (radians) applied after scaling when reading."""
+    sim_upper_rad: Optional[float]
+    """Upper bound in canonical (URDF) radians.  Required for ``unit='norm'``."""
+
+    real_lower_rad: Optional[float]
+    """LeRobot motor position (rad) at the lower physical stop (from sweep)."""
+
+    real_upper_rad: Optional[float]
+    """LeRobot motor position (rad) at the upper physical stop (from sweep)."""
+
+    @property
+    def has_sim(self) -> bool:
+        return self.sim_lower_rad is not None and self.sim_upper_rad is not None
+
+    @property
+    def has_real(self) -> bool:
+        return self.real_lower_rad is not None and self.real_upper_rad is not None
+
+    @property
+    def lower_rad(self) -> float:
+        """Canonical lower bound (sim frame).  Raises if ``sim`` is absent."""
+        if self.sim_lower_rad is None:
+            raise ValueError(
+                "joint_limits entry is missing 'sim' bounds. "
+                "Add sim: [lower, upper] or pass --use-bundle-joint-limits."
+            )
+        return self.sim_lower_rad
+
+    @property
+    def upper_rad(self) -> float:
+        """Canonical upper bound (sim frame).  Raises if ``sim`` is absent."""
+        if self.sim_upper_rad is None:
+            raise ValueError(
+                "joint_limits entry is missing 'sim' bounds. "
+                "Add sim: [lower, upper] or pass --use-bundle-joint-limits."
+            )
+        return self.sim_upper_rad
+
+    @property
+    def lero_scale(self) -> float:
+        """``scale`` in ``q_rad = scale * q_lrad + offset``.
+
+        Derived from sim and real bounds:
+        ``scale = (sim_hi - sim_lo) / (real_hi - real_lo)``.
+        Raises if either ``sim`` or ``real`` is absent.
+        """
+        if not self.has_sim:
+            raise ValueError("lero_scale requires 'sim' bounds in joint_limits.")
+        if not self.has_real:
+            raise ValueError("lero_scale requires 'real' bounds in joint_limits.")
+        span_real = self.real_upper_rad - self.real_lower_rad
+        if span_real == 0.0:
+            raise ValueError(
+                "real[upper] == real[lower] — cannot derive scale (zero span)."
+            )
+        return (self.sim_upper_rad - self.sim_lower_rad) / span_real
+
+    @property
+    def lero_offset_rad(self) -> float:
+        """``offset_rad`` in ``q_rad = scale * q_lrad + offset``.
+
+        Derived as ``sim_lo - scale * real_lo``.
+        """
+        return self.sim_lower_rad - self.lero_scale * self.real_lower_rad
 
 
 @dataclass
@@ -100,16 +167,13 @@ class RobotConfig:
     """Optional reset pose applied at the start of every episode.  ``None`` if the
     ``reset_pose`` section is absent from the config file."""
 
-    joint_calibration: dict[str, JointCalibrationEntry]
-    """Per-joint linear transforms correcting LeRobot's native frame into
-    canonical radians.  Keyed by joint name; missing joints use identity."""
-
     joint_limits: dict[str, JointLimitEntry]
-    """Physical range of each joint in canonical radians.  Required in
-    robot.yaml; used for normalised-action mapping and safety checks."""
+    """Per-joint limits in the unified ``sim``/``real`` schema.  Keyed by joint
+    name in YAML iteration order.  Both ``sim`` and ``real`` are required for
+    hardware commands; ``sim`` alone is accepted for sim-only tooling."""
 
     def joint_bounds(self) -> tuple[list[str], list[float], list[float]]:
-        """Return ``(joint_names, lower_rad, upper_rad)`` in YAML iteration order."""
+        """Return ``(joint_names, sim_lower_rad, sim_upper_rad)`` in YAML order."""
         names: list[str] = []
         lowers: list[float] = []
         uppers: list[float] = []
@@ -118,6 +182,34 @@ class RobotConfig:
             lowers.append(entry.lower_rad)
             uppers.append(entry.upper_rad)
         return names, lowers, uppers
+
+    def with_sim_limits(
+        self, sim_lower_rad: list[float], sim_upper_rad: list[float]
+    ) -> "RobotConfig":
+        """Return a copy of this config with ``sim`` bounds filled from a bundle.
+
+        The bundle's ``joint_lower_rad`` / ``joint_upper_rad`` are in the same
+        iteration order as ``self.joint_limits``.  Any joint that already has
+        ``sim`` bounds set is overwritten.
+        """
+        import dataclasses
+
+        joint_names = list(self.joint_limits.keys())
+        if len(sim_lower_rad) != len(joint_names) or len(sim_upper_rad) != len(joint_names):
+            raise ValueError(
+                f"with_sim_limits: expected {len(joint_names)} bounds "
+                f"(one per joint in joint_limits), got "
+                f"{len(sim_lower_rad)} lower and {len(sim_upper_rad)} upper."
+            )
+        new_limits = {}
+        for i, name in enumerate(joint_names):
+            entry = self.joint_limits[name]
+            new_limits[name] = dataclasses.replace(
+                entry,
+                sim_lower_rad=sim_lower_rad[i],
+                sim_upper_rad=sim_upper_rad[i],
+            )
+        return dataclasses.replace(self, joint_limits=new_limits)
 
     @classmethod
     def load(cls, path: str | Path) -> "RobotConfig":
@@ -133,6 +225,19 @@ class RobotConfig:
                 f"Robot config uses the legacy key 'sim_joint_limits'.  Rename it"
                 f" to 'joint_limits' (same schema). Config path: {path}"
             )
+        if "joint_calibration" in data:
+            raise ValueError(
+                f"Robot config uses the removed 'joint_calibration' section.\n"
+                f"Migrate to the unified 'joint_limits' schema:\n\n"
+                f"  joint_limits:\n"
+                f"    shoulder_pan:\n"
+                f"      sim:  [<lower_rad>, <upper_rad>]   # URDF canonical radians\n"
+                f"      real: [<lower_rad>, <upper_rad>]   # LeRobot motor radians at stops\n"
+                f"    ...\n\n"
+                f"Run 'python -m so101_real.joint_calibrate --mode sweep' to re-measure\n"
+                f"'real' bounds, then update robot.yaml.\n"
+                f"Config path: {path}"
+            )
 
         robot = data.get("robot")
         if robot is None:
@@ -147,32 +252,7 @@ class RobotConfig:
                 f"Config path: {path}"
             )
 
-        # Parse joint_calibration (optional; defaults to identity for all joints)
-        joint_calibration: dict[str, JointCalibrationEntry] = {}
-        cal_data = data.get("joint_calibration") or {}
-        for joint_name, entry in cal_data.items():
-            # Reject legacy per-entry keys.
-            legacy = {"lero_to_sim_scale", "lero_to_sim_offset_rad"} & set(entry)
-            if legacy:
-                raise ValueError(
-                    f"joint_calibration[{joint_name!r}] uses legacy key(s) "
-                    f"{sorted(legacy)}. Rename 'lero_to_sim_scale' -> 'scale' and "
-                    f"'lero_to_sim_offset_rad' -> 'offset_rad'. Config path: {path}"
-                )
-            required_cal = {"scale", "offset_rad"}
-            missing_cal = required_cal - set(entry)
-            if missing_cal:
-                raise ValueError(
-                    f"joint_calibration[{joint_name!r}] is missing required keys: "
-                    f"{sorted(missing_cal)}\nConfig path: {path}"
-                )
-            joint_calibration[str(joint_name)] = JointCalibrationEntry(
-                scale=float(entry["scale"]),
-                offset_rad=float(entry["offset_rad"]),
-            )
-
-        # Parse joint_limits (required) — parsed before reset_pose so that
-        # unit="norm" conversion has the limits available.
+        # Parse joint_limits (required) — must use the unified sim/real schema.
         jl_raw = data.get("joint_limits")
         if not jl_raw:
             raise ValueError(
@@ -181,15 +261,49 @@ class RobotConfig:
             )
         joint_limits: dict[str, JointLimitEntry] = {}
         for jname, jentry in jl_raw.items():
-            missing_jl = {"lower_rad", "upper_rad"} - set(jentry)
-            if missing_jl:
+            # Detect old anonymous-list / lower_rad+upper_rad schema.
+            if isinstance(jentry, dict) and (
+                "lower_rad" in jentry or "upper_rad" in jentry
+            ):
                 raise ValueError(
-                    f"joint_limits[{jname!r}] is missing required keys: "
-                    f"{sorted(missing_jl)}\nConfig path: {path}"
+                    f"joint_limits[{jname!r}] uses the old 'lower_rad'/'upper_rad' "
+                    f"schema.  Migrate to the unified sim/real schema:\n\n"
+                    f"  {jname}:\n"
+                    f"    sim:  [<lower_rad>, <upper_rad>]\n"
+                    f"    real: [<lower_rad>, <upper_rad>]\n\n"
+                    f"Config path: {path}"
                 )
+            sim_lo: Optional[float] = None
+            sim_hi: Optional[float] = None
+            real_lo: Optional[float] = None
+            real_hi: Optional[float] = None
+            if isinstance(jentry, dict):
+                sim_raw = jentry.get("sim")
+                real_raw = jentry.get("real")
+                if sim_raw is not None:
+                    if not (isinstance(sim_raw, (list, tuple)) and len(sim_raw) == 2):
+                        raise ValueError(
+                            f"joint_limits[{jname!r}].sim must be a two-element list "
+                            f"[lower_rad, upper_rad]; got {sim_raw!r}. Config path: {path}"
+                        )
+                    sim_lo, sim_hi = float(sim_raw[0]), float(sim_raw[1])
+                    if sim_hi <= sim_lo:
+                        raise ValueError(
+                            f"joint_limits[{jname!r}].sim[1] must be > sim[0]; "
+                            f"got [{sim_lo}, {sim_hi}]. Config path: {path}"
+                        )
+                if real_raw is not None:
+                    if not (isinstance(real_raw, (list, tuple)) and len(real_raw) == 2):
+                        raise ValueError(
+                            f"joint_limits[{jname!r}].real must be a two-element list "
+                            f"[lower_rad, upper_rad]; got {real_raw!r}. Config path: {path}"
+                        )
+                    real_lo, real_hi = float(real_raw[0]), float(real_raw[1])
             joint_limits[str(jname)] = JointLimitEntry(
-                lower_rad=float(jentry["lower_rad"]),
-                upper_rad=float(jentry["upper_rad"]),
+                sim_lower_rad=sim_lo,
+                sim_upper_rad=sim_hi,
+                real_lower_rad=real_lo,
+                real_upper_rad=real_hi,
             )
 
         reset_pose: Optional[ResetPoseCfg] = None
@@ -241,7 +355,6 @@ class RobotConfig:
             calibration_file=str(robot["calibration_file"]),
             max_delta_rad=max_delta_rad,
             reset_pose=reset_pose,
-            joint_calibration=joint_calibration,
             joint_limits=joint_limits,
         )
 
@@ -265,19 +378,37 @@ class So101Robot:
         self._cfg = config
         self._joint_names = joint_names
         self._follower: Optional[object] = None
+
+        # Validate that all requested joints have 'real' bounds — required to
+        # derive the LeRobot calibration transform.
+        missing_real = [
+            n for n in joint_names
+            if n not in config.joint_limits or not config.joint_limits[n].has_real
+        ]
+        if missing_real:
+            raise ValueError(
+                f"So101Robot: joint_limits is missing 'real' bounds for: {missing_real}.\n"
+                f"Run 'python -m so101_real.joint_calibrate --mode sweep' and add\n"
+                f"'real: [lower_rad, upper_rad]' under each joint in robot.yaml."
+            )
+
+        # Build per-joint lero_scale / lero_offset_rad from the unified limits.
+        lero_scale = [config.joint_limits[n].lero_scale for n in joint_names]
+        lero_offset = [config.joint_limits[n].lero_offset_rad for n in joint_names]
+
         # Single source of truth for canonical ↔ LeRobot conversions.
         # All rad/deg/lrad/ldeg arithmetic lives in JointUnitConverter; this
         # class only knows about reading degrees off the bus and writing
         # degrees back to it.
         self._units = from_robot_config(
             joint_names=joint_names,
-            joint_calibration=config.joint_calibration,
+            lero_scale=lero_scale,
+            lero_offset_rad=lero_offset,
         )
 
-        if config.joint_calibration:
-            print(
-                f"[So101Robot] Joint calibrations active: {list(config.joint_calibration)}"
-            )
+        print(
+            f"[So101Robot] Calibration loaded for: {joint_names}"
+        )
 
     @property
     def units(self) -> "JointUnitConverter":

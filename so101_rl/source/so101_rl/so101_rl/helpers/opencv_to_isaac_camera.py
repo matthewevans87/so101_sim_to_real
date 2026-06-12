@@ -336,6 +336,53 @@ def apply_post_spawn_attrs(prim, post_spawn_usd_attrs: dict[str, float]) -> None
             prim.CreateAttribute(attr_name, Sdf.ValueTypeNames.Float).Set(float(value))
 
 
+def apply_opencv_pinhole_distortion(prim, intrinsics: dict[str, Any]) -> None:
+    """Apply the OpenCV pinhole (Brown-Conrady) distortion model to a USD camera prim.
+
+    Uses the ``OmniLensDistortionOpenCvPinholeAPI`` schema introduced in Isaac Sim 5.0,
+    which replaces the deprecated ``fisheyeRadTanThinPrism`` USD attributes.  Call this
+    once after the camera prim has been spawned (the prim must already exist in the stage).
+
+    Args:
+        prim: ``pxr.Usd.Prim`` of the camera (obtained via ``stage.GetPrimAtPath(...)``).
+        intrinsics: dict produced by :func:`load_intrinsics`.  Must contain
+            ``fx``, ``fy``, ``cx``, ``cy``, ``k1``, ``k2``, ``p1``, ``p2``, ``k3``,
+            ``image_width``, ``image_height``.
+    """
+    from pxr import Gf, Sdf
+
+    # Apply the API schema — registers all ``omni:lensdistortion:opencvPinhole:*`` attrs.
+    prim.ApplyAPI("OmniLensDistortionOpenCvPinholeAPI")
+    prim.GetAttribute("omni:lensdistortion:model").Set("opencvPinhole")
+
+    prefix = "omni:lensdistortion:opencvPinhole"
+
+    def _set(attr_name: str, value) -> None:
+        attr = prim.GetAttribute(attr_name)
+        if attr.IsValid():
+            attr.Set(value)
+        else:
+            if isinstance(value, Gf.Vec2i):
+                prim.CreateAttribute(attr_name, Sdf.ValueTypeNames.Int2).Set(value)
+            else:
+                prim.CreateAttribute(attr_name, Sdf.ValueTypeNames.Float).Set(float(value))
+
+    W = int(intrinsics["image_width"])
+    H = int(intrinsics["image_height"])
+    _set(f"{prefix}:imageSize", Gf.Vec2i(W, H))
+    _set(f"{prefix}:fx", float(intrinsics["fx"]))
+    _set(f"{prefix}:fy", float(intrinsics["fy"]))
+    _set(f"{prefix}:cx", float(intrinsics["cx"]))
+    _set(f"{prefix}:cy", float(intrinsics["cy"]))
+
+    # OpenCV pinhole coefficient order: [k1, k2, p1, p2, k3, k4, k5, k6, s1, s2, s3, s4]
+    # Our calibration (cv2.calibrateCamera, 5-coeff) produces k1/k2/p1/p2/k3; rest are 0.
+    for name in ("k1", "k2", "p1", "p2", "k3"):
+        _set(f"{prefix}:{name}", float(intrinsics[name]))
+    for name in ("k4", "k5", "k6", "s1", "s2", "s3", "s4"):
+        _set(f"{prefix}:{name}", 0.0)
+
+
 # ---------------------------------------------------------------------------
 # Self-test
 # ---------------------------------------------------------------------------

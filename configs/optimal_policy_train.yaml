@@ -298,8 +298,6 @@ terminations:
 domain_randomization:
   camera:
     feed:
-      preshape_image:
-        enabled: false
       gaussian_noise:
         enabled: false
         std_range: [0.01, 0.02]
@@ -358,6 +356,8 @@ sensors:
   camera:
     height: 108
     width: 192
+    model: opencv_pinhole
+    intrinsics_path: so101_real/configs/camera_intrinsics.yaml
   gripper_contact:
     debug_vis: false
   moving_jaw_contact:

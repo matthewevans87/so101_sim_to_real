@@ -23,7 +23,7 @@
 task: So101-LiftCube-v0
 
 # # [required] Environment config YAML for the train step
-# env_config: configs/baseline.yaml
+env_config: configs/policy_train_frozen_resnet18.yaml
 
 # [required] RNG seed — used by collect, curate, and train-cnn for reproducibility.
 # Must be an explicit integer; null is rejected at validation time.
@@ -54,7 +54,7 @@ collect:
 
   # Override num_envs for the collect step only.
   # More envs → faster collection. null inherits the value from env_config.
-  envs: 8
+  envs: 128
 
 # ── CNN parameters (curate + train-cnn) ──────────────────────────────────────
 

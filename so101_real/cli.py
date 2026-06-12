@@ -5,6 +5,7 @@ Subcommands (``python -m so101_real <cmd> --help`` for details):
     run                 Run a trained policy from a deploy bundle on the physical robot.
     run-static          Hold the arm at a fixed joint target (no bundle, no camera).
     camera-test         Display the live camera feed.
+    capture-frame       Capture a single still frame from the wrist camera to disk.
     calibrate-camera    Capture checkerboard frames / solve camera intrinsics.
     compare-views       Composite a real frame and a sim render for comparison.
     stream              Read joints and publish to /so101/joint_states (ROS2).
@@ -23,6 +24,7 @@ import argparse
 from .commands import (
     calibrate_camera,
     camera_test,
+    capture_frame,
     compare_views,
     configure_camera,
     probe,
@@ -42,6 +44,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_parser(sub)
     run_static.add_parser(sub)
     camera_test.add_parser(sub)
+    capture_frame.add_parser(sub)
     calibrate_camera.add_parser(sub)
     configure_camera.add_parser(sub)
     compare_views.add_parser(sub)
